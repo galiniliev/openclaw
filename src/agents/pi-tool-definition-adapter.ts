@@ -145,6 +145,27 @@ function buildToolExecutionErrorResult(params: {
   });
 }
 
+function isObjectSchemaWithNoRequiredParams(schema: unknown): boolean {
+  if (!isPlainObject(schema)) {
+    return false;
+  }
+  const type = schema.type;
+  if (type !== "object") {
+    return false;
+  }
+  if (!Object.prototype.hasOwnProperty.call(schema, "required")) {
+    return true;
+  }
+  return Array.isArray(schema.required) && schema.required.length === 0;
+}
+
+function normalizeNullParamsForNoArgObjectSchema(params: unknown, schema: unknown): unknown {
+  if (params !== null) {
+    return params;
+  }
+  return isObjectSchemaWithNoRequiredParams(schema) ? {} : params;
+}
+
 function splitToolExecuteArgs(args: ToolExecuteArgsAny): {
   toolCallId: string;
   params: unknown;
@@ -225,12 +246,12 @@ export function toToolDefinitions(tools: AnyAgentTool[]): ToolDefinition[] {
       parameters: tool.parameters,
       execute: async (...args: ToolExecuteArgs): Promise<AgentToolResult<unknown>> => {
         const { toolCallId, params, onUpdate, signal } = splitToolExecuteArgs(args);
-        let executeParams = params;
+        let executeParams = normalizeNullParamsForNoArgObjectSchema(params, tool.parameters);
         try {
           if (!beforeHookWrapped) {
             const hookOutcome = await runBeforeToolCallHook({
               toolName: name,
-              params,
+              params: executeParams,
               toolCallId,
             });
             if (hookOutcome.blocked) {
@@ -323,9 +344,10 @@ export function toClientToolDefinitions(
       parameters: func.parameters as ToolDefinition["parameters"],
       execute: async (...args: ToolExecuteArgs): Promise<AgentToolResult<unknown>> => {
         const { toolCallId, params } = splitToolExecuteArgs(args);
+        const normalizedParams = normalizeNullParamsForNoArgObjectSchema(params, func.parameters);
         const outcome = await runBeforeToolCallHook({
           toolName: func.name,
-          params,
+          params: normalizedParams,
           toolCallId,
           ctx: hookContext,
         });

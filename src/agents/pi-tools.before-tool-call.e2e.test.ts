@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ToolLoopDetectionConfig } from "../config/types.tools.js";
 import {
   onInternalDiagnosticEvent,
   onDiagnosticEvent,
@@ -36,13 +37,21 @@ describe("before_tool_call loop detection behavior", () => {
     hasHooks: ReturnType<typeof vi.fn>;
     runBeforeToolCall: ReturnType<typeof vi.fn>;
   };
-  const enabledLoopDetectionContext = {
+  const enabledLoopDetectionContext: {
+    agentId: string;
+    sessionKey: string;
+    loopDetection: ToolLoopDetectionConfig;
+  } = {
     agentId: "main",
     sessionKey: "main",
     loopDetection: { enabled: true },
   };
 
-  const disabledLoopDetectionContext = {
+  const disabledLoopDetectionContext: {
+    agentId: string;
+    sessionKey: string;
+    loopDetection: ToolLoopDetectionConfig;
+  } = {
     agentId: "main",
     sessionKey: "main",
     loopDetection: { enabled: false },
@@ -225,16 +234,33 @@ describe("before_tool_call loop detection behavior", () => {
     }
   });
 
-  it("keeps generic repeated calls warn-only below global breaker", async () => {
+  it("blocks generic repeated calls at the critical threshold", async () => {
     const { tool, params } = createGenericReadRepeatFixture();
 
-    for (let i = 0; i < CRITICAL_THRESHOLD + 5; i += 1) {
+    for (let i = 0; i < CRITICAL_THRESHOLD; i += 1) {
       await expect(tool.execute(`read-${i}`, params, undefined, undefined)).resolves.toBeDefined();
     }
+
+    await expect(
+      tool.execute(`read-${CRITICAL_THRESHOLD}`, params, undefined, undefined),
+    ).rejects.toThrow("CRITICAL");
   });
 
-  it("blocks generic repeated no-progress calls at global breaker threshold", async () => {
-    const { tool, params } = createGenericReadRepeatFixture();
+  it("still blocks at global breaker threshold when generic-repeat detector is disabled", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "same output" }],
+      details: { ok: true },
+    });
+    const tool = createWrappedTool("read", execute, {
+      ...enabledLoopDetectionContext,
+      loopDetection: {
+        ...enabledLoopDetectionContext.loopDetection,
+        detectors: {
+          genericRepeat: false,
+        },
+      },
+    });
+    const params = { path: "/tmp/file" };
 
     for (let i = 0; i < GLOBAL_CIRCUIT_BREAKER_THRESHOLD; i += 1) {
       await expect(tool.execute(`read-${i}`, params, undefined, undefined)).resolves.toBeDefined();
@@ -250,12 +276,16 @@ describe("before_tool_call loop detection behavior", () => {
       async (emitted) => {
         const { tool, params } = createGenericReadRepeatFixture();
 
-        for (let i = 0; i < 21; i += 1) {
+        for (let i = 0; i < CRITICAL_THRESHOLD; i += 1) {
           await tool.execute(`read-bucket-${i}`, params, undefined, undefined);
         }
 
+        await expect(
+          tool.execute(`read-bucket-${CRITICAL_THRESHOLD}`, params, undefined, undefined),
+        ).rejects.toThrow("CRITICAL");
+
         const genericWarns = emitted.filter((evt) => evt.detector === "generic_repeat");
-        expect(genericWarns.map((evt) => evt.count)).toEqual([10, 20]);
+        expect(genericWarns.map((evt) => evt.count)).toEqual([10]);
       },
       (evt) => evt.level === "warning",
     );

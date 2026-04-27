@@ -546,6 +546,22 @@ export function detectToolCallLoop(
   if (
     !knownPollTool &&
     resolvedConfig.detectors.genericRepeat &&
+    recentCount >= resolvedConfig.criticalThreshold
+  ) {
+    log.error(`Critical generic loop detected: ${toolName} called ${recentCount} times`);
+    return {
+      stuck: true,
+      level: "critical",
+      detector: "generic_repeat",
+      count: recentCount,
+      message: `CRITICAL: You have called ${toolName} ${recentCount} times with identical arguments. This appears to be a stuck loop. Session execution blocked to prevent runaway retries.`,
+      warningKey: `generic:${toolName}:${currentHash}`,
+    };
+  }
+
+  if (
+    !knownPollTool &&
+    resolvedConfig.detectors.genericRepeat &&
     recentCount >= resolvedConfig.warningThreshold
   ) {
     log.warn(`Loop warning: ${toolName} called ${recentCount} times with identical arguments`);

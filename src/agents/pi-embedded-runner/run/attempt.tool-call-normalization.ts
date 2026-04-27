@@ -583,11 +583,31 @@ function normalizeToolCallIdsInMessage(message: unknown): void {
   }
 }
 
+function normalizeNullToolCallParamsBlock(block: unknown): void {
+  if (!block || typeof block !== "object") {
+    return;
+  }
+  const typedBlock = block as { type?: unknown; arguments?: unknown; input?: unknown };
+  if (!isToolCallBlockType(typedBlock.type)) {
+    return;
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(typedBlock, "arguments") &&
+    typedBlock.arguments === null
+  ) {
+    typedBlock.arguments = {};
+  }
+  if (Object.prototype.hasOwnProperty.call(typedBlock, "input") && typedBlock.input === null) {
+    typedBlock.input = {};
+  }
+}
+
 function trimWhitespaceFromToolCallNamesInMessage(
   message: unknown,
   allowedToolNames?: Set<string>,
 ): void {
   visitObjectContentBlocks(message, (block) => {
+    normalizeNullToolCallParamsBlock(block);
     const typedBlock = block as { type?: unknown; name?: unknown; id?: unknown };
     if (!isToolCallBlockType(typedBlock.type)) {
       return;

@@ -1,6 +1,6 @@
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { Type } from "typebox";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ClientToolDefinition } from "./pi-embedded-runner/run/params.js";
 import {
   CLIENT_TOOL_NAME_CONFLICT_PREFIX,
@@ -104,6 +104,56 @@ describe("pi tool definition adapter", () => {
     });
     expect(result.content[0]).toMatchObject({ type: "text" });
     expect((result.content[0] as { text?: string }).text).toContain('"count"');
+  });
+
+  it("normalizes null params to {} for object schemas without required params", async () => {
+    const execute = vi.fn(async () => ({ content: [], details: { ok: true } }));
+    const tool = {
+      name: "wiki_lint",
+      label: "Wiki Lint",
+      description: "lints wiki",
+      parameters: Type.Object({}),
+      execute,
+    } satisfies AgentTool;
+
+    const defs = toToolDefinitions([tool]);
+    const def = defs[0];
+    if (!def) {
+      throw new Error("missing tool definition");
+    }
+
+    await def.execute("call-null", null, undefined, undefined, extensionContext);
+
+    expect(execute).toHaveBeenCalledWith("call-null", {}, undefined, undefined);
+    expect(def.parameters).toMatchObject({
+      type: "object",
+    });
+    expect(def.parameters).not.toHaveProperty("anyOf");
+  });
+
+  it("does not normalize null params for object schemas with required params", async () => {
+    const execute = vi.fn(async () => ({ content: [], details: { ok: true } }));
+    const tool = {
+      name: "read",
+      label: "Read",
+      description: "reads files",
+      parameters: Type.Object({ path: Type.String() }, { required: ["path"] }),
+      execute,
+    } satisfies AgentTool;
+
+    const defs = toToolDefinitions([tool]);
+    const def = defs[0];
+    if (!def) {
+      throw new Error("missing tool definition");
+    }
+
+    await def.execute("call-required", null, undefined, undefined, extensionContext);
+
+    expect(execute).toHaveBeenCalledWith("call-required", null, undefined, undefined);
+    expect(def.parameters).toMatchObject({
+      type: "object",
+    });
+    expect(def.parameters).not.toHaveProperty("anyOf");
   });
 });
 
