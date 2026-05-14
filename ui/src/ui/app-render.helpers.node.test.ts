@@ -938,6 +938,7 @@ describe("switchChatSession", () => {
         ],
       },
       settings,
+      chatSessionSwitchGeneration: 0,
       announceSessionSwitch: vi.fn(),
       applySettings(next: typeof settings) {
         state.settings = next;
@@ -972,14 +973,18 @@ describe("switchChatSession", () => {
       agentId: "main",
     });
     expect(loadChatHistoryMock).toHaveBeenCalledWith(state);
-    expect(loadSessionsMock).toHaveBeenCalledWith(state, {
-      activeMinutes: 120,
-      limit: 100,
-      includeGlobal: true,
-      includeUnknown: true,
-      showArchived: false,
-      agentId: "main",
-    });
+    expect(loadSessionsMock).toHaveBeenCalledWith(
+      state,
+      expect.objectContaining({
+        activeMinutes: 120,
+        limit: 100,
+        includeGlobal: true,
+        includeUnknown: true,
+        showArchived: false,
+        agentId: "main",
+        applyIf: expect.any(Function),
+      }),
+    );
     expect(
       (state as unknown as { announceSessionSwitch: ReturnType<typeof vi.fn> })
         .announceSessionSwitch,
@@ -1009,6 +1014,7 @@ describe("switchChatSession", () => {
       chatSideResultTerminalRuns: new Set<string>(),
       chatStreamStartedAt: 1,
       settings,
+      chatSessionSwitchGeneration: 0,
       announceSessionSwitch: vi.fn(),
       applySettings(next: typeof settings) {
         state.settings = next;
@@ -1055,6 +1061,7 @@ describe("switchChatSession", () => {
       chatSideResultTerminalRuns: new Set<string>(),
       chatStreamStartedAt: null,
       settings,
+      chatSessionSwitchGeneration: 0,
       announceSessionSwitch: vi.fn(),
       applySettings(next: typeof settings) {
         state.settings = next;

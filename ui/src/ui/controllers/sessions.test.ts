@@ -253,6 +253,36 @@ describe("deleteSessionsAndRefresh", () => {
 });
 
 describe("loadSessions", () => {
+  it("skips applying results when applyIf returns false", async () => {
+    const request = vi.fn(async (method: string) => {
+      if (method !== "sessions.list") {
+        throw new Error(`unexpected method: ${method}`);
+      }
+      return {
+        ts: 2,
+        path: "(multiple)",
+        count: 1,
+        defaults: {},
+        sessions: [{ key: "agent:main:new", kind: "direct", updatedAt: 2 }],
+      };
+    });
+    const state = createState(request, {
+      sessionsResult: {
+        ts: 1,
+        path: "(multiple)",
+        count: 1,
+        defaults: {},
+        sessions: [{ key: "agent:main:existing", kind: "direct", updatedAt: 1 }],
+      },
+    });
+
+    await loadSessions(state, {
+      applyIf: () => false,
+    });
+
+    expect(state.sessionsResult?.sessions.map((row) => row.key)).toEqual(["agent:main:existing"]);
+  });
+
   it("hides explicitly archived sessions by default", async () => {
     const request = vi.fn(async (method: string) => {
       if (method !== "sessions.list") {

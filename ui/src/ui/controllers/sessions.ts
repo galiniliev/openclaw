@@ -40,6 +40,7 @@ type LoadSessionsOverrides = {
   includeUnknown?: boolean;
   showArchived?: boolean;
   configuredAgentsOnly?: boolean;
+  applyIf?: (state: SessionsState) => boolean;
 };
 
 type CreateSessionParams = {
@@ -451,6 +452,9 @@ async function loadSessionsOnce(
     }
     const res = await client.request<SessionsListResult | undefined>("sessions.list", params);
     if (res) {
+      if (overrides?.applyIf && !overrides.applyIf(state)) {
+        return;
+      }
       state.sessionsResult = projectSessionsResultForAvailability(res, { showArchived });
       reconcileChatRunFromCurrentSessionRow(
         state as unknown as Parameters<typeof reconcileChatRunFromCurrentSessionRow>[0],

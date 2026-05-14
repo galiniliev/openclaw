@@ -87,6 +87,7 @@ export type AppViewState = {
   allowExternalEmbedUrls: boolean;
   chatMessageMaxWidth?: string | null;
   sessionKey: string;
+  chatSessionSwitchGeneration: number;
   chatLoading: boolean;
   chatSending: boolean;
   chatMessage: string;

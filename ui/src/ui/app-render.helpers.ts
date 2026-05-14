@@ -640,6 +640,11 @@ export function switchChatSession(state: AppViewState, nextSessionKey: string) {
   const previousSessionKey = state.sessionKey;
   const nextSessionRow = state.sessionsResult?.sessions.find((row) => row.key === nextSessionKey);
   const nextSessionLabel = resolveSessionDisplayName(nextSessionKey, nextSessionRow);
+  const currentGeneration = Number.isFinite(state.chatSessionSwitchGeneration)
+    ? state.chatSessionSwitchGeneration
+    : 0;
+  const switchGeneration = currentGeneration + 1;
+  state.chatSessionSwitchGeneration = switchGeneration;
   resetChatStateForSessionSwitch(state, nextSessionKey);
   if (previousSessionKey !== nextSessionKey) {
     state.announceSessionSwitch?.(nextSessionKey, nextSessionLabel);
@@ -656,7 +661,10 @@ export function switchChatSession(state: AppViewState, nextSessionKey: string) {
     true,
   );
   void loadChatHistory(state as unknown as ChatState);
-  void refreshSessionOptions(state);
+  void refreshSessionOptions(state, {
+    expectedSessionKey: nextSessionKey,
+    switchGeneration,
+  });
 }
 
 export function dismissChatError(state: AppViewState) {
@@ -733,14 +741,26 @@ export async function createChatSession(state: AppViewState) {
   state.chatAttachments = preservedAttachments;
 }
 
-async function refreshSessionOptions(state: AppViewState) {
+async function refreshSessionOptions(
+  state: AppViewState,
+  opts?: {
+    expectedSessionKey?: string;
+    switchGeneration?: number;
+  },
+) {
+  const expectedSessionKey = opts?.expectedSessionKey ?? state.sessionKey;
+  const expectedGeneration = opts?.switchGeneration ?? state.chatSessionSwitchGeneration;
+  const expectedAgentId = parseAgentSessionKey(expectedSessionKey)?.agentId;
   await loadSessions(state as unknown as Parameters<typeof loadSessions>[0], {
     activeMinutes: CHAT_SESSIONS_ACTIVE_MINUTES,
     limit: CHAT_SESSIONS_REFRESH_LIMIT,
     includeGlobal: true,
     includeUnknown: true,
     showArchived: state.sessionsShowArchived,
-    agentId: parseAgentSessionKey(state.sessionKey)?.agentId,
+    agentId: expectedAgentId,
+    applyIf: (nextState) =>
+      nextState.sessionKey === expectedSessionKey &&
+      nextState.chatSessionSwitchGeneration === expectedGeneration,
   });
 }
 
