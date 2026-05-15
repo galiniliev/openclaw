@@ -1,0 +1,30 @@
+{
+  "id": "dsl-engine",
+  "name": "DSL Engine",
+  "description": "Generic DSL execution engine for M365, Engage, Planner, and custom domains",
+  "activation": {
+    "onStartup": false
+  },
+  "contracts": {
+    "tools": ["execute_m365_dsl", "execute_engage_dsl", "execute_planner_dsl"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "hydrations": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": ["m365", "engage", "planner"],
+        "description": "Which DSL hydrations to activate"
+      },
+      "defaultMode": {
+        "type": ["string", "null"],
+        "default": null,
+        "description": "Auto-activate this hydration on session start"
+      }
+    }
+  }
+}
