@@ -263,4 +263,16 @@ describe("executeDsl", () => {
     expect(result.kind).toBe("Failed");
     expect(result.error).toContain("timed out after 100ms");
   });
+
+  it("terminates CPU-bound code after timeout", async () => {
+    const hydration = createTestHydration({
+      defaultTimeoutMs: 50,
+    });
+    const namespace = createTestNamespace();
+
+    const result = await executeDsl("while (true) {}", hydration, namespace);
+
+    expect(result.kind).toBe("Failed");
+    expect(result.error).toContain("timed out after 50ms");
+  });
 });

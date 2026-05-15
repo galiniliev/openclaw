@@ -148,4 +148,24 @@ describe("DslModeManager", () => {
     manager.activate("test2", context2);
     expect(manager.getActiveMode()?.context).toEqual(context2);
   });
+
+  it("tracks active modes independently by session key", () => {
+    manager.activate("test1", { value: 1 }, "agent:one");
+    manager.activate("test2", { value: 2 }, "agent:two");
+
+    expect(manager.getActiveMode("agent:one")?.hydrationId).toBe("test1");
+    expect(manager.getActiveMode("agent:two")?.hydrationId).toBe("test2");
+    expect(manager.getActivePrompt("agent:one")).toBe('Test 1 DSL system prompt (context: {"value":1})');
+    expect(manager.getActivePrompt("agent:two")).toBe('Test 2 DSL system prompt (context: {"value":2})');
+  });
+
+  it("deactivates only the selected session key", () => {
+    manager.activate("test1", undefined, "agent:one");
+    manager.activate("test2", undefined, "agent:two");
+
+    manager.deactivate("agent:one");
+
+    expect(manager.getActiveMode("agent:one")).toBeNull();
+    expect(manager.getActiveMode("agent:two")?.hydrationId).toBe("test2");
+  });
 });

@@ -40,6 +40,11 @@ export function createDslTool<TApi, TNamespace>(
   api: TApi,
   context?: any,
 ): DslTool {
+  const validationError = hydration.validateApi?.(api);
+  if (validationError) {
+    throw new Error(validationError);
+  }
+
   // Create the namespace once when the tool is created
   const namespace = hydration.createNamespace(api);
 

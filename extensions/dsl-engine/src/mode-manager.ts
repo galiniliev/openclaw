@@ -13,7 +13,9 @@ import type { DslHydration, DslMode } from "./types.js";
  */
 export class DslModeManager {
   private hydrations: Map<string, DslHydration>;
-  private activeMode: DslMode | null = null;
+  private readonly activeModes = new Map<string, DslMode>();
+
+  private static readonly defaultSessionKey = "__global__";
 
   /**
    * Create a new mode manager with the given hydrations.
@@ -32,55 +34,57 @@ export class DslModeManager {
    * @param context - Optional domain-specific context
    * @throws Error if hydration ID is not found
    */
-  activate(hydrationId: string, context?: any): void {
+  activate(hydrationId: string, context?: unknown, sessionKey?: string): void {
     const hydration = this.hydrations.get(hydrationId);
     if (!hydration) {
       throw new Error(`Unknown hydration ID: ${hydrationId}`);
     }
 
-    this.activeMode = {
+    this.activeModes.set(this.resolveSessionKey(sessionKey), {
       hydrationId,
       activatedAt: Date.now(),
       context,
-    };
+    });
   }
 
   /**
    * Deactivate the current mode.
    */
-  deactivate(): void {
-    this.activeMode = null;
+  deactivate(sessionKey?: string): void {
+    this.activeModes.delete(this.resolveSessionKey(sessionKey));
   }
 
   /**
    * Get the currently active mode.
    * @returns The active mode or null if no mode is active
    */
-  getActiveMode(): DslMode | null {
-    return this.activeMode;
+  getActiveMode(sessionKey?: string): DslMode | null {
+    return this.activeModes.get(this.resolveSessionKey(sessionKey)) ?? null;
   }
 
   /**
    * Get the hydration for the currently active mode.
    * @returns The active hydration or null if no mode is active
    */
-  getActiveHydration(): DslHydration | null {
-    if (!this.activeMode) {
+  getActiveHydration(sessionKey?: string): DslHydration | null {
+    const activeMode = this.getActiveMode(sessionKey);
+    if (!activeMode) {
       return null;
     }
-    return this.hydrations.get(this.activeMode.hydrationId) ?? null;
+    return this.hydrations.get(activeMode.hydrationId) ?? null;
   }
 
   /**
    * Get the system prompt for the currently active mode.
    * @returns The system prompt or null if no mode is active
    */
-  getActivePrompt(): string | null {
-    const hydration = this.getActiveHydration();
+  getActivePrompt(sessionKey?: string): string | null {
+    const activeMode = this.getActiveMode(sessionKey);
+    const hydration = this.getActiveHydration(sessionKey);
     if (!hydration) {
       return null;
     }
-    return hydration.getSystemPrompt(this.activeMode?.context);
+    return hydration.getSystemPrompt(activeMode?.context);
   }
 
   /**
@@ -97,5 +101,18 @@ export class DslModeManager {
    */
   register(hydration: DslHydration): void {
     this.hydrations.set(hydration.id, hydration);
+  }
+
+  unregister(hydrationId: string): boolean {
+    for (const [sessionKey, mode] of this.activeModes.entries()) {
+      if (mode.hydrationId === hydrationId) {
+        this.activeModes.delete(sessionKey);
+      }
+    }
+    return this.hydrations.delete(hydrationId);
+  }
+
+  private resolveSessionKey(sessionKey: string | undefined): string {
+    return sessionKey?.trim() || DslModeManager.defaultSessionKey;
   }
 }

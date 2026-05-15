@@ -1,98 +1,98 @@
 import { definePluginEntry, type AnyAgentTool } from "openclaw/plugin-sdk/plugin-entry";
 import { createDslTool } from "./src/tool-factory.js";
-import { DslModeManager } from "./src/mode-manager.js";
-import type { DslHydration } from "./src/types.js";
+import { globalDslEngineRegistry, globalDslModeManager } from "./src/registry.js";
+import type { DslToolInput } from "./src/types.js";
 
-/**
- * Registry for API adapters keyed by hydration ID.
- * External plugins register their API implementations here.
- */
-const apiRegistry = new Map<string, any>();
+type ExecuteDslToolParams = DslToolInput & {
+  hydrationId?: string;
+};
 
-/**
- * DSL Engine Plugin Entry Point
- *
- * This plugin provides a generic DSL execution framework that can be hydrated
- * with domain-specific implementations (M365, Engage, Planner, custom).
- *
- * The plugin exports:
- * - A mode manager service for registering hydrations externally
- * - Pre-registered tool stubs that resolve hydrations at execution time
- *
- * External plugins (like agent-tools) register their hydrations and APIs at runtime
- * via the exposed service API. Tools are registered eagerly but resolve dependencies
- * lazily at execution time.
- */
+function createExecuteDslTool(): AnyAgentTool {
+  return {
+    name: "execute_dsl",
+    description:
+      "Execute JavaScript DSL code for a registered DSL hydration. Use hydrationId to choose the domain.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        hydrationId: {
+          type: "string",
+          description: "Registered DSL hydration id, for example m365, engage, or planner.",
+        },
+        code: {
+          type: "string",
+          description: "JavaScript code to execute against the selected DSL namespace.",
+        },
+        timeoutMs: {
+          type: "number",
+          description: "Optional execution timeout in milliseconds.",
+        },
+      },
+      required: ["hydrationId", "code"],
+    },
+    async execute(toolCallId, params) {
+      const input = readExecuteDslToolParams(params);
+      const registration = globalDslEngineRegistry.get(input.hydrationId);
+      if (!registration) {
+        const available = globalDslEngineRegistry
+          .listHydrations()
+          .map((hydration) => hydration.id)
+          .sort();
+        throw new Error(
+          `DSL hydration "${input.hydrationId}" is not registered. Available hydrations: ${available.join(", ") || "(none)"}`,
+        );
+      }
+
+      const tool = createDslTool(registration.hydration, registration.apiAdapter);
+      return await tool.execute(toolCallId, {
+        code: input.code,
+        timeoutMs: input.timeoutMs,
+      });
+    },
+  };
+}
+
+function readExecuteDslToolParams(params: unknown): Required<Pick<ExecuteDslToolParams, "hydrationId" | "code">> &
+  Pick<ExecuteDslToolParams, "timeoutMs"> {
+  if (!params || typeof params !== "object" || Array.isArray(params)) {
+    throw new Error("execute_dsl params must be an object.");
+  }
+  const record = params as Record<string, unknown>;
+  const hydrationId = typeof record.hydrationId === "string" ? record.hydrationId.trim() : "";
+  const code = typeof record.code === "string" ? record.code : "";
+  const timeoutMs = typeof record.timeoutMs === "number" ? record.timeoutMs : undefined;
+  if (!hydrationId) {
+    throw new Error("execute_dsl requires hydrationId.");
+  }
+  if (!code) {
+    throw new Error("execute_dsl requires code.");
+  }
+  return { hydrationId, code, timeoutMs };
+}
+
 export default definePluginEntry({
   id: "dsl-engine",
   name: "DSL Engine",
-  description: "Generic DSL execution engine — registers code-mode tools for M365, Engage, Planner, and custom domains",
+  description: "Generic DSL execution engine for registered domain hydrations.",
   register(api) {
-    // Initialize the mode manager with an empty hydration list
-    // Hydrations will be registered dynamically by external plugins
-    const modeManager = new DslModeManager([]);
+    for (const hydration of globalDslEngineRegistry.listHydrations()) {
+      globalDslModeManager.register(hydration);
+    }
 
-    // Expose the mode manager and registration API as a service
-    api.registerService({
-      id: "dsl-engine",
-      getInstance: () => ({
-        modeManager,
-        /**
-         * Register a DSL hydration with its API implementation.
-         * @param hydration - The hydration configuration
-         * @param apiAdapter - The API implementation for this hydration
-         */
-        registerHydration: (hydration: DslHydration, apiAdapter: any) => {
-          modeManager.register(hydration);
-          apiRegistry.set(hydration.id, apiAdapter);
-        },
-      }),
+    api.on("agent_turn_prepare", (_event, ctx) => {
+      const prompt = globalDslModeManager.getActivePrompt(ctx.sessionKey);
+      if (!prompt) {
+        return undefined;
+      }
+      return {
+        appendContext: prompt,
+      };
     });
 
-    // Helper to create a lazy tool that resolves hydration at execution time
-    const createLazyDslTool = (hydrationId: string, toolName: string): AnyAgentTool => ({
-      name: toolName,
-      description: `Execute ${hydrationId} DSL code. Tool will be available once the ${hydrationId} hydration is registered.`,
-      parameters: {
-        type: "object",
-        properties: {
-          code: {
-            type: "string",
-            description: "The DSL code to execute",
-          },
-          timeoutMs: {
-            type: "number",
-            description: "Optional execution timeout in milliseconds",
-          },
-        },
-        required: ["code"],
-      },
-      async execute(toolCallId, params, signal, onUpdate) {
-        // Resolve hydration at execution time
-        const hydrations = modeManager.listAvailable();
-        const hydration = hydrations.find((h) => h.id === hydrationId);
-
-        if (!hydration) {
-          throw new Error(
-            `DSL hydration "${hydrationId}" not registered. Available hydrations: ${hydrations.map((h) => h.id).join(", ")}`,
-          );
-        }
-
-        const apiAdapter = apiRegistry.get(hydrationId);
-        if (!apiAdapter) {
-          throw new Error(`API adapter for "${hydrationId}" not registered.`);
-        }
-
-        // Create the actual tool and delegate execution
-        const actualTool = createDslTool(hydration, apiAdapter);
-        return actualTool.execute(toolCallId, params);
-      },
-    });
-
-    // Pre-register tool stubs for the expected hydrations
-    // These will resolve to actual tools when hydrations are registered
-    api.registerTool(createLazyDslTool("m365", "execute_m365_dsl"));
-    api.registerTool(createLazyDslTool("engage", "execute_engage_dsl"));
-    api.registerTool(createLazyDslTool("planner", "execute_planner_dsl"));
+    api.registerTool(
+      () => (globalDslEngineRegistry.list().length > 0 ? createExecuteDslTool() : null),
+      { name: "execute_dsl", optional: true },
+    );
   },
 });

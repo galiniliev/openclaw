@@ -1,0 +1,20 @@
+{
+  "name": "@openclaw/dsl-engine",
+  "version": "2026.5.14",
+  "private": true,
+  "description": "OpenClaw generic DSL engine plugin",
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./api": "./api.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@openclaw/plugin-sdk": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
