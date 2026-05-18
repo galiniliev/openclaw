@@ -1,6 +1,7 @@
 import { definePluginEntry, type AnyAgentTool } from "openclaw/plugin-sdk/plugin-entry";
 import { createDslTool } from "./src/tool-factory.js";
 import { globalDslEngineRegistry, globalDslModeManager } from "./src/registry.js";
+import { shutdown } from "./src/executor.js";
 import type { DslToolInput } from "./src/types.js";
 
 type ExecuteDslToolParams = DslToolInput & {
@@ -80,6 +81,9 @@ export default definePluginEntry({
       globalDslModeManager.register(hydration);
     }
 
+    // Mode activation injects the hydration's system prompt into agent context.
+    // This is a prompt hint only — it does NOT gate execute_dsl access.
+    // Any registered hydration can be executed regardless of active mode.
     api.on("agent_turn_prepare", (_event, ctx) => {
       const prompt = globalDslModeManager.getActivePrompt(ctx.sessionKey);
       if (!prompt) {
@@ -94,5 +98,9 @@ export default definePluginEntry({
       () => (globalDslEngineRegistry.list().length > 0 ? createExecuteDslTool() : null),
       { name: "execute_dsl", optional: true },
     );
+
+    api.on("dispose", () => {
+      shutdown();
+    });
   },
 });

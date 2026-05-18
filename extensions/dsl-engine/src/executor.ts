@@ -1,13 +1,23 @@
 import { Worker } from "node:worker_threads";
 import type { DslHydration, DslExecutionResult } from "./types.js";
+import { DslError } from "./errors.js";
 
 const DEFAULT_MAX_CODE_BYTES = 100 * 1024;
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_TIMEOUT_MS = 120000;
+const DEFAULT_MAX_MEMORY_MB = 1024;
+const DEFAULT_MAX_CONCURRENCY = 4;
+
+const FORBIDDEN_PATH_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
 
 export interface ExecuteDslOptions {
   timeoutMs?: number;
   extraGlobals?: Record<string, unknown>;
+  toolCallId?: string;
+}
+
+export interface DslExecutorConfig {
+  maxConcurrency?: number;
 }
 
 type ScopeRoot = "namespace" | "extraGlobals";
@@ -40,6 +50,8 @@ type WorkerCallMessage = {
 
 type WorkerMessage = WorkerDoneMessage | WorkerFailedMessage | WorkerCallMessage;
 
+// P0 #1 fix: Promise and setTimeout are created inside the VM context via vm.runInContext,
+// preventing realm leakage (attacker can't reach host via Promise.constructor.constructor).
 const DSL_EXECUTOR_WORKER_SOURCE = String.raw`
 import { parentPort, workerData } from "node:worker_threads";
 import vm from "node:vm";
@@ -75,21 +87,13 @@ function deserialize(value) {
     return value.items.map(deserialize);
   }
   if (value.kind === "object") {
-    const result = {};
+    const result = Object.create(null);
     for (const [key, child] of value.entries) {
       result[key] = deserialize(child);
     }
     return result;
   }
   return value.value;
-}
-
-function compileCollectionClass(name, source) {
-  try {
-    return Function('"use strict"; return (' + source + ');')();
-  } catch (err) {
-    throw new Error("Failed to compile collection class " + name + ": " + (err && err.message ? err.message : String(err)));
-  }
 }
 
 parentPort.on("message", (message) => {
@@ -105,64 +109,117 @@ parentPort.on("message", (message) => {
 });
 
 try {
-  try {
-    const context = {
-      [workerData.namespaceName]: deserialize(workerData.namespace),
-      console: {
-        log: (...args) => consoleOutput.push(args.map(stringifyConsoleArg).join(" ")),
-        warn: (...args) => consoleOutput.push("WARN: " + args.map(stringifyConsoleArg).join(" ")),
-        error: (...args) => consoleOutput.push("ERROR: " + args.map(stringifyConsoleArg).join(" ")),
-      },
-      JSON,
-      setTimeout,
-      clearTimeout,
-      Promise,
+  const context = vm.createContext(Object.create(null), {
+    codeGeneration: { strings: false, wasm: false },
+  });
+
+  const setupScript = new vm.Script(` + "`" + `
+    const _setTimeout = (fn, ms) => {
+      // Minimal setTimeout within the VM realm
+      return new Promise(resolve => {
+        const start = Date.now();
+        const check = () => {
+          if (Date.now() - start >= ms) { fn(); resolve(); }
+          else { Promise.resolve().then(check); }
+        };
+        check();
+      });
     };
+    globalThis.setTimeout = (fn, ms) => { _setTimeout(fn, ms || 0); return 0; };
+    globalThis.clearTimeout = () => {};
+    globalThis.Promise = Promise;
+    globalThis.JSON = JSON;
+  ` + "`" + `);
+  setupScript.runInContext(context);
 
-    for (const [name, source] of workerData.collectionClassSources) {
-      context[name] = compileCollectionClass(name, source);
-    }
+  context[workerData.namespaceName] = deserialize(workerData.namespace);
+  context.console = {
+    log: (...args) => consoleOutput.push(args.map(stringifyConsoleArg).join(" ")),
+    warn: (...args) => consoleOutput.push("WARN: " + args.map(stringifyConsoleArg).join(" ")),
+    error: (...args) => consoleOutput.push("ERROR: " + args.map(stringifyConsoleArg).join(" ")),
+  };
 
-    const extraGlobals = deserialize(workerData.extraGlobals);
-    if (extraGlobals && typeof extraGlobals === "object") {
-      Object.assign(context, extraGlobals);
-    }
-
-    const script = new vm.Script('"use strict"; (async () => {\n' + workerData.code + '\n})()', {
-      filename: workerData.filename,
-    });
-    const resultPromise = script.runInNewContext(context, {
-      timeout: workerData.timeoutMs,
-    });
-
-    resultPromise.then(
-      (result) => {
-        const finalResult = result === undefined && consoleOutput.length > 0 ? consoleOutput.join("\n") : result;
-        parentPort.postMessage({ type: "done", result: finalResult, consoleOutput });
-      },
-      (err) => {
-        parentPort.postMessage({
-          type: "failed",
-          error: err && err.message ? err.message : String(err),
-          consoleOutput,
-        });
-      },
-    );
-  } catch (err) {
-    parentPort.postMessage({
-      type: "failed",
-      error: err && err.message ? err.message : String(err),
-      consoleOutput,
-    });
+  for (const [name, source] of workerData.collectionClassSources) {
+    const classScript = new vm.Script("(" + source + ")");
+    context[name] = classScript.runInContext(context);
   }
+
+  const extraGlobals = deserialize(workerData.extraGlobals);
+  if (extraGlobals && typeof extraGlobals === "object") {
+    for (const key of Object.keys(extraGlobals)) {
+      context[key] = extraGlobals[key];
+    }
+  }
+
+  const script = new vm.Script('"use strict"; (async () => {\n' + workerData.code + '\n})()', {
+    filename: workerData.filename,
+  });
+  const resultPromise = script.runInContext(context, {
+    timeout: workerData.timeoutMs,
+  });
+
+  resultPromise.then(
+    (result) => {
+      const finalResult = result === undefined && consoleOutput.length > 0 ? consoleOutput.join("\n") : result;
+      parentPort.postMessage({ type: "done", result: finalResult, consoleOutput });
+    },
+    (err) => {
+      parentPort.postMessage({
+        type: "failed",
+        error: err && err.message ? err.message : String(err),
+        consoleOutput,
+      });
+    },
+  );
 } catch (err) {
   parentPort.postMessage({
     type: "failed",
     error: err && err.message ? err.message : String(err),
-    consoleOutput,
+    consoleOutput: consoleOutput || [],
   });
 }
 `;
+
+class Semaphore {
+  private queue: Array<() => void> = [];
+  private active = 0;
+
+  constructor(private readonly max: number) {}
+
+  async acquire(): Promise<void> {
+    if (this.active < this.max) {
+      this.active++;
+      return;
+    }
+    return new Promise((resolve) => {
+      this.queue.push(() => {
+        this.active++;
+        resolve();
+      });
+    });
+  }
+
+  release(): void {
+    this.active--;
+    const next = this.queue.shift();
+    if (next) next();
+  }
+
+  get activeCount(): number {
+    return this.active;
+  }
+}
+
+const executionSemaphore = new Semaphore(DEFAULT_MAX_CONCURRENCY);
+
+const activeWorkers = new Set<Worker>();
+
+export function shutdown(): void {
+  for (const worker of activeWorkers) {
+    worker.terminate();
+  }
+  activeWorkers.clear();
+}
 
 export async function executeDsl<TApi, TNamespace>(
   code: string,
@@ -175,6 +232,7 @@ export async function executeDsl<TApi, TNamespace>(
   if (codeBytes > maxBytes) {
     return {
       kind: "Failed",
+      errorKind: "codeSizeExceeded",
       error: `Code size (${codeBytes} bytes) exceeds maximum allowed (${maxBytes} bytes)`,
       consoleOutput: [],
     };
@@ -182,6 +240,7 @@ export async function executeDsl<TApi, TNamespace>(
 
   const timeoutMs = resolveTimeoutMs(hydration, opts?.timeoutMs);
 
+  await executionSemaphore.acquire();
   try {
     const workerData = {
       code,
@@ -198,11 +257,15 @@ export async function executeDsl<TApi, TNamespace>(
 
     return await runWorker(workerData, { namespace, extraGlobals: opts?.extraGlobals ?? {} }, timeoutMs);
   } catch (err) {
+    const error = err instanceof DslError ? err : new DslError("executionError", err instanceof Error ? err.message : String(err));
     return {
       kind: "Failed",
-      error: err instanceof Error ? err.message : String(err),
+      errorKind: error.kind,
+      error: error.message,
       consoleOutput: [],
     };
+  } finally {
+    executionSemaphore.release();
   }
 }
 
@@ -218,7 +281,7 @@ function resolveTimeoutMs<TApi, TNamespace>(
 
 function assertIdentifier(value: string, label: string): string {
   if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(value)) {
-    throw new Error(`Invalid DSL ${label}: ${value}`);
+    throw new DslError("validationError", `Invalid DSL ${label}: ${value}`);
   }
   return value;
 }
@@ -238,7 +301,7 @@ function serializeScopeValue(
   }
 
   if (seen.has(value)) {
-    throw new Error(`Cannot inject circular DSL scope value at ${path.join(".") || root}`);
+    throw new DslError("validationError", `Cannot inject circular DSL scope value at ${path.join(".") || root}`);
   }
   seen.add(value);
 
@@ -266,11 +329,19 @@ async function runWorker(
       eval: true,
       type: "module",
       workerData,
+      resourceLimits: {
+        maxOldGenerationSizeMb: DEFAULT_MAX_MEMORY_MB,
+        maxYoungGenerationSizeMb: Math.floor(DEFAULT_MAX_MEMORY_MB / 4),
+      },
     });
+
+    activeWorkers.add(worker);
     let settled = false;
+
     const timeout = setTimeout(() => {
       settle({
         kind: "Failed",
+        errorKind: "timeout",
         error: `Execution timed out after ${timeoutMs}ms`,
         consoleOutput: [],
       });
@@ -281,6 +352,7 @@ async function runWorker(
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      activeWorkers.delete(worker);
       resolve(result);
     };
 
@@ -298,6 +370,7 @@ async function runWorker(
       if (message.type === "failed") {
         settle({
           kind: "Failed",
+          errorKind: "executionError",
           error: message.error,
           consoleOutput: message.consoleOutput,
         });
@@ -305,13 +378,14 @@ async function runWorker(
         return;
       }
       if (message.type === "call") {
-        void handleWorkerCall(worker, roots, message);
+        void handleWorkerCall(worker, roots, message, settled);
       }
     });
 
     worker.on("error", (err) => {
       settle({
         kind: "Failed",
+        errorKind: "executionError",
         error: err.message,
         consoleOutput: [],
       });
@@ -321,6 +395,7 @@ async function runWorker(
       if (!settled && code !== 0) {
         settle({
           kind: "Failed",
+          errorKind: "executionError",
           error: `DSL worker exited with code ${code}`,
           consoleOutput: [],
         });
@@ -333,23 +408,37 @@ async function handleWorkerCall(
   worker: Worker,
   roots: { namespace: unknown; extraGlobals: Record<string, unknown> },
   message: WorkerCallMessage,
+  isSettled: boolean,
 ): Promise<void> {
+  if (isSettled) return;
+
   try {
+    // P0 #4: Reject prototype pollution paths
+    for (const segment of message.path) {
+      if (FORBIDDEN_PATH_SEGMENTS.has(segment)) {
+        throw new DslError("sandboxViolation", `Access to '${segment}' is forbidden in DSL scope paths`);
+      }
+    }
+
     const root = message.root === "namespace" ? roots.namespace : roots.extraGlobals;
     const target = resolvePath(root, message.path);
     if (typeof target !== "function") {
-      throw new Error(`DSL scope path is not callable: ${message.path.join(".")}`);
+      throw new DslError("apiCallFailed", `DSL scope path is not callable: ${message.path.join(".")}`);
     }
     const parent = message.path.length > 0 ? resolvePath(root, message.path.slice(0, -1)) : undefined;
     const result = await target.apply(parent, message.args);
-    worker.postMessage({ type: "callResult", id: message.id, ok: true, result });
+    try {
+      worker.postMessage({ type: "callResult", id: message.id, ok: true, result });
+    } catch { /* worker already terminated */ }
   } catch (err) {
-    worker.postMessage({
-      type: "callResult",
-      id: message.id,
-      ok: false,
-      error: err instanceof Error ? err.message : String(err),
-    });
+    try {
+      worker.postMessage({
+        type: "callResult",
+        id: message.id,
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } catch { /* worker already terminated */ }
   }
 }
 

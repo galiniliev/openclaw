@@ -12,6 +12,7 @@ export interface DslExecutionResult {
   kind: "Succeeded" | "Failed";
   result?: unknown;
   error?: string;
+  errorKind?: import("./errors.js").DslErrorKind;
   consoleOutput: string[];
 }
 
@@ -38,6 +39,8 @@ export interface DslToolOutput {
   consoleOutput: string[];
   /** Error message if execution failed */
   error?: string;
+  /** Typed error classification for programmatic handling */
+  errorKind?: import("./errors.js").DslErrorKind;
   /** Execution duration in milliseconds */
   durationMs: number;
 }

@@ -9,7 +9,6 @@ import type { DslHydration, DslToolInput, DslToolOutput } from "./types.js";
 
 /**
  * OpenClaw tool interface.
- * Tools have a name, description, parameters schema, and execute function.
  */
 export interface DslTool {
   name: string;
@@ -23,17 +22,7 @@ export interface DslTool {
 
 /**
  * Creates an OpenClaw-compatible tool from a DSL hydration.
- *
- * The tool wraps the DSL executor and provides:
- * - Automatic namespace creation from the API
- * - Optional extra globals injection
- * - Timing measurement
- * - Result normalization (DslExecutionResult -> DslToolOutput)
- *
- * @param hydration - The DSL hydration configuration
- * @param api - The API implementation to inject into the namespace
- * @param context - Optional context for extra globals
- * @returns An OpenClaw tool that executes DSL code
+ * Namespace is recreated per execution to avoid stale references on token refresh.
  */
 export function createDslTool<TApi, TNamespace>(
   hydration: DslHydration<TApi, TNamespace>,
@@ -44,12 +33,6 @@ export function createDslTool<TApi, TNamespace>(
   if (validationError) {
     throw new Error(validationError);
   }
-
-  // Create the namespace once when the tool is created
-  const namespace = hydration.createNamespace(api);
-
-  // Build extra globals if the hydration provides them
-  const extraGlobals = hydration.extraGlobals?.(api, context);
 
   return {
     name: hydration.toolName,
@@ -70,26 +53,26 @@ export function createDslTool<TApi, TNamespace>(
     },
     execute: async (toolCallId: string, params: DslToolInput) => {
       const startTime = Date.now();
+      const namespace = hydration.createNamespace(api);
+      const extraGlobals = hydration.extraGlobals?.(api, context);
 
-      // Execute the DSL code
       const executionResult = await executeDsl(params.code, hydration, namespace, {
         timeoutMs: params.timeoutMs,
         extraGlobals,
+        toolCallId,
       });
 
       const durationMs = Date.now() - startTime;
 
-      // Normalize execution result to tool output format
       const toolOutput: DslToolOutput = {
         ok: executionResult.kind === "Succeeded",
         returnValue: executionResult.kind === "Succeeded" ? executionResult.result : undefined,
         consoleOutput: executionResult.consoleOutput,
         error: executionResult.kind === "Failed" ? executionResult.error : undefined,
+        errorKind: executionResult.errorKind,
         durationMs,
       };
 
-      // Return OpenClaw tool result format
-      // Content contains JSON-stringified payload, details contains structured data
       return {
         content: [
           {

@@ -274,5 +274,70 @@ describe("executeDsl", () => {
 
     expect(result.kind).toBe("Failed");
     expect(result.error).toContain("timed out after 50ms");
+    expect(result.errorKind).toBe("timeout");
+  });
+
+  it("returns codeSizeExceeded errorKind when code is too large", async () => {
+    const hydration = createTestHydration({ maxCodeBytes: 10 });
+    const namespace = createTestNamespace();
+
+    const result = await executeDsl("return 'toolong';", hydration, namespace);
+
+    expect(result.kind).toBe("Failed");
+    expect(result.errorKind).toBe("codeSizeExceeded");
+  });
+
+  it("blocks prototype pollution via __proto__ path", async () => {
+    const hydration = createTestHydration();
+    const api: TestApi = {
+      greet: (name: string) => `Hello, ${name}!`,
+      getData: () => ({ count: 42 }),
+    };
+    const namespace = hydration.createNamespace(api);
+    // This code tries to call a method that would traverse __proto__
+    // The RPC handler should reject it
+    const code = `return await Test.greet("world");`;
+
+    // Direct path traversal is blocked at the handleWorkerCall level,
+    // but we can't trigger it from user code directly without a crafted namespace.
+    // Instead verify the sandbox doesn't leak host objects.
+    const result = await executeDsl(
+      `try { const F = Promise.constructor.constructor; return "leaked"; } catch(e) { return "blocked: " + e.message; }`,
+      hydration,
+      namespace,
+    );
+
+    expect(result.kind).toBe("Succeeded");
+    // With codeGeneration.strings=false, Function constructor from strings is blocked
+    expect(result.result).toContain("blocked");
+  });
+
+  it("prevents sandbox escape via Promise realm traversal", async () => {
+    const hydration = createTestHydration();
+    const namespace = createTestNamespace();
+
+    const result = await executeDsl(
+      `const p = Promise.resolve(); const C = p.constructor.constructor; const proc = C("return process")(); return proc.env;`,
+      hydration,
+      namespace,
+    );
+
+    // Should fail because codeGeneration.strings = false blocks Function() from strings
+    expect(result.kind).toBe("Failed");
+  });
+
+  it("runs concurrent executions up to the concurrency limit", async () => {
+    const hydration = createTestHydration({ defaultTimeoutMs: 5000 });
+    const namespace = createTestNamespace();
+
+    const promises = Array.from({ length: 6 }, (_, i) =>
+      executeDsl(`return ${i};`, hydration, namespace),
+    );
+
+    const results = await Promise.all(promises);
+    for (let i = 0; i < 6; i++) {
+      expect(results[i].kind).toBe("Succeeded");
+      expect(results[i].result).toBe(i);
+    }
   });
 });

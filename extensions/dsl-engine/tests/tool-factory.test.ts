@@ -276,7 +276,7 @@ describe("createDslTool", () => {
     expect(result2.details.returnValue).toBe("Bonjour, Bob!");
   });
 
-  it("creates namespace only once during tool creation", async () => {
+  it("creates namespace per execution for freshness", async () => {
     let namespaceCreationCount = 0;
 
     const hydration = createTestHydration({
@@ -293,14 +293,13 @@ describe("createDslTool", () => {
     const api = createTestApi();
     const tool = createDslTool(hydration, api);
 
-    // Namespace should be created once during tool creation
-    expect(namespaceCreationCount).toBe(1);
+    // Namespace not created at tool creation time
+    expect(namespaceCreationCount).toBe(0);
 
-    // Execute multiple times
     await tool.execute("call-13a", { code: `return Test.getData().count;` });
-    await tool.execute("call-13b", { code: `return Test.greet("Test");` });
-
-    // Namespace should still only have been created once
     expect(namespaceCreationCount).toBe(1);
+
+    await tool.execute("call-13b", { code: `return Test.greet("Test");` });
+    expect(namespaceCreationCount).toBe(2);
   });
 });

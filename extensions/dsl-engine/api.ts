@@ -6,7 +6,9 @@ export type {
   DslToolInput,
   DslToolOutput,
 } from "./src/types.js";
+export { DslError, type DslErrorKind } from "./src/errors.js";
 export { DslModeManager } from "./src/mode-manager.js";
+export { shutdown as shutdownDslEngine } from "./src/executor.js";
 export {
   DslEngineRegistry,
   globalDslEngineRegistry,
