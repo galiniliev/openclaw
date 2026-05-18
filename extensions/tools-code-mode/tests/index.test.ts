@@ -29,7 +29,7 @@ function createApi() {
   return { api, toolFactories, hooks };
 }
 
-describe("dsl-engine plugin entry", () => {
+describe("tools-code-mode plugin entry", () => {
   beforeEach(() => {
     unregisterDslHydration("test");
   });

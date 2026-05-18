@@ -73,7 +73,7 @@ function readExecuteDslToolParams(params: unknown): Required<Pick<ExecuteDslTool
 }
 
 export default definePluginEntry({
-  id: "dsl-engine",
+  id: "tools-code-mode",
   name: "DSL Engine",
   description: "Generic DSL execution engine for registered domain hydrations.",
   register(api) {

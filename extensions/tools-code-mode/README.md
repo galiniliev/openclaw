@@ -135,7 +135,7 @@ Generic DSL execution engine. Owner plugins register domain-specific **hydration
 
 ```
 Owner plugin registers hydration + API adapter
-  → dsl-engine stores it in the global registry
+  → tools-code-mode stores it in the global registry
   → execute_dsl tool becomes available
   → LLM generates JS code using the typed namespace
   → engine executes code in a worker-backed VM
@@ -152,9 +152,9 @@ import {
   unregisterDslHydration,
   activateDslMode,
   deactivateDslMode,
-} from "@openclaw/dsl-engine/api";
+} from "@openclaw/tools-code-mode/api";
 
-import type { DslHydration } from "@openclaw/dsl-engine/api";
+import type { DslHydration } from "@openclaw/tools-code-mode/api";
 ```
 
 ## Registering a Hydration
@@ -164,7 +164,7 @@ Owner plugins call `registerDslHydration` during their `register(api)` lifecycle
 ```ts
 // extensions/my-domain/index.ts
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { registerDslHydration } from "@openclaw/dsl-engine/api";
+import { registerDslHydration } from "@openclaw/tools-code-mode/api";
 import { createMyNamespace, MyItemSet } from "./dsl.js";
 import { getMySystemPrompt } from "./prompts.js";
 import { createMyApiAdapter } from "./adapter.js";
@@ -256,7 +256,7 @@ Once at least one hydration is registered, the `execute_dsl` tool appears:
 Activate a mode to inject the hydration's system prompt into the agent's context:
 
 ```ts
-import { activateDslMode, deactivateDslMode } from "@openclaw/dsl-engine/api";
+import { activateDslMode, deactivateDslMode } from "@openclaw/tools-code-mode/api";
 
 // Activate — injects getSystemPrompt() on every agent turn for this session
 activateDslMode("m365", { user: "alice@contoso.com" }, sessionKey);
@@ -340,7 +340,7 @@ export function createWeatherAdapter(apiKey: string): WeatherAPI {
 ```ts
 // extensions/weather-agent/index.ts
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { registerDslHydration } from "@openclaw/dsl-engine/api";
+import { registerDslHydration } from "@openclaw/tools-code-mode/api";
 import { createWeatherNamespace } from "./src/namespace.js";
 import { getWeatherSystemPrompt } from "./src/prompts.js";
 import { createWeatherAdapter } from "./src/adapter.js";
@@ -348,7 +348,7 @@ import { createWeatherAdapter } from "./src/adapter.js";
 export default definePluginEntry({
   id: "weather-agent",
   name: "Weather Agent",
-  description: "Weather DSL hydration for dsl-engine.",
+  description: "Weather DSL hydration for tools-code-mode.",
   register(api) {
     const config = api.getPluginConfig();
     const adapter = createWeatherAdapter(config?.apiKey ?? process.env.WEATHER_API_KEY ?? "");
@@ -388,7 +388,7 @@ If you already have an MCP server exposing tools, you can create a thin DSL name
 ```ts
 // extensions/github-dsl/index.ts
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { registerDslHydration } from "@openclaw/dsl-engine/api";
+import { registerDslHydration } from "@openclaw/tools-code-mode/api";
 
 interface GitHubAPI {
   repos: { list(): Promise<{ name: string; url: string }[]> };
@@ -543,7 +543,7 @@ steps:
 Wrap the API adapter before registration to intercept write operations:
 
 ```ts
-import { registerDslHydration } from "@openclaw/dsl-engine/api";
+import { registerDslHydration } from "@openclaw/tools-code-mode/api";
 
 const rawAdapter = createLiveGraphAdapter(config);
 
@@ -571,7 +571,7 @@ Plugin manifest (`openclaw.plugin.json`):
 
 ```json
 {
-  "id": "dsl-engine",
+  "id": "tools-code-mode",
   "activation": { "onStartup": false },
   "contracts": { "tools": ["execute_dsl"] }
 }
@@ -583,8 +583,8 @@ The `execute_dsl` tool only appears when at least one hydration is registered.
 
 ```bash
 node scripts/run-vitest.mjs \
-  extensions/dsl-engine/tests/executor.test.ts \
-  extensions/dsl-engine/tests/tool-factory.test.ts \
-  extensions/dsl-engine/tests/mode-manager.test.ts \
-  extensions/dsl-engine/tests/integration.test.ts
+  extensions/tools-code-mode/tests/executor.test.ts \
+  extensions/tools-code-mode/tests/tool-factory.test.ts \
+  extensions/tools-code-mode/tests/mode-manager.test.ts \
+  extensions/tools-code-mode/tests/integration.test.ts
 ```

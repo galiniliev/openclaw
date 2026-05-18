@@ -159,10 +159,10 @@ Supported auth types:
 ### Module
 
 ```ts
-import { quickHydration } from "@openclaw/dsl-engine/quick";
+import { quickHydration } from "@openclaw/tools-code-mode/quick";
 ```
 
-Exported from a new barrel: `extensions/dsl-engine/quick.ts`
+Exported from a new barrel: `extensions/tools-code-mode/quick.ts`
 
 ### Signature
 
@@ -223,7 +223,7 @@ function quickHydration(config: QuickHydrationConfig): void;
 ### Example
 
 ```ts
-import { quickHydration } from "@openclaw/dsl-engine/quick";
+import { quickHydration } from "@openclaw/tools-code-mode/quick";
 
 quickHydration({
   id: "github",
@@ -266,7 +266,7 @@ The generated methods:
 ### Module
 
 ```ts
-import { plugAdapter } from "@openclaw/dsl-engine/quick";
+import { plugAdapter } from "@openclaw/tools-code-mode/quick";
 ```
 
 ### Signature
@@ -309,7 +309,7 @@ function plugAdapter<TApi, TNamespace>(config: PlugAdapterConfig<TApi, TNamespac
 ### Example: Plugging agent-tools M365
 
 ```ts
-import { plugAdapter } from "@openclaw/dsl-engine/quick";
+import { plugAdapter } from "@openclaw/tools-code-mode/quick";
 import { createM365Namespace, MessageSet, EventSet, ChatSet } from "agent-tools/m365Dsl";
 import { getM365SystemPrompt } from "agent-tools/m365PromptBuilder";
 import { createGraphApiAdapter } from "./graph-adapter.js";
@@ -334,7 +334,7 @@ plugAdapter({
 ### Example: Plugging agent-tools Engage
 
 ```ts
-import { plugAdapter } from "@openclaw/dsl-engine/quick";
+import { plugAdapter } from "@openclaw/tools-code-mode/quick";
 import { createEngageNamespace, ThreadSet, CommunitySet, EngageUserSet } from "agent-tools/engageDsl";
 import { getEngageSystemPrompt } from "agent-tools/engagePromptBuilder";
 import { createEngageApiAdapter } from "./engage-adapter.js";
@@ -361,7 +361,7 @@ plugAdapter({
 ## File Structure
 
 ```
-extensions/dsl-engine/
+extensions/tools-code-mode/
 ├── api.ts                          # existing public barrel (unchanged)
 ├── quick.ts                        # NEW: exports quickHydration, plugAdapter
 ├── index.ts                        # updated: loads dsl-hydrations.json at startup
