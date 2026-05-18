@@ -8,10 +8,14 @@ Traditional tool-calling gives the LLM one action per turn. For tasks that requi
 
 ```js
 // One tool call. One round-trip. Full result.
-const msgs = await M365.messages.list({ top: 50 });
-const urgent = new MessageSet(msgs).where(m => m.importance === "high").unread();
-const summaries = urgent.map(m => ({ subject: m.subject, from: m.from }));
-return summaries;
+const products = ["Linear", "Shortcut", "Jira"];
+const results = [];
+for (const name of products) {
+  const search = await Web.search({ query: `${name} pricing 2026` });
+  const page = await Web.fetch({ url: search.results[0].url, prompt: "Extract pricing tiers" });
+  results.push({ product: name, pricing: page.content });
+}
+return results;
 ```
 
 ### Benefits
@@ -36,6 +40,92 @@ return summaries;
 
 - Single API call with no logic (use a regular tool instead)
 - User-facing write operations that need confirmation (use approval guards)
+
+### Example: Direct Tool Calls vs. Code Mode
+
+**Scenario:** "Compare pricing plans for three project management tools"
+
+User asks: *"Compare pricing for Linear, Shortcut, and Jira. Show me the free tier limits and the per-seat cost for the team plan."*
+
+##### Direct tool calls (9+ round-trips)
+
+```
+Turn 1 → web_search({ query: "Linear pricing plans 2026" })
+       ← Returns 10 URLs
+Turn 2 → web_fetch({ url: "https://linear.app/pricing" })
+       ← Returns full pricing page (~4,000 tokens of markdown)
+Turn 3 → web_search({ query: "Shortcut pricing plans 2026" })
+       ← Returns 10 URLs
+Turn 4 → web_fetch({ url: "https://shortcut.com/pricing" })
+       ← Returns full pricing page (~3,500 tokens)
+Turn 5 → web_search({ query: "Jira pricing plans 2026" })
+       ← Returns 10 URLs
+Turn 6 → web_fetch({ url: "https://www.atlassian.com/software/jira/pricing" })
+       ← Returns full pricing page (~5,000 tokens)
+Turn 7 → LLM reads all three pages from context, tries to extract free tier info
+Turn 8 → LLM tries to find per-seat team plan cost from unstructured HTML
+Turn 9 → LLM formats comparison table
+       ← "Here's the comparison..."
+```
+
+**Cost:** 9 round-trips, ~12,500 tokens of raw page content sitting in context, 20-30 seconds total. The LLM has to parse pricing grids from unstructured markdown (often misses footnotes, annual vs. monthly, regional pricing).
+
+##### Code mode (1 round-trip)
+
+```js
+// execute_dsl({ hydrationId: "web", code: "..." })
+const products = ["Linear", "Shortcut", "Jira"];
+const comparison = [];
+
+for (const product of products) {
+  const search = await Web.search({ query: `${product} pricing plans 2026` });
+  const pricingUrl = search.results.find(r => r.url.includes("pricing"))?.url
+    || search.results[0]?.url;
+  if (!pricingUrl) continue;
+
+  const page = await Web.fetch({ url: pricingUrl, prompt: "Extract: free tier limits and per-seat monthly cost for the team/standard plan" });
+
+  comparison.push({
+    product,
+    url: pricingUrl,
+    freeTier: page.freeTier || "not found",
+    teamPlanCost: page.teamPlanCost || "not found",
+    notes: page.notes || ""
+  });
+}
+
+return comparison;
+```
+
+**Result returned to LLM:**
+```json
+[
+  { "product": "Linear", "url": "https://linear.app/pricing",
+    "freeTier": "Up to 250 issues, unlimited members",
+    "teamPlanCost": "$8/seat/month (billed annually)",
+    "notes": "14-day trial for paid plans" },
+  { "product": "Shortcut", "url": "https://shortcut.com/pricing",
+    "freeTier": "Up to 10 members, all core features",
+    "teamPlanCost": "$8.50/seat/month (billed annually)",
+    "notes": "Free migration from Jira" },
+  { "product": "Jira", "url": "https://www.atlassian.com/software/jira/pricing",
+    "freeTier": "Up to 10 users, 2GB storage",
+    "teamPlanCost": "$7.75/seat/month (billed annually, 1-100 users)",
+    "notes": "Price decreases at higher tiers" }
+]
+```
+
+**Cost:** 1 round-trip, ~300 tokens of structured result in context, 3-5 seconds. Extraction is targeted (only pulls what was asked), output is structured JSON ready for the LLM to present as a table.
+
+#### The pattern
+
+| Metric | Direct tools | Code mode |
+|--------|-------------|-----------|
+| Round-trips | N (one per API call) | 1 |
+| Context tokens | All raw responses | Only final result |
+| Filtering accuracy | LLM best-effort | Deterministic code |
+| Latency | N * (LLM think + API call) | 1 * (API calls run in parallel) |
+| Composability | None (each call isolated) | Full (variables, loops, conditionals) |
 
 ---
 
