@@ -1,5 +1,44 @@
 # DSL Engine
 
+## Why Code Mode?
+
+Traditional tool-calling gives the LLM one action per turn. For tasks that require filtering, combining, or iterating over API results, this means dozens of round-trips, each burning tokens and adding latency.
+
+**Code mode** lets the LLM write a short script that runs multiple API calls in a single execution, with logic in between:
+
+```js
+// One tool call. One round-trip. Full result.
+const msgs = await M365.messages.list({ top: 50 });
+const urgent = new MessageSet(msgs).where(m => m.importance === "high").unread();
+const summaries = urgent.map(m => ({ subject: m.subject, from: m.from }));
+return summaries;
+```
+
+### Benefits
+
+| Benefit | Without code mode | With code mode |
+|---------|------------------|----------------|
+| **Multi-step operations** | 5-10 tool calls, 5-10 round-trips | 1 tool call, 1 round-trip |
+| **Filtering and transforms** | LLM processes raw JSON in context | Logic runs server-side, only results returned |
+| **Token efficiency** | Full API responses in context window | Only final result enters context |
+| **Latency** | Sequential tool calls (seconds each) | Single execution (sub-second) |
+| **Composability** | Each tool is isolated | Combine data from multiple API calls in one script |
+| **Error handling** | LLM retries blindly | try/catch with programmatic recovery |
+
+### When to use code mode
+
+- Fetching + filtering (get messages, filter by date, return subjects)
+- Aggregation (count items across multiple lists)
+- Multi-step workflows (look up user, get their tasks, summarize)
+- Conditional logic (if inbox > 50 unread, get top 10; otherwise get all)
+
+### When NOT to use code mode
+
+- Single API call with no logic (use a regular tool instead)
+- User-facing write operations that need confirmation (use approval guards)
+
+---
+
 Generic DSL execution engine. Owner plugins register domain-specific **hydrations** (typed namespace + prompt + collection classes + API adapter). The engine provides sandboxed code execution, session-scoped mode switching, and prompt injection.
 
 ## How It Works
