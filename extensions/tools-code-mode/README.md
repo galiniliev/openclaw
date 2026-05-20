@@ -147,14 +147,18 @@ The engine never imports domain code. Owner plugins bring their own namespace fa
 ## Public API
 
 ```ts
+// Full hydration registration (Tier 3)
 import {
-  registerHydration,
-  unregisterHydration,
-  activateCodeMode,
-  deactivateCodeMode,
+  registerCodeModeHydration,
+  unregisterCodeModeHydration,
+  activateCodeModeSession,
+  deactivateCodeModeSession,
 } from "@openclaw/tools-code-mode/api";
 
 import type { CodeModeHydration } from "@openclaw/tools-code-mode/api";
+
+// Quick hydration helpers (Tier 1 & 2)
+import { quickHydration, plugAdapter } from "@openclaw/tools-code-mode/quick";
 ```
 
 ## Registering a Hydration
@@ -579,6 +583,108 @@ Plugin manifest (`openclaw.plugin.json`):
 
 The `execute_code` tool only appears when at least one hydration is registered.
 
+---
+
+## Quick Hydration: Register Without Writing a Plugin
+
+You don't need a full extension to add a hydration. The engine supports three progressively powerful shortcuts:
+
+### Tier 0: JSON Config (zero code)
+
+Drop a `code-mode-hydrations.json` in your OpenClaw workspace:
+
+```
+~/.openclaw/workspace/code-mode-hydrations.json              # main workspace
+~/.openclaw/workspaces/[agent-name]/code-mode-hydrations.json # per-agent
+```
+
+```json
+{
+  "hydrations": [
+    {
+      "id": "github",
+      "namespaceName": "GitHub",
+      "baseUrl": "https://api.github.com",
+      "auth": { "bearer": { "env": "GITHUB_TOKEN" } },
+      "headers": { "Accept": "application/vnd.github+json" },
+      "endpoints": {
+        "repos.list": "GET /user/repos?per_page={perPage}",
+        "issues.list": "GET /repos/{owner}/{repo}/issues?state={state}",
+        "issues.create": "POST /repos/{owner}/{repo}/issues"
+      },
+      "prompt": "GitHub.repos.list({ perPage? })\nGitHub.issues.list({ owner, repo, state? })\nGitHub.issues.create({ owner, repo, ...body })"
+    }
+  ]
+}
+```
+
+Restart OpenClaw — `execute_code` with `hydrationId: "github"` is ready.
+
+**Auth** uses OpenClaw's standard resolution: `configPath` (resolved via `resolveConfiguredSecretInputString`) with `env` fallback. Auth is resolved lazily on first execution, not at startup.
+
+**Endpoint shorthand:** `METHOD /path?query={param}` — path params from `{name}` in path, query params from `{name}` in query string, body inferred from POST/PUT/PATCH.
+
+If `prompt` is omitted, one is auto-generated from endpoint definitions.
+
+### Tier 1: `quickHydration()` (minimal TS)
+
+```ts
+import { quickHydration } from "@openclaw/tools-code-mode/quick";
+
+quickHydration({
+  id: "jira",
+  namespaceName: "Jira",
+  baseUrl: "https://mysite.atlassian.net/rest/api/3",
+  auth: { bearer: { configPath: "plugins.entries.jira.config.apiKey", env: "JIRA_TOKEN" } },
+  headers: { "Accept": "application/json" },
+  endpoints: {
+    "issues.list": "GET /search?jql={jql}&maxResults={maxResults}",
+    "issues.get": "GET /issue/{issueKey}",
+    "issues.create": "POST /issue",
+  },
+  prompt: `Jira namespace:
+- Jira.issues.list({ jql, maxResults? }) -> issue[]
+- Jira.issues.get({ issueKey }) -> issue
+- Jira.issues.create(body) -> created issue`,
+});
+```
+
+Same lazy auth, same REST adapter, but callable from any TS file in your extension.
+
+### Tier 2: `plugAdapter()` (existing namespace factories)
+
+For teams that already have typed namespace factories (e.g., from agent-tools):
+
+```ts
+import { plugAdapter } from "@openclaw/tools-code-mode/quick";
+import { createM365Namespace, MessageSet, EventSet } from "agent-tools/m365Dsl";
+import { getM365SystemPrompt } from "agent-tools/m365PromptBuilder";
+
+plugAdapter({
+  id: "m365",
+  namespaceName: "M365",
+  displayName: "M365 Copilot",
+  createNamespace: createM365Namespace,
+  collectionClasses: { MessageSet, EventSet },
+  getSystemPrompt: getM365SystemPrompt,
+  auth: { bearer: { configPath: "plugins.entries.m365.config.accessToken", env: "M365_TOKEN" } },
+  createAdapter: (auth) => createGraphApiAdapter(auth),
+});
+```
+
+Auth resolves lazily. The adapter is created once and cached. Optional `validateApi` runs after adapter creation.
+
+### Auth Types
+
+```json
+{ "bearer": { "configPath": "...", "env": "..." } }
+{ "basic": { "user": "admin", "pass": { "configPath": "...", "env": "..." } } }
+{ "header": { "name": "X-Api-Key", "value": { "configPath": "...", "env": "..." } } }
+{ "query": { "param": "api_key", "value": { "configPath": "...", "env": "..." } } }
+```
+
+---
+
 ## Testing
 
 ```bash
@@ -586,5 +692,9 @@ node scripts/run-vitest.mjs \
   extensions/tools-code-mode/tests/executor.test.ts \
   extensions/tools-code-mode/tests/tool-factory.test.ts \
   extensions/tools-code-mode/tests/mode-manager.test.ts \
-  extensions/tools-code-mode/tests/integration.test.ts
+  extensions/tools-code-mode/tests/integration.test.ts \
+  extensions/tools-code-mode/tests/hydration/endpoint-parser.test.ts \
+  extensions/tools-code-mode/tests/hydration/rest-adapter.test.ts \
+  extensions/tools-code-mode/tests/hydration/quick-hydration.e2e.test.ts \
+  extensions/tools-code-mode/tests/hydration/json-loader.e2e.test.ts
 ```

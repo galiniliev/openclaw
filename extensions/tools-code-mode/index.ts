@@ -2,6 +2,7 @@ import { definePluginEntry, type AnyAgentTool } from "openclaw/plugin-sdk/plugin
 import { createCodeModeTool } from "./src/tool-factory.js";
 import { globalCodeModeRegistry, globalCodeModeSessionManager } from "./src/registry.js";
 import { shutdown } from "./src/executor.js";
+import { loadJsonHydrations } from "./src/hydration/json-loader.js";
 import type { CodeModeToolInput } from "./src/types.js";
 
 type ExecuteCodeToolParams = CodeModeToolInput & {
@@ -77,6 +78,14 @@ export default definePluginEntry({
   name: "Code Mode Engine",
   description: "Generic code mode execution engine for registered domain hydrations.",
   register(api) {
+    // Load JSON hydrations from workspace (sync read, lazy auth)
+    try {
+      const workspacePath = api.runtime.agent.resolveAgentWorkspaceDir(api.config);
+      loadJsonHydrations(workspacePath, api.config);
+    } catch {
+      // workspace path resolution may not be available in all environments
+    }
+
     for (const hydration of globalCodeModeRegistry.listHydrations()) {
       globalCodeModeSessionManager.register(hydration);
     }

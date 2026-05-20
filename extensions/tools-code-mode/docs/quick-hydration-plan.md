@@ -143,14 +143,15 @@ Supported auth types:
 
 ### How It Works Internally
 
-1. Engine startup: resolve active workspace path
-2. Read `code-mode-hydrations.json` if it exists
+1. Engine startup (sync): resolve active workspace path
+2. Read `code-mode-hydrations.json` if it exists (fs.readFileSync)
 3. For each entry, validate schema
-4. Resolve auth credentials via OpenClaw's secret resolution
-5. Build a REST adapter (generic fetch wrapper with auth + baseUrl)
-6. Build a namespace by parsing endpoint definitions into nested method objects
-7. Auto-generate `toolName` as `execute_{id}_code`
-8. Call `registerHydration()` with the constructed hydration + adapter
+4. Parse endpoint definitions (sync, pure)
+5. Register a CodeModeHydration with **lazy auth** — namespace methods resolve auth on first call, then cache
+6. Auto-generate `toolName` as `execute_{id}_code`
+7. Call `registerHydration()` — tool becomes available immediately
+
+Auth is **never resolved at registration time** (sync constraint). Each namespace method internally resolves auth on first invocation via `resolveConfiguredSecretInputString`, then caches the result for subsequent calls.
 
 ---
 
@@ -212,13 +213,14 @@ function quickHydration(config: QuickHydrationConfig): void;
 
 ### Behavior
 
-1. Resolves auth via `resolveConfiguredSecretInputString()`
-2. Creates a generic REST adapter: `{ [namespace.method]: (params) => fetch(...) }`
-3. Constructs a `CodeModeHydration` object with:
-   - `createNamespace` returns the REST adapter object nested by dot-separated endpoint keys
+1. Parses all endpoints (sync, pure) via `parseEndpointConfig`
+2. Builds prompt (uses `config.prompt` or auto-generates from endpoints if omitted)
+3. Registers a `CodeModeHydration`:
+   - `createNamespace()` is **sync** — returns a namespace object immediately
+   - Each leaf method in the namespace is `async` and resolves auth lazily on first call (cached via closure)
    - `collectionClasses` = `{}` (no custom collections in quick mode)
-   - `getSystemPrompt` returns the `prompt` string
-4. Calls `registerHydration(hydration, adapter)`
+   - `getSystemPrompt` returns the prompt string
+4. Calls `registerHydration(hydration)`
 
 ### Example
 
@@ -280,20 +282,16 @@ interface PlugAdapterConfig<TApi, TNamespace> {
   collectionClasses?: Record<string, new (...args: unknown[]) => unknown>;
   getSystemPrompt: (context?: unknown) => string;
   auth: AuthConfig;
-  createAdapter: (resolvedCredentials: ResolvedCredentials) => TApi;
+  createAdapter: (auth: ResolvedAuth) => TApi;
   extraGlobals?: (api: TApi, context?: unknown) => Record<string, unknown>;
+  validateApi?: (api: TApi) => string | undefined;
   timeoutMs?: number;
   maxTimeoutMs?: number;
   maxCodeBytes?: number;
-  validateApi?: (api: TApi) => string | undefined;
 }
 
-interface ResolvedCredentials {
-  token?: string;
-  user?: string;
-  pass?: string;
-  headerValue?: string;
-  queryValue?: string;
+interface ResolvedAuth {
+  applyToRequest(headers: Record<string, string>, url: URL): void;
 }
 
 function plugAdapter<TApi, TNamespace>(config: PlugAdapterConfig<TApi, TNamespace>): void;
@@ -301,10 +299,11 @@ function plugAdapter<TApi, TNamespace>(config: PlugAdapterConfig<TApi, TNamespac
 
 ### Behavior
 
-1. Resolves auth via OpenClaw's standard secret resolution
-2. Calls `config.createAdapter(resolvedCredentials)` to get the API object
-3. Constructs a full `CodeModeHydration` from the config fields
-4. Calls `registerHydration(hydration, apiAdapter)`
+1. Resolves auth lazily (same pattern as quickHydration — cached on first use)
+2. Calls `config.createAdapter(resolvedAuth)` to get the API object
+3. Optionally validates via `config.validateApi(api)` — returns error string or undefined
+4. Constructs a full `CodeModeHydration` from the config fields
+5. Calls `registerHydration(hydration)`
 
 ### Example: Plugging agent-tools M365
 
@@ -327,7 +326,7 @@ plugAdapter({
       env: "M365_ACCESS_TOKEN",
     },
   },
-  createAdapter: (creds) => createGraphApiAdapter(creds.token!),
+  createAdapter: (auth) => createGraphApiAdapter(auth),
 });
 ```
 
@@ -352,7 +351,7 @@ plugAdapter({
       env: "ENGAGE_TOKEN",
     },
   },
-  createAdapter: (creds) => createEngageApiAdapter(creds.token!),
+  createAdapter: (auth) => createEngageApiAdapter(auth),
 });
 ```
 
@@ -444,7 +443,7 @@ Hydrations from JSON are registered BEFORE the `execute_code` tool becomes avail
 ## Auth Resolver Module
 
 ```ts
-// src/auth-resolver.ts
+// src/hydration/auth-resolver.ts
 import { resolveConfiguredSecretInputString } from "openclaw/plugin-sdk/secret-input-runtime";
 
 export interface SecretRef {
@@ -452,22 +451,24 @@ export interface SecretRef {
   env?: string;
 }
 
-export interface ResolvedCredentials {
-  token?: string;
-  user?: string;
-  pass?: string;
-  headerValue?: string;
-  queryValue?: string;
+export interface ResolvedAuth {
+  applyToRequest(headers: Record<string, string>, url: URL): void;
 }
 
 export async function resolveAuth(
   auth: AuthConfig,
   config: unknown,
-): Promise<ResolvedCredentials | null> {
+): Promise<ResolvedAuth> {
   // Resolves using OpenClaw's standard pattern:
   // 1. Try configPath via resolveConfiguredSecretInputString
   // 2. Fall back to env var
-  // 3. Return null if neither resolves
+  // 3. Throws CodeModeError(validationError) if neither resolves
+  //
+  // Returns a ResolvedAuth that applies credentials to requests:
+  // - bearer: sets Authorization header
+  // - basic: sets Authorization: Basic header
+  // - header: sets custom header
+  // - query: appends query parameter to URL
 }
 ```
 
@@ -476,26 +477,23 @@ export async function resolveAuth(
 ## REST Adapter Factory
 
 ```ts
-// src/rest-adapter.ts
+// src/hydration/rest-adapter.ts
 
-export interface RestAdapterConfig {
-  baseUrl: string;
-  auth: ResolvedCredentials;
-  authType: AuthConfig;
-  headers?: Record<string, string>;
-}
-
-export function createRestAdapter(
-  config: RestAdapterConfig,
-  endpoints: Record<string, string | EndpointConfig>,
+export function buildLazyNamespace(
+  baseUrl: string,
+  endpoints: Record<string, ParsedEndpoint>,
+  headers: Record<string, string> | undefined,
+  resolveAuthFn: () => Promise<ResolvedAuth>,
 ): Record<string, unknown> {
   // Returns a nested object matching endpoint dot-paths
   // Each leaf is an async function that:
-  // 1. Substitutes path params
-  // 2. Builds query string from remaining params
-  // 3. Sends body for POST/PUT/PATCH
-  // 4. Applies auth headers
-  // 5. Returns parsed JSON
+  // 1. Calls resolveAuthFn() on first invocation (cached via closure)
+  // 2. Substitutes path params
+  // 3. Builds query string from remaining params
+  // 4. Sends body for POST/PUT/PATCH
+  // 5. Applies auth via resolvedAuth.applyToRequest(headers, url)
+  // 6. Returns parsed JSON
+  // 7. Throws on non-2xx with status + body excerpt
 }
 ```
 
@@ -550,14 +548,20 @@ export function parseEndpointShorthand(shorthand: string): ParsedEndpoint {
 | plugAdapter | < 5 min | Import existing exports, call |
 | Full extension | 15-30 min | 7 files, plugin SDK knowledge |
 
-## Open Questions
+## Resolved Design Decisions
 
-1. **Workspace path resolution**: How does the engine get the active workspace path at startup? Need to confirm the plugin SDK provides this (likely via `api.getWorkspacePath()` or similar).
+1. **Workspace path resolution**: Via `api.runtime.agent.resolveAgentWorkspaceDir(api.config)` in the plugin SDK.
 
-2. **Hot reload**: Should the JSON loader watch for file changes and re-register? Or require restart? (Recommend: restart for v1, watch for v2.)
+2. **Hot reload**: No — requires restart for v1. Watch mode deferred to v2.
 
-3. **Prompt auto-generation**: For JSON configs, should the engine auto-generate the system prompt from endpoint definitions if `prompt` is omitted? (Recommend: yes, as a best-effort fallback.)
+3. **Prompt auto-generation**: Yes — if `prompt` is omitted from JSON config, auto-generate from endpoint definitions (list namespace methods with params). For Tier 1/2, `prompt` is required.
 
-4. **Response transforms**: Should endpoints support a `transform` field for reshaping API responses before they reach the LLM? (Recommend: defer to v2, keep v1 simple.)
+4. **Response transforms**: Deferred to v2.
 
-5. **Pagination**: Should the REST adapter support automatic pagination? (Recommend: no, let users handle it in code mode script for now.)
+5. **Pagination**: No automatic pagination. Users handle it in code mode scripts.
+
+6. **Duplicate ID precedence**: Extension-registered hydrations win. JSON loader warns and skips.
+
+7. **Auth timing**: Always lazy — resolved on first execution, never at registration. Sync constraint makes this mandatory for JSON-loaded, applied uniformly for consistency.
+
+8. **`createNamespace` sync/async**: `createNamespace()` is sync (returns object immediately). Leaf methods are async (resolve auth lazily on first call, cache result).

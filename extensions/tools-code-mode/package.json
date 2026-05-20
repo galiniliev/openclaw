@@ -6,7 +6,8 @@
   "type": "module",
   "exports": {
     ".": "./index.ts",
-    "./api": "./api.ts"
+    "./api": "./api.ts",
+    "./quick": "./quick.ts"
   },
   "dependencies": {},
   "devDependencies": {
