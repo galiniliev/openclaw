@@ -1,34 +1,34 @@
 /**
- * DSL Tool Factory
+ * Code Mode Tool Factory
  *
- * Creates OpenClaw-compatible tools from DSL hydrations.
+ * Creates OpenClaw-compatible tools from code mode hydrations.
  */
 
-import { executeDsl } from "./executor.js";
-import type { DslHydration, DslToolInput, DslToolOutput } from "./types.js";
+import { executeCodeMode } from "./executor.js";
+import type { CodeModeHydration, CodeModeToolInput, CodeModeToolOutput } from "./types.js";
 
 /**
  * OpenClaw tool interface.
  */
-export interface DslTool {
+export interface CodeModeTool {
   name: string;
   description: string;
   parameters: Record<string, any>;
   execute: (
     toolCallId: string,
-    params: DslToolInput,
-  ) => Promise<{ content: { type: string; text: string }[]; details: DslToolOutput }>;
+    params: CodeModeToolInput,
+  ) => Promise<{ content: { type: string; text: string }[]; details: CodeModeToolOutput }>;
 }
 
 /**
- * Creates an OpenClaw-compatible tool from a DSL hydration.
+ * Creates an OpenClaw-compatible tool from a code mode hydration.
  * Namespace is recreated per execution to avoid stale references on token refresh.
  */
-export function createDslTool<TApi, TNamespace>(
-  hydration: DslHydration<TApi, TNamespace>,
+export function createCodeModeTool<TApi, TNamespace>(
+  hydration: CodeModeHydration<TApi, TNamespace>,
   api: TApi,
   context?: any,
-): DslTool {
+): CodeModeTool {
   const validationError = hydration.validateApi?.(api);
   if (validationError) {
     throw new Error(validationError);
@@ -36,13 +36,13 @@ export function createDslTool<TApi, TNamespace>(
 
   return {
     name: hydration.toolName,
-    description: `Execute ${hydration.displayName} DSL code. Provides the ${hydration.namespaceName} namespace for scripting.`,
+    description: `Execute ${hydration.displayName} code. Provides the ${hydration.namespaceName} namespace for scripting.`,
     parameters: {
       type: "object",
       properties: {
         code: {
           type: "string",
-          description: "The DSL code to execute",
+          description: "The code to execute",
         },
         timeoutMs: {
           type: "number",
@@ -51,12 +51,12 @@ export function createDslTool<TApi, TNamespace>(
       },
       required: ["code"],
     },
-    execute: async (toolCallId: string, params: DslToolInput) => {
+    execute: async (toolCallId: string, params: CodeModeToolInput) => {
       const startTime = Date.now();
       const namespace = hydration.createNamespace(api);
       const extraGlobals = hydration.extraGlobals?.(api, context);
 
-      const executionResult = await executeDsl(params.code, hydration, namespace, {
+      const executionResult = await executeCodeMode(params.code, hydration, namespace, {
         timeoutMs: params.timeoutMs,
         extraGlobals,
         toolCallId,
@@ -64,7 +64,7 @@ export function createDslTool<TApi, TNamespace>(
 
       const durationMs = Date.now() - startTime;
 
-      const toolOutput: DslToolOutput = {
+      const toolOutput: CodeModeToolOutput = {
         ok: executionResult.kind === "Succeeded",
         returnValue: executionResult.kind === "Succeeded" ? executionResult.result : undefined,
         consoleOutput: executionResult.consoleOutput,

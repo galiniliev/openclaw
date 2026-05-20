@@ -1,45 +1,45 @@
 export type {
-  DslExecutionResult,
-  DslHydration,
-  DslHydrationFactory,
-  DslMode,
-  DslToolInput,
-  DslToolOutput,
+  CodeModeExecutionResult,
+  CodeModeHydration,
+  CodeModeHydrationFactory,
+  CodeModeSession,
+  CodeModeToolInput,
+  CodeModeToolOutput,
 } from "./src/types.js";
-export { DslError, type DslErrorKind } from "./src/errors.js";
-export { DslModeManager } from "./src/mode-manager.js";
-export { shutdown as shutdownDslEngine } from "./src/executor.js";
+export { CodeModeError, type CodeModeErrorKind } from "./src/errors.js";
+export { CodeModeSessionManager } from "./src/mode-manager.js";
+export { shutdown as shutdownCodeMode } from "./src/executor.js";
 export {
-  DslEngineRegistry,
-  globalDslEngineRegistry,
-  globalDslModeManager,
-  type DslHydrationRegistration,
+  CodeModeRegistry,
+  globalCodeModeRegistry,
+  globalCodeModeSessionManager,
+  type CodeModeHydrationRegistration,
 } from "./src/registry.js";
 
-import type { DslHydration } from "./src/types.js";
-import { globalDslEngineRegistry, globalDslModeManager } from "./src/registry.js";
+import type { CodeModeHydration } from "./src/types.js";
+import { globalCodeModeRegistry, globalCodeModeSessionManager } from "./src/registry.js";
 
-export function registerDslHydration<TApi, TNamespace>(
-  hydration: DslHydration<TApi, TNamespace>,
+export function registerCodeModeHydration<TApi, TNamespace>(
+  hydration: CodeModeHydration<TApi, TNamespace>,
   apiAdapter: TApi,
 ): void {
-  globalDslEngineRegistry.register(hydration, apiAdapter);
-  globalDslModeManager.register(hydration as DslHydration);
+  globalCodeModeRegistry.register(hydration, apiAdapter);
+  globalCodeModeSessionManager.register(hydration as CodeModeHydration);
 }
 
-export function unregisterDslHydration(hydrationId: string): boolean {
-  globalDslModeManager.unregister(hydrationId);
-  return globalDslEngineRegistry.unregister(hydrationId);
+export function unregisterCodeModeHydration(hydrationId: string): boolean {
+  globalCodeModeSessionManager.unregister(hydrationId);
+  return globalCodeModeRegistry.unregister(hydrationId);
 }
 
-export function activateDslMode(
+export function activateCodeModeSession(
   hydrationId: string,
   context?: unknown,
   sessionKey?: string,
 ): void {
-  globalDslModeManager.activate(hydrationId, context, sessionKey);
+  globalCodeModeSessionManager.activate(hydrationId, context, sessionKey);
 }
 
-export function deactivateDslMode(sessionKey?: string): void {
-  globalDslModeManager.deactivate(sessionKey);
+export function deactivateCodeModeSession(sessionKey?: string): void {
+  globalCodeModeSessionManager.deactivate(sessionKey);
 }

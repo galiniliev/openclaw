@@ -2,7 +2,7 @@
   "name": "@openclaw/tools-code-mode",
   "version": "2026.5.14",
   "private": true,
-  "description": "OpenClaw generic DSL engine plugin",
+  "description": "OpenClaw tools code mode plugin",
   "type": "module",
   "exports": {
     ".": "./index.ts",

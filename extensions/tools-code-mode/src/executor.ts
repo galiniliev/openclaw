@@ -1,6 +1,6 @@
 import { Worker } from "node:worker_threads";
-import type { DslHydration, DslExecutionResult } from "./types.js";
-import { DslError } from "./errors.js";
+import type { CodeModeHydration, CodeModeExecutionResult } from "./types.js";
+import { CodeModeError } from "./errors.js";
 
 const DEFAULT_MAX_CODE_BYTES = 100 * 1024;
 const DEFAULT_TIMEOUT_MS = 30000;
@@ -10,13 +10,13 @@ const DEFAULT_MAX_CONCURRENCY = 4;
 
 const FORBIDDEN_PATH_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
 
-export interface ExecuteDslOptions {
+export interface ExecuteCodeModeOptions {
   timeoutMs?: number;
   extraGlobals?: Record<string, unknown>;
   toolCallId?: string;
 }
 
-export interface DslExecutorConfig {
+export interface CodeModeExecutorConfig {
   maxConcurrency?: number;
 }
 
@@ -52,7 +52,7 @@ type WorkerMessage = WorkerDoneMessage | WorkerFailedMessage | WorkerCallMessage
 
 // P0 #1 fix: Promise and setTimeout are created inside the VM context via vm.runInContext,
 // preventing realm leakage (attacker can't reach host via Promise.constructor.constructor).
-const DSL_EXECUTOR_WORKER_SOURCE = String.raw`
+const CODE_MODE_WORKER_SOURCE = String.raw`
 import { parentPort, workerData } from "node:worker_threads";
 import vm from "node:vm";
 
@@ -104,7 +104,7 @@ parentPort.on("message", (message) => {
   if (message.ok) {
     pending.resolve(message.result);
   } else {
-    pending.reject(new Error(message.error || "DSL API call failed"));
+    pending.reject(new Error(message.error || "code mode API call failed"));
   }
 });
 
@@ -221,12 +221,12 @@ export function shutdown(): void {
   activeWorkers.clear();
 }
 
-export async function executeDsl<TApi, TNamespace>(
+export async function executeCodeMode<TApi, TNamespace>(
   code: string,
-  hydration: DslHydration<TApi, TNamespace>,
+  hydration: CodeModeHydration<TApi, TNamespace>,
   namespace: TNamespace,
-  opts?: ExecuteDslOptions,
-): Promise<DslExecutionResult> {
+  opts?: ExecuteCodeModeOptions,
+): Promise<CodeModeExecutionResult> {
   const maxBytes = hydration.maxCodeBytes ?? DEFAULT_MAX_CODE_BYTES;
   const codeBytes = new TextEncoder().encode(code).length;
   if (codeBytes > maxBytes) {
@@ -244,7 +244,7 @@ export async function executeDsl<TApi, TNamespace>(
   try {
     const workerData = {
       code,
-      filename: `${hydration.id || "dsl"}-generated.js`,
+      filename: `${hydration.id || "code"}-generated.js`,
       timeoutMs,
       namespaceName: assertIdentifier(hydration.namespaceName, "namespaceName"),
       namespace: serializeScopeValue(namespace, "namespace", []),
@@ -257,7 +257,7 @@ export async function executeDsl<TApi, TNamespace>(
 
     return await runWorker(workerData, { namespace, extraGlobals: opts?.extraGlobals ?? {} }, timeoutMs);
   } catch (err) {
-    const error = err instanceof DslError ? err : new DslError("executionError", err instanceof Error ? err.message : String(err));
+    const error = err instanceof CodeModeError ? err : new CodeModeError("executionError", err instanceof Error ? err.message : String(err));
     return {
       kind: "Failed",
       errorKind: error.kind,
@@ -270,7 +270,7 @@ export async function executeDsl<TApi, TNamespace>(
 }
 
 function resolveTimeoutMs<TApi, TNamespace>(
-  hydration: DslHydration<TApi, TNamespace>,
+  hydration: CodeModeHydration<TApi, TNamespace>,
   requestedTimeoutMs: number | undefined,
 ): number {
   const defaultTimeout = hydration.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -281,7 +281,7 @@ function resolveTimeoutMs<TApi, TNamespace>(
 
 function assertIdentifier(value: string, label: string): string {
   if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(value)) {
-    throw new DslError("validationError", `Invalid DSL ${label}: ${value}`);
+    throw new CodeModeError("validationError", `Invalid code mode ${label}: ${value}`);
   }
   return value;
 }
@@ -301,7 +301,7 @@ function serializeScopeValue(
   }
 
   if (seen.has(value)) {
-    throw new DslError("validationError", `Cannot inject circular DSL scope value at ${path.join(".") || root}`);
+    throw new CodeModeError("validationError", `Cannot inject circular code mode scope value at ${path.join(".") || root}`);
   }
   seen.add(value);
 
@@ -323,9 +323,9 @@ async function runWorker(
   workerData: unknown,
   roots: { namespace: unknown; extraGlobals: Record<string, unknown> },
   timeoutMs: number,
-): Promise<DslExecutionResult> {
-  return await new Promise<DslExecutionResult>((resolve) => {
-    const worker = new Worker(DSL_EXECUTOR_WORKER_SOURCE, {
+): Promise<CodeModeExecutionResult> {
+  return await new Promise<CodeModeExecutionResult>((resolve) => {
+    const worker = new Worker(CODE_MODE_WORKER_SOURCE, {
       eval: true,
       type: "module",
       workerData,
@@ -348,7 +348,7 @@ async function runWorker(
       void worker.terminate();
     }, timeoutMs);
 
-    const settle = (result: DslExecutionResult) => {
+    const settle = (result: CodeModeExecutionResult) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
@@ -396,7 +396,7 @@ async function runWorker(
         settle({
           kind: "Failed",
           errorKind: "executionError",
-          error: `DSL worker exited with code ${code}`,
+          error: `code mode worker exited with code ${code}`,
           consoleOutput: [],
         });
       }
@@ -416,14 +416,14 @@ async function handleWorkerCall(
     // P0 #4: Reject prototype pollution paths
     for (const segment of message.path) {
       if (FORBIDDEN_PATH_SEGMENTS.has(segment)) {
-        throw new DslError("sandboxViolation", `Access to '${segment}' is forbidden in DSL scope paths`);
+        throw new CodeModeError("sandboxViolation", `Access to '${segment}' is forbidden in code mode scope paths`);
       }
     }
 
     const root = message.root === "namespace" ? roots.namespace : roots.extraGlobals;
     const target = resolvePath(root, message.path);
     if (typeof target !== "function") {
-      throw new DslError("apiCallFailed", `DSL scope path is not callable: ${message.path.join(".")}`);
+      throw new CodeModeError("apiCallFailed", `code mode scope path is not callable: ${message.path.join(".")}`);
     }
     const parent = message.path.length > 0 ? resolvePath(root, message.path.slice(0, -1)) : undefined;
     const result = await target.apply(parent, message.args);

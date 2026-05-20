@@ -1,36 +1,36 @@
 /**
- * Generic DSL Engine Types
+ * Generic Code Mode Engine Types
  *
- * This module defines the core abstractions for pluggable DSL hydrations.
- * Any domain (M365, Engage, Planner, or future) implements DslHydration to plug into the generic DSL engine.
+ * This module defines the core abstractions for pluggable code mode hydrations.
+ * Any domain (M365, Engage, Planner, or future) implements CodeModeHydration to plug into the generic code mode engine.
  */
 
 /**
- * Execution result — matches the shape used by all existing DSL executors.
+ * Execution result — matches the shape used by all existing code mode executors.
  */
-export interface DslExecutionResult {
+export interface CodeModeExecutionResult {
   kind: "Succeeded" | "Failed";
   result?: unknown;
   error?: string;
-  errorKind?: import("./errors.js").DslErrorKind;
+  errorKind?: import("./errors.js").CodeModeErrorKind;
   consoleOutput: string[];
 }
 
 /**
- * Input parameters for DSL tool execution.
+ * Input parameters for code mode tool execution.
  */
-export interface DslToolInput {
-  /** The DSL code to execute */
+export interface CodeModeToolInput {
+  /** The code to execute */
   code: string;
   /** Optional timeout in milliseconds (default: domain-specific) */
   timeoutMs?: number;
 }
 
 /**
- * Output from DSL tool execution.
+ * Output from code mode tool execution.
  * Normalizes execution results into a tool-friendly format.
  */
-export interface DslToolOutput {
+export interface CodeModeToolOutput {
   /** Whether execution succeeded without errors */
   ok: boolean;
   /** The return value if execution succeeded */
@@ -40,16 +40,16 @@ export interface DslToolOutput {
   /** Error message if execution failed */
   error?: string;
   /** Typed error classification for programmatic handling */
-  errorKind?: import("./errors.js").DslErrorKind;
+  errorKind?: import("./errors.js").CodeModeErrorKind;
   /** Execution duration in milliseconds */
   durationMs: number;
 }
 
 /**
- * DSL mode state.
+ * Code mode session state.
  * Tracks which hydration is currently active and when it was activated.
  */
-export interface DslMode {
+export interface CodeModeSession {
   /** Identifier of the active hydration (e.g., "m365", "engage", "planner") */
   hydrationId: string;
   /** Timestamp when the mode was activated */
@@ -59,21 +59,21 @@ export interface DslMode {
 }
 
 /**
- * Core abstraction for a DSL hydration.
+ * Core abstraction for a code mode hydration.
  * Each domain implements this interface to provide:
  * - API contract (tool-shaped interface)
  * - Namespace creation (fluent API builder)
  * - Code execution (worker-backed VM with timeout)
- * - System prompt (DSL reference documentation)
+ * - System prompt (code mode reference documentation)
  *
  * @template TApi - The API interface that this hydration requires (e.g., M365Api)
  * @template TNamespace - The namespace object returned by createNamespace (e.g., M365Namespace)
  */
-export interface DslHydration<TApi = unknown, TNamespace = unknown> {
+export interface CodeModeHydration<TApi = unknown, TNamespace = unknown> {
   /** Unique identifier (e.g., "m365", "engage", "planner"). */
   readonly id: string;
 
-  /** OpenClaw tool name (e.g., "execute_m365_dsl"). */
+  /** OpenClaw tool name (e.g., "execute_m365_code"). */
   readonly toolName: string;
 
   /** Human-readable display name (e.g., "M365 Copilot"). */
@@ -94,7 +94,7 @@ export interface DslHydration<TApi = unknown, TNamespace = unknown> {
    */
   readonly collectionClasses: Record<string, new (...args: unknown[]) => unknown>;
 
-  /** Returns system prompt with DSL reference, examples, gotchas. */
+  /** Returns system prompt with code mode reference, examples, gotchas. */
   getSystemPrompt(context?: unknown): string;
 
   /** Max code size in bytes (default 100KB). */
@@ -116,4 +116,4 @@ export interface DslHydration<TApi = unknown, TNamespace = unknown> {
 /**
  * Factory function type for creating a hydration.
  */
-export type DslHydrationFactory<TApi = unknown, TNamespace = unknown> = () => DslHydration<TApi, TNamespace>;
+export type CodeModeHydrationFactory<TApi = unknown, TNamespace = unknown> = () => CodeModeHydration<TApi, TNamespace>;

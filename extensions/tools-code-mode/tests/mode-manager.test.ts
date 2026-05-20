@@ -1,36 +1,36 @@
 /**
- * DSL Mode Manager Tests
+ * Code Mode Session Manager Tests
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { DslModeManager } from "../src/mode-manager.js";
-import type { DslHydration } from "../src/types.js";
+import { CodeModeSessionManager } from "../src/mode-manager.js";
+import type { CodeModeHydration } from "../src/types.js";
 
 // Create test hydrations
-function createTestHydration(id: string, displayName: string): DslHydration {
+function createTestHydration(id: string, displayName: string): CodeModeHydration {
   return {
     id,
-    toolName: `execute_${id}_dsl`,
+    toolName: `execute_${id}_code`,
     displayName,
     namespaceName: id.toUpperCase(),
     createNamespace: (api: any) => api,
     collectionClasses: {},
     getSystemPrompt: (context?: any) => {
-      const basePrompt = `${displayName} DSL system prompt`;
+      const basePrompt = `${displayName} code mode system prompt`;
       return context ? `${basePrompt} (context: ${JSON.stringify(context)})` : basePrompt;
     },
   };
 }
 
-describe("DslModeManager", () => {
-  let manager: DslModeManager;
-  let hydration1: DslHydration;
-  let hydration2: DslHydration;
+describe("CodeModeSessionManager", () => {
+  let manager: CodeModeSessionManager;
+  let hydration1: CodeModeHydration;
+  let hydration2: CodeModeHydration;
 
   beforeEach(() => {
     hydration1 = createTestHydration("test1", "Test 1");
     hydration2 = createTestHydration("test2", "Test 2");
-    manager = new DslModeManager([hydration1, hydration2]);
+    manager = new CodeModeSessionManager([hydration1, hydration2]);
   });
 
   it("starts with no active mode", () => {
@@ -106,7 +106,7 @@ describe("DslModeManager", () => {
     manager.activate("test1");
 
     const prompt = manager.getActivePrompt();
-    expect(prompt).toBe("Test 1 DSL system prompt");
+    expect(prompt).toBe("Test 1 code mode system prompt");
   });
 
   it("getActivePrompt passes context to hydration", () => {
@@ -114,7 +114,7 @@ describe("DslModeManager", () => {
     manager.activate("test1", context);
 
     const prompt = manager.getActivePrompt();
-    expect(prompt).toBe('Test 1 DSL system prompt (context: {"option":"value"})');
+    expect(prompt).toBe('Test 1 code mode system prompt (context: {"option":"value"})');
   });
 
   it("registers new hydration", () => {
@@ -155,8 +155,8 @@ describe("DslModeManager", () => {
 
     expect(manager.getActiveMode("agent:one")?.hydrationId).toBe("test1");
     expect(manager.getActiveMode("agent:two")?.hydrationId).toBe("test2");
-    expect(manager.getActivePrompt("agent:one")).toBe('Test 1 DSL system prompt (context: {"value":1})');
-    expect(manager.getActivePrompt("agent:two")).toBe('Test 2 DSL system prompt (context: {"value":2})');
+    expect(manager.getActivePrompt("agent:one")).toBe('Test 1 code mode system prompt (context: {"value":1})');
+    expect(manager.getActivePrompt("agent:two")).toBe('Test 2 code mode system prompt (context: {"value":2})');
   });
 
   it("deactivates only the selected session key", () => {

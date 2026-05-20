@@ -1,19 +1,19 @@
 /**
- * DSL Mode Manager
+ * Code Mode Session Manager
  *
- * Manages session-scoped DSL mode switching.
+ * Manages session-scoped code mode switching.
  * Tracks available hydrations and the currently active mode.
  */
 
-import type { DslHydration, DslMode } from "./types.js";
+import type { CodeModeHydration, CodeModeSession } from "./types.js";
 
 /**
- * Manages DSL mode activation and switching within a session.
+ * Manages code mode activation and switching within a session.
  * Provides a registry of available hydrations and tracks which one is active.
  */
-export class DslModeManager {
-  private hydrations: Map<string, DslHydration>;
-  private readonly activeModes = new Map<string, DslMode>();
+export class CodeModeSessionManager {
+  private hydrations: Map<string, CodeModeHydration>;
+  private readonly activeModes = new Map<string, CodeModeSession>();
 
   private static readonly defaultSessionKey = "__global__";
 
@@ -21,7 +21,7 @@ export class DslModeManager {
    * Create a new mode manager with the given hydrations.
    * @param hydrations - Initial list of available hydrations
    */
-  constructor(hydrations: DslHydration[]) {
+  constructor(hydrations: CodeModeHydration[]) {
     this.hydrations = new Map();
     for (const hydration of hydrations) {
       this.hydrations.set(hydration.id, hydration);
@@ -29,7 +29,7 @@ export class DslModeManager {
   }
 
   /**
-   * Activate a DSL mode by hydration ID.
+   * Activate a code mode by hydration ID.
    * @param hydrationId - The ID of the hydration to activate
    * @param context - Optional domain-specific context
    * @throws Error if hydration ID is not found
@@ -58,7 +58,7 @@ export class DslModeManager {
    * Get the currently active mode.
    * @returns The active mode or null if no mode is active
    */
-  getActiveMode(sessionKey?: string): DslMode | null {
+  getActiveMode(sessionKey?: string): CodeModeSession | null {
     return this.activeModes.get(this.resolveSessionKey(sessionKey)) ?? null;
   }
 
@@ -66,7 +66,7 @@ export class DslModeManager {
    * Get the hydration for the currently active mode.
    * @returns The active hydration or null if no mode is active
    */
-  getActiveHydration(sessionKey?: string): DslHydration | null {
+  getActiveHydration(sessionKey?: string): CodeModeHydration | null {
     const activeMode = this.getActiveMode(sessionKey);
     if (!activeMode) {
       return null;
@@ -91,7 +91,7 @@ export class DslModeManager {
    * List all available hydrations.
    * @returns Array of all registered hydrations
    */
-  listAvailable(): DslHydration[] {
+  listAvailable(): CodeModeHydration[] {
     return Array.from(this.hydrations.values());
   }
 
@@ -99,7 +99,7 @@ export class DslModeManager {
    * Register a new hydration.
    * @param hydration - The hydration to register
    */
-  register(hydration: DslHydration): void {
+  register(hydration: CodeModeHydration): void {
     this.hydrations.set(hydration.id, hydration);
   }
 
@@ -113,6 +113,6 @@ export class DslModeManager {
   }
 
   private resolveSessionKey(sessionKey: string | undefined): string {
-    return sessionKey?.trim() || DslModeManager.defaultSessionKey;
+    return sessionKey?.trim() || CodeModeSessionManager.defaultSessionKey;
   }
 }

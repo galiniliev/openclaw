@@ -1,10 +1,10 @@
 /**
- * Generic DSL Executor Tests
+ * Generic code mode Executor Tests
  */
 
 import { describe, it, expect } from "vitest";
-import { executeDsl } from "../src/executor.js";
-import type { DslHydration } from "../src/types.js";
+import { executeCodeMode } from "../src/executor.js";
+import type { CodeModeHydration } from "../src/types.js";
 
 // Test API and Namespace types
 interface TestApi {
@@ -31,11 +31,11 @@ class TestCollection {
 }
 
 // Create a test hydration
-function createTestHydration(overrides?: Partial<DslHydration<TestApi, TestNamespace>>): DslHydration<TestApi, TestNamespace> {
+function createTestHydration(overrides?: Partial<CodeModeHydration<TestApi, TestNamespace>>): CodeModeHydration<TestApi, TestNamespace> {
   return {
     id: "test",
-    toolName: "execute_test_dsl",
-    displayName: "Test DSL",
+    toolName: "execute_test_code",
+    displayName: "Test Code Mode",
     namespaceName: "Test",
     createNamespace: (api: TestApi): TestNamespace => ({
       greet: api.greet,
@@ -44,7 +44,7 @@ function createTestHydration(overrides?: Partial<DslHydration<TestApi, TestNames
     collectionClasses: {
       TestCollection,
     },
-    getSystemPrompt: () => "Test DSL system prompt",
+    getSystemPrompt: () => "Test Code Mode system prompt",
     ...overrides,
   };
 }
@@ -57,13 +57,13 @@ function createTestNamespace(): TestNamespace {
   };
 }
 
-describe("executeDsl", () => {
+describe("executeCodeMode", () => {
   it("executes code with injected namespace and returns result", async () => {
     const hydration = createTestHydration();
     const namespace = createTestNamespace();
     const code = `return Test.greet("World");`;
 
-    const result = await executeDsl(code, hydration, namespace);
+    const result = await executeCodeMode(code, hydration, namespace);
 
     expect(result.kind).toBe("Succeeded");
     expect(result.result).toBe("Hello, World!");
@@ -81,7 +81,7 @@ describe("executeDsl", () => {
       return "done";
     `;
 
-    const result = await executeDsl(code, hydration, namespace);
+    const result = await executeCodeMode(code, hydration, namespace);
 
     expect(result.kind).toBe("Succeeded");
     expect(result.result).toBe("done");
@@ -102,7 +102,7 @@ describe("executeDsl", () => {
       return "done";
     `;
 
-    const result = await executeDsl(code, hydration, namespace);
+    const result = await executeCodeMode(code, hydration, namespace);
 
     expect(result.kind).toBe("Succeeded");
     expect(result.consoleOutput).toEqual([
@@ -117,7 +117,7 @@ describe("executeDsl", () => {
     const namespace = createTestNamespace();
     const code = `throw new Error("Test error");`;
 
-    const result = await executeDsl(code, hydration, namespace);
+    const result = await executeCodeMode(code, hydration, namespace);
 
     expect(result.kind).toBe("Failed");
     expect(result.error).toBe("Test error");
@@ -131,7 +131,7 @@ describe("executeDsl", () => {
     const namespace = createTestNamespace();
     const code = `return "a".repeat(100);`; // This code is >50 bytes
 
-    const result = await executeDsl(code, hydration, namespace);
+    const result = await executeCodeMode(code, hydration, namespace);
 
     expect(result.kind).toBe("Failed");
     expect(result.error).toContain("exceeds maximum allowed");
@@ -148,7 +148,7 @@ describe("executeDsl", () => {
       return "done";
     `;
 
-    const result = await executeDsl(code, hydration, namespace);
+    const result = await executeCodeMode(code, hydration, namespace);
 
     expect(result.kind).toBe("Failed");
     expect(result.error).toContain("timed out");
@@ -165,7 +165,7 @@ describe("executeDsl", () => {
       return collection.getAll();
     `;
 
-    const result = await executeDsl(code, hydration, namespace);
+    const result = await executeCodeMode(code, hydration, namespace);
 
     expect(result.kind).toBe("Succeeded");
     expect(result.result).toEqual(["item1", "item2"]);
@@ -176,7 +176,7 @@ describe("executeDsl", () => {
     const namespace = createTestNamespace();
     const code = `return customValue + 10;`;
 
-    const result = await executeDsl(code, hydration, namespace, {
+    const result = await executeCodeMode(code, hydration, namespace, {
       extraGlobals: { customValue: 32 },
     });
 
@@ -193,7 +193,7 @@ describe("executeDsl", () => {
       // No return statement
     `;
 
-    const result = await executeDsl(code, hydration, namespace);
+    const result = await executeCodeMode(code, hydration, namespace);
 
     expect(result.kind).toBe("Succeeded");
     expect(result.result).toBe("Line 1\nLine 2");
@@ -205,7 +205,7 @@ describe("executeDsl", () => {
     const namespace = createTestNamespace();
     const code = `// No return statement`;
 
-    const result = await executeDsl(code, hydration, namespace);
+    const result = await executeCodeMode(code, hydration, namespace);
 
     expect(result.kind).toBe("Succeeded");
     expect(result.result).toBeUndefined();
@@ -220,7 +220,7 @@ describe("executeDsl", () => {
       return JSON.stringify(obj);
     `;
 
-    const result = await executeDsl(code, hydration, namespace);
+    const result = await executeCodeMode(code, hydration, namespace);
 
     expect(result.kind).toBe("Succeeded");
     expect(result.result).toBe('{"name":"test","value":42}');
@@ -237,7 +237,7 @@ describe("executeDsl", () => {
     `;
 
     // Request a very short timeout
-    const result = await executeDsl(code, hydration, namespace, {
+    const result = await executeCodeMode(code, hydration, namespace, {
       timeoutMs: 50,
     });
 
@@ -256,7 +256,7 @@ describe("executeDsl", () => {
     `;
 
     // Request a longer timeout, but it should be capped
-    const result = await executeDsl(code, hydration, namespace, {
+    const result = await executeCodeMode(code, hydration, namespace, {
       timeoutMs: 500,
     });
 
@@ -270,7 +270,7 @@ describe("executeDsl", () => {
     });
     const namespace = createTestNamespace();
 
-    const result = await executeDsl("while (true) {}", hydration, namespace);
+    const result = await executeCodeMode("while (true) {}", hydration, namespace);
 
     expect(result.kind).toBe("Failed");
     expect(result.error).toContain("timed out after 50ms");
@@ -281,7 +281,7 @@ describe("executeDsl", () => {
     const hydration = createTestHydration({ maxCodeBytes: 10 });
     const namespace = createTestNamespace();
 
-    const result = await executeDsl("return 'toolong';", hydration, namespace);
+    const result = await executeCodeMode("return 'toolong';", hydration, namespace);
 
     expect(result.kind).toBe("Failed");
     expect(result.errorKind).toBe("codeSizeExceeded");
@@ -301,7 +301,7 @@ describe("executeDsl", () => {
     // Direct path traversal is blocked at the handleWorkerCall level,
     // but we can't trigger it from user code directly without a crafted namespace.
     // Instead verify the sandbox doesn't leak host objects.
-    const result = await executeDsl(
+    const result = await executeCodeMode(
       `try { const F = Promise.constructor.constructor; return "leaked"; } catch(e) { return "blocked: " + e.message; }`,
       hydration,
       namespace,
@@ -316,7 +316,7 @@ describe("executeDsl", () => {
     const hydration = createTestHydration();
     const namespace = createTestNamespace();
 
-    const result = await executeDsl(
+    const result = await executeCodeMode(
       `const p = Promise.resolve(); const C = p.constructor.constructor; const proc = C("return process")(); return proc.env;`,
       hydration,
       namespace,
@@ -331,7 +331,7 @@ describe("executeDsl", () => {
     const namespace = createTestNamespace();
 
     const promises = Array.from({ length: 6 }, (_, i) =>
-      executeDsl(`return ${i};`, hydration, namespace),
+      executeCodeMode(`return ${i};`, hydration, namespace),
     );
 
     const results = await Promise.all(promises);

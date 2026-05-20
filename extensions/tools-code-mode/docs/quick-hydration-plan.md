@@ -1,40 +1,40 @@
-# DSL Engine: Quick Hydration API Plan
+# Code Mode Engine: Quick Hydration API Plan
 
 ## Problem
 
-Today, registering a DSL hydration requires writing a full OpenClaw extension: 7 files, plugin SDK knowledge, TypeScript boilerplate. A power user who just wants `Jira.issues.list()` to work inside `execute_dsl` has to understand `definePluginEntry`, manifests, and the full `DslHydration` interface before seeing any result.
+Today, registering a code mode hydration requires writing a full OpenClaw extension: 7 files, plugin SDK knowledge, TypeScript boilerplate. A power user who just wants `Jira.issues.list()` to work inside `execute_code` has to understand `definePluginEntry`, manifests, and the full `CodeModeHydration` interface before seeing any result.
 
-The gap between "I have an API" and "execute_dsl calls it" should be **5 minutes**, not 30.
+The gap between "I have an API" and "execute_code calls it" should be **5 minutes**, not 30.
 
 ## Target Personas
 
 | Persona | Needs | Path |
 |---------|-------|------|
-| Power user / scripter | Zero-code REST integration | `dsl-hydrations.json` |
+| Power user / scripter | Zero-code REST integration | `code-mode-hydrations.json` |
 | TS-savvy power user | Minimal code, custom logic | `quickHydration()` |
 | Super-power user (agent-tools) | Plug existing namespace factories | `plugAdapter()` |
-| Extension author (existing) | Full control | `DslHydration` interface (unchanged) |
+| Extension author (existing) | Full control | `CodeModeHydration` interface (unchanged) |
 
 ## Solution: Three-Tier Progressive Disclosure
 
 ```
-Tier 0: dsl-hydrations.json    (zero code, JSON config)
+Tier 0: code-mode-hydrations.json    (zero code, JSON config)
 Tier 1: quickHydration()       (minimal TS, REST endpoints)
 Tier 2: plugAdapter()          (existing namespace factories)
-Tier 3: DslHydration interface (full extension, unchanged)
+Tier 3: CodeModeHydration interface (full extension, unchanged)
 ```
 
-Each tier builds on the one below. The engine reads Tier 0 at startup and converts it to Tier 1 internally. Tier 1 and 2 both call `registerDslHydration()` under the hood.
+Each tier builds on the one below. The engine reads Tier 0 at startup and converts it to Tier 1 internally. Tier 1 and 2 both call `registerHydration()` under the hood.
 
 ---
 
-## Tier 0: JSON Config (`dsl-hydrations.json`)
+## Tier 0: JSON Config (`code-mode-hydrations.json`)
 
 ### Location
 
 ```
-~/.openclaw/workspace/dsl-hydrations.json              # main workspace
-~/.openclaw/workspaces/[agent-name]/dsl-hydrations.json # per-agent workspace
+~/.openclaw/workspace/code-mode-hydrations.json              # main workspace
+~/.openclaw/workspaces/[agent-name]/code-mode-hydrations.json # per-agent workspace
 ```
 
 The engine resolves the active workspace at startup and reads the file if present.
@@ -43,12 +43,12 @@ The engine resolves the active workspace at startup and reads the file if presen
 
 ```json
 {
-  "$schema": "https://openclaw.dev/schemas/dsl-hydrations.json",
+  "$schema": "https://openclaw.dev/schemas/code-mode-hydrations.json",
   "hydrations": [
     {
       "id": "jira",
       "namespaceName": "Jira",
-      "displayName": "Jira DSL",
+      "displayName": "Jira Code Mode",
       "baseUrl": "https://mysite.atlassian.net/rest/api/3",
       "auth": {
         "bearer": {
@@ -144,13 +144,13 @@ Supported auth types:
 ### How It Works Internally
 
 1. Engine startup: resolve active workspace path
-2. Read `dsl-hydrations.json` if it exists
+2. Read `code-mode-hydrations.json` if it exists
 3. For each entry, validate schema
 4. Resolve auth credentials via OpenClaw's secret resolution
 5. Build a REST adapter (generic fetch wrapper with auth + baseUrl)
 6. Build a namespace by parsing endpoint definitions into nested method objects
-7. Auto-generate `toolName` as `execute_{id}_dsl`
-8. Call `registerDslHydration()` with the constructed hydration + adapter
+7. Auto-generate `toolName` as `execute_{id}_code`
+8. Call `registerHydration()` with the constructed hydration + adapter
 
 ---
 
@@ -170,7 +170,7 @@ Exported from a new barrel: `extensions/tools-code-mode/quick.ts`
 interface QuickHydrationConfig {
   id: string;
   namespaceName: string;
-  displayName?: string;                    // defaults to `${namespaceName} DSL`
+  displayName?: string;                    // defaults to `${namespaceName} Code Mode`
   baseUrl: string;
   auth: AuthConfig;
   headers?: Record<string, string>;
@@ -214,11 +214,11 @@ function quickHydration(config: QuickHydrationConfig): void;
 
 1. Resolves auth via `resolveConfiguredSecretInputString()`
 2. Creates a generic REST adapter: `{ [namespace.method]: (params) => fetch(...) }`
-3. Constructs a `DslHydration` object with:
+3. Constructs a `CodeModeHydration` object with:
    - `createNamespace` returns the REST adapter object nested by dot-separated endpoint keys
    - `collectionClasses` = `{}` (no custom collections in quick mode)
    - `getSystemPrompt` returns the `prompt` string
-4. Calls `registerDslHydration(hydration, adapter)`
+4. Calls `registerHydration(hydration, adapter)`
 
 ### Example
 
@@ -303,8 +303,8 @@ function plugAdapter<TApi, TNamespace>(config: PlugAdapterConfig<TApi, TNamespac
 
 1. Resolves auth via OpenClaw's standard secret resolution
 2. Calls `config.createAdapter(resolvedCredentials)` to get the API object
-3. Constructs a full `DslHydration` from the config fields
-4. Calls `registerDslHydration(hydration, apiAdapter)`
+3. Constructs a full `CodeModeHydration` from the config fields
+4. Calls `registerHydration(hydration, apiAdapter)`
 
 ### Example: Plugging agent-tools M365
 
@@ -364,7 +364,7 @@ plugAdapter({
 extensions/tools-code-mode/
 ├── api.ts                          # existing public barrel (unchanged)
 ├── quick.ts                        # NEW: exports quickHydration, plugAdapter
-├── index.ts                        # updated: loads dsl-hydrations.json at startup
+├── index.ts                        # updated: loads code-mode-hydrations.json at startup
 ├── src/
 │   ├── hydration/                  # NEW: quick hydration subsystem
 │   │   ├── quick-hydration.ts      # quickHydration() implementation
@@ -372,7 +372,7 @@ extensions/tools-code-mode/
 │   │   ├── rest-adapter.ts         # generic REST adapter factory
 │   │   ├── endpoint-parser.ts      # shorthand endpoint string parser
 │   │   ├── auth-resolver.ts        # wraps resolveConfiguredSecretInputString
-│   │   ├── json-loader.ts          # loads + validates dsl-hydrations.json
+│   │   ├── json-loader.ts          # loads + validates code-mode-hydrations.json
 │   │   └── index.ts                # barrel for the hydration/ folder
 │   ├── executor.ts                 # existing (unchanged)
 │   ├── tool-factory.ts             # existing (unchanged)
@@ -424,12 +424,12 @@ register(api) {
 ```
 
 The loader:
-1. Resolves `{workspacePath}/dsl-hydrations.json`
+1. Resolves `{workspacePath}/code-mode-hydrations.json`
 2. Parses and validates against schema
 3. For each entry, calls `quickHydration()` internally
 4. Logs registration results (success/skip with reason)
 
-Hydrations from JSON are registered BEFORE the `execute_dsl` tool becomes available, so they're immediately usable.
+Hydrations from JSON are registered BEFORE the `execute_code` tool becomes available, so they're immediately usable.
 
 ### Error Handling
 
@@ -533,8 +533,8 @@ export function parseEndpointShorthand(shorthand: string): ParsedEndpoint {
 1. **`endpoint-parser.ts`** + tests — pure string parsing, no dependencies
 2. **`auth-resolver.ts`** + tests — wraps OpenClaw secret resolution
 3. **`rest-adapter.ts`** + tests — generic fetch wrapper
-4. **`quick-hydration.ts`** + tests — composes parser + resolver + adapter + registerDslHydration
-5. **`plug-adapter.ts`** + tests — simpler, just resolver + registerDslHydration
+4. **`quick-hydration.ts`** + tests — composes parser + resolver + adapter + registerHydration
+5. **`plug-adapter.ts`** + tests — simpler, just resolver + registerHydration
 6. **`json-loader.ts`** + tests — file read + validation + calls quickHydration
 7. **`quick.ts`** barrel — re-exports quickHydration and plugAdapter
 8. **Update `index.ts`** — call json-loader at startup
@@ -560,4 +560,4 @@ export function parseEndpointShorthand(shorthand: string): ParsedEndpoint {
 
 4. **Response transforms**: Should endpoints support a `transform` field for reshaping API responses before they reach the LLM? (Recommend: defer to v2, keep v1 simple.)
 
-5. **Pagination**: Should the REST adapter support automatic pagination? (Recommend: no, let users handle it in DSL code for now.)
+5. **Pagination**: Should the REST adapter support automatic pagination? (Recommend: no, let users handle it in code mode script for now.)

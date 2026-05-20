@@ -1,10 +1,10 @@
 /**
- * DSL Tool Factory Tests
+ * Code Mode Tool Factory Tests
  */
 
 import { describe, it, expect } from "vitest";
-import { createDslTool } from "../src/tool-factory.js";
-import type { DslHydration } from "../src/types.js";
+import { createCodeModeTool } from "../src/tool-factory.js";
+import type { CodeModeHydration } from "../src/types.js";
 
 // Test API and Namespace types
 interface TestApi {
@@ -21,12 +21,12 @@ interface TestNamespace {
 
 // Create a test hydration
 function createTestHydration(
-  overrides?: Partial<DslHydration<TestApi, TestNamespace>>,
-): DslHydration<TestApi, TestNamespace> {
+  overrides?: Partial<CodeModeHydration<TestApi, TestNamespace>>,
+): CodeModeHydration<TestApi, TestNamespace> {
   return {
     id: "test",
-    toolName: "execute_test_dsl",
-    displayName: "Test DSL",
+    toolName: "execute_test_code",
+    displayName: "Test Code Mode",
     namespaceName: "Test",
     createNamespace: (api: TestApi): TestNamespace => ({
       greet: api.greet,
@@ -34,7 +34,7 @@ function createTestHydration(
       asyncOperation: api.asyncOperation,
     }),
     collectionClasses: {},
-    getSystemPrompt: () => "Test DSL system prompt",
+    getSystemPrompt: () => "Test Code Mode system prompt",
     ...overrides,
   };
 }
@@ -51,21 +51,21 @@ function createTestApi(): TestApi {
   };
 }
 
-describe("createDslTool", () => {
+describe("createCodeModeTool", () => {
   it("creates a tool with correct name and description", () => {
     const hydration = createTestHydration();
     const api = createTestApi();
-    const tool = createDslTool(hydration, api);
+    const tool = createCodeModeTool(hydration, api);
 
-    expect(tool.name).toBe("execute_test_dsl");
-    expect(tool.description).toContain("Test DSL");
+    expect(tool.name).toBe("execute_test_code");
+    expect(tool.description).toContain("Test Code Mode");
     expect(tool.description).toContain("Test");
   });
 
   it("creates a tool with correct parameter schema", () => {
     const hydration = createTestHydration();
     const api = createTestApi();
-    const tool = createDslTool(hydration, api);
+    const tool = createCodeModeTool(hydration, api);
 
     expect(tool.parameters).toMatchObject({
       type: "object",
@@ -84,7 +84,7 @@ describe("createDslTool", () => {
   it("executes valid code and returns ok=true with returnValue", async () => {
     const hydration = createTestHydration();
     const api = createTestApi();
-    const tool = createDslTool(hydration, api);
+    const tool = createCodeModeTool(hydration, api);
 
     const result = await tool.execute("call-1", {
       code: `return Test.greet("World");`,
@@ -100,7 +100,7 @@ describe("createDslTool", () => {
   it("returns ok=false with error for invalid code", async () => {
     const hydration = createTestHydration();
     const api = createTestApi();
-    const tool = createDslTool(hydration, api);
+    const tool = createCodeModeTool(hydration, api);
 
     const result = await tool.execute("call-2", {
       code: `throw new Error("Test error");`,
@@ -118,7 +118,7 @@ describe("createDslTool", () => {
       defaultTimeoutMs: 1000, // 1 second default
     });
     const api = createTestApi();
-    const tool = createDslTool(hydration, api);
+    const tool = createCodeModeTool(hydration, api);
 
     const result = await tool.execute("call-3", {
       code: `await new Promise(resolve => setTimeout(resolve, 200)); return "done";`,
@@ -133,7 +133,7 @@ describe("createDslTool", () => {
   it("includes durationMs in output", async () => {
     const hydration = createTestHydration();
     const api = createTestApi();
-    const tool = createDslTool(hydration, api);
+    const tool = createCodeModeTool(hydration, api);
 
     const result = await tool.execute("call-4", {
       code: `return "quick";`,
@@ -147,7 +147,7 @@ describe("createDslTool", () => {
   it("captures console output", async () => {
     const hydration = createTestHydration();
     const api = createTestApi();
-    const tool = createDslTool(hydration, api);
+    const tool = createCodeModeTool(hydration, api);
 
     const result = await tool.execute("call-5", {
       code: `
@@ -165,7 +165,7 @@ describe("createDslTool", () => {
   it("handles async operations", async () => {
     const hydration = createTestHydration();
     const api = createTestApi();
-    const tool = createDslTool(hydration, api);
+    const tool = createCodeModeTool(hydration, api);
 
     const result = await tool.execute("call-6", {
       code: `return await Test.asyncOperation();`,
@@ -182,7 +182,7 @@ describe("createDslTool", () => {
       }),
     });
     const api = createTestApi();
-    const tool = createDslTool(hydration, api, { value: 42 });
+    const tool = createCodeModeTool(hydration, api, { value: 42 });
 
     const result = await tool.execute("call-7", {
       code: `return customValue + 8;`,
@@ -195,7 +195,7 @@ describe("createDslTool", () => {
   it("returns content with JSON-stringified output", async () => {
     const hydration = createTestHydration();
     const api = createTestApi();
-    const tool = createDslTool(hydration, api);
+    const tool = createCodeModeTool(hydration, api);
 
     const result = await tool.execute("call-8", {
       code: `return "test";`,
@@ -211,7 +211,7 @@ describe("createDslTool", () => {
   it("handles syntax errors", async () => {
     const hydration = createTestHydration();
     const api = createTestApi();
-    const tool = createDslTool(hydration, api);
+    const tool = createCodeModeTool(hydration, api);
 
     const result = await tool.execute("call-9", {
       code: `this is not valid javascript syntax!!!`,
@@ -225,7 +225,7 @@ describe("createDslTool", () => {
   it("handles code that returns undefined", async () => {
     const hydration = createTestHydration();
     const api = createTestApi();
-    const tool = createDslTool(hydration, api);
+    const tool = createCodeModeTool(hydration, api);
 
     const result = await tool.execute("call-10", {
       code: `// No return statement`,
@@ -239,7 +239,7 @@ describe("createDslTool", () => {
   it("uses console output as returnValue when result is undefined", async () => {
     const hydration = createTestHydration();
     const api = createTestApi();
-    const tool = createDslTool(hydration, api);
+    const tool = createCodeModeTool(hydration, api);
 
     const result = await tool.execute("call-11", {
       code: `
@@ -262,8 +262,8 @@ describe("createDslTool", () => {
       greet: (name: string) => `Bonjour, ${name}!`,
     };
 
-    const tool1 = createDslTool(hydration, api1);
-    const tool2 = createDslTool(hydration, api2);
+    const tool1 = createCodeModeTool(hydration, api1);
+    const tool2 = createCodeModeTool(hydration, api2);
 
     const result1 = await tool1.execute("call-12a", {
       code: `return Test.greet("Alice");`,
@@ -291,7 +291,7 @@ describe("createDslTool", () => {
     });
 
     const api = createTestApi();
-    const tool = createDslTool(hydration, api);
+    const tool = createCodeModeTool(hydration, api);
 
     // Namespace not created at tool creation time
     expect(namespaceCreationCount).toBe(0);

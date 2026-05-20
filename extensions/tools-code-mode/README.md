@@ -1,4 +1,4 @@
-# DSL Engine
+# Tools Code Mode
 
 ## Why Code Mode?
 
@@ -73,7 +73,7 @@ Turn 9 → LLM formats comparison table
 ##### Code mode (1 round-trip)
 
 ```js
-// execute_dsl({ hydrationId: "web", code: "..." })
+// execute_code({ hydrationId: "web", code: "..." })
 const products = ["Linear", "Shortcut", "Jira"];
 const comparison = [];
 
@@ -129,14 +129,14 @@ return comparison;
 
 ---
 
-Generic DSL execution engine. Owner plugins register domain-specific **hydrations** (typed namespace + prompt + collection classes + API adapter). The engine provides sandboxed code execution, session-scoped mode switching, and prompt injection.
+Generic code mode execution engine. Owner plugins register domain-specific **hydrations** (typed namespace + prompt + collection classes + API adapter). The engine provides sandboxed code execution, session-scoped mode switching, and prompt injection.
 
 ## How It Works
 
 ```
 Owner plugin registers hydration + API adapter
   → tools-code-mode stores it in the global registry
-  → execute_dsl tool becomes available
+  → execute_code tool becomes available
   → LLM generates JS code using the typed namespace
   → engine executes code in a worker-backed VM
   → result returned to LLM or Lobster workflow
@@ -148,38 +148,38 @@ The engine never imports domain code. Owner plugins bring their own namespace fa
 
 ```ts
 import {
-  registerDslHydration,
-  unregisterDslHydration,
-  activateDslMode,
-  deactivateDslMode,
+  registerHydration,
+  unregisterHydration,
+  activateCodeMode,
+  deactivateCodeMode,
 } from "@openclaw/tools-code-mode/api";
 
-import type { DslHydration } from "@openclaw/tools-code-mode/api";
+import type { CodeModeHydration } from "@openclaw/tools-code-mode/api";
 ```
 
 ## Registering a Hydration
 
-Owner plugins call `registerDslHydration` during their `register(api)` lifecycle:
+Owner plugins call `registerHydration` during their `register(api)` lifecycle:
 
 ```ts
 // extensions/my-domain/index.ts
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { registerDslHydration } from "@openclaw/tools-code-mode/api";
-import { createMyNamespace, MyItemSet } from "./dsl.js";
+import { registerHydration } from "@openclaw/tools-code-mode/api";
+import { createMyNamespace, MyItemSet } from "./namespace.js";
 import { getMySystemPrompt } from "./prompts.js";
 import { createMyApiAdapter } from "./adapter.js";
 
 export default definePluginEntry({
   id: "my-domain",
   name: "My Domain Agent",
-  description: "Registers the MyDomain DSL hydration.",
+  description: "Registers the MyDomain code mode hydration.",
   register(api) {
     const adapter = createMyApiAdapter(api);
 
-    registerDslHydration(
+    registerHydration(
       {
         id: "my-domain",
-        toolName: "execute_my_domain_dsl",
+        toolName: "execute_my_domain_code",
         displayName: "My Domain Copilot",
         namespaceName: "MyDomain",
         createNamespace: (apiAdapter) => createMyNamespace(apiAdapter),
@@ -195,13 +195,13 @@ export default definePluginEntry({
 });
 ```
 
-## The DslHydration Interface
+## The CodeModeHydration Interface
 
 ```ts
-interface DslHydration<TApi = unknown, TNamespace = unknown> {
+interface CodeModeHydration<TApi = unknown, TNamespace = unknown> {
   // Identity
   readonly id: string;              // "m365", "engage", "planner", "my-domain"
-  readonly toolName: string;        // "execute_m365_dsl" (informational)
+  readonly toolName: string;        // "execute_m365_code" (informational)
   readonly displayName: string;     // "M365 Copilot"
   readonly namespaceName: string;   // "M365" — injected as scope variable
 
@@ -223,13 +223,13 @@ interface DslHydration<TApi = unknown, TNamespace = unknown> {
 }
 ```
 
-## Tool: execute_dsl
+## Tool: execute_code
 
-Once at least one hydration is registered, the `execute_dsl` tool appears:
+Once at least one hydration is registered, the `execute_code` tool appears:
 
 ```json
 {
-  "name": "execute_dsl",
+  "name": "execute_code",
   "parameters": {
     "hydrationId": "m365",
     "code": "const msgs = await M365.messages.list({ top: 5 }); return msgs.summary();",
@@ -256,18 +256,18 @@ Once at least one hydration is registered, the `execute_dsl` tool appears:
 Activate a mode to inject the hydration's system prompt into the agent's context:
 
 ```ts
-import { activateDslMode, deactivateDslMode } from "@openclaw/tools-code-mode/api";
+import { activateCodeMode, deactivateCodeMode } from "@openclaw/tools-code-mode/api";
 
 // Activate — injects getSystemPrompt() on every agent turn for this session
-activateDslMode("m365", { user: "alice@contoso.com" }, sessionKey);
+activateCodeMode("m365", { user: "alice@contoso.com" }, sessionKey);
 
 // Deactivate — removes prompt contribution
-deactivateDslMode(sessionKey);
+deactivateCodeMode(sessionKey);
 ```
 
 The engine hooks into `agent_turn_prepare` and appends the active hydration's system prompt as context.
 
-## Complete Example: Weather DSL
+## Complete Example: Weather Code Mode
 
 A minimal example showing how to create a hydration from scratch:
 
@@ -302,7 +302,7 @@ export type WeatherNamespace = ReturnType<typeof createWeatherNamespace>;
 ```ts
 // extensions/weather-agent/src/prompts.ts
 export function getWeatherSystemPrompt(): string {
-  return `You have access to **execute_dsl** with hydrationId "weather".
+  return `You have access to **execute_code** with hydrationId "weather".
 The code has access to the \`Weather\` namespace:
 
 | Method | Signature | Returns |
@@ -340,7 +340,7 @@ export function createWeatherAdapter(apiKey: string): WeatherAPI {
 ```ts
 // extensions/weather-agent/index.ts
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { registerDslHydration } from "@openclaw/tools-code-mode/api";
+import { registerHydration } from "@openclaw/tools-code-mode/api";
 import { createWeatherNamespace } from "./src/namespace.js";
 import { getWeatherSystemPrompt } from "./src/prompts.js";
 import { createWeatherAdapter } from "./src/adapter.js";
@@ -348,15 +348,15 @@ import { createWeatherAdapter } from "./src/adapter.js";
 export default definePluginEntry({
   id: "weather-agent",
   name: "Weather Agent",
-  description: "Weather DSL hydration for tools-code-mode.",
+  description: "Weather code mode hydration for tools-code-mode.",
   register(api) {
     const config = api.getPluginConfig();
     const adapter = createWeatherAdapter(config?.apiKey ?? process.env.WEATHER_API_KEY ?? "");
 
-    registerDslHydration(
+    registerHydration(
       {
         id: "weather",
-        toolName: "execute_weather_dsl",
+        toolName: "execute_weather_code",
         displayName: "Weather Copilot",
         namespaceName: "Weather",
         createNamespace: (a) => createWeatherNamespace(a),
@@ -375,7 +375,7 @@ export default definePluginEntry({
 Once registered, the LLM can call:
 
 ```js
-// execute_dsl({ hydrationId: "weather", code: "..." })
+// execute_code({ hydrationId: "weather", code: "..." })
 const current = await Weather.current("Seattle");
 const forecast = await Weather.forecast("Seattle", 3);
 return { current, forecast };
@@ -383,12 +383,12 @@ return { current, forecast };
 
 ## Complete Example: Wrapping an Existing MCP Server
 
-If you already have an MCP server exposing tools, you can create a thin DSL namespace over it:
+If you already have an MCP server exposing tools, you can create a thin code mode namespace over it:
 
 ```ts
-// extensions/github-dsl/index.ts
+// extensions/github-code-mode/index.ts
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { registerDslHydration } from "@openclaw/tools-code-mode/api";
+import { registerHydration } from "@openclaw/tools-code-mode/api";
 
 interface GitHubAPI {
   repos: { list(): Promise<{ name: string; url: string }[]> };
@@ -449,22 +449,22 @@ function createGitHubAdapter(token: string): GitHubAPI {
 }
 
 export default definePluginEntry({
-  id: "github-dsl",
-  name: "GitHub DSL",
-  description: "GitHub DSL hydration — repos, issues, PRs via typed namespace.",
+  id: "github-code-mode",
+  name: "GitHub Code Mode",
+  description: "GitHub code mode hydration — repos, issues, PRs via typed namespace.",
   register(api) {
     const token = process.env.GITHUB_TOKEN ?? "";
     if (!token) return;
 
-    registerDslHydration(
+    registerHydration(
       {
         id: "github",
-        toolName: "execute_github_dsl",
+        toolName: "execute_github_code",
         displayName: "GitHub Copilot",
         namespaceName: "GitHub",
         createNamespace: (a) => createGitHubNamespace(a),
         collectionClasses: {},
-        getSystemPrompt: () => `You have access to execute_dsl with hydrationId "github".
+        getSystemPrompt: () => `You have access to execute_code with hydrationId "github".
 
 | Namespace | Method | Returns |
 |-----------|--------|---------|
@@ -484,7 +484,7 @@ All methods are async. Use \`return\` to capture results.`,
 
 ## Chainable Collection Classes
 
-For richer DSL ergonomics, provide collection classes that extend Array:
+For richer code mode ergonomics, provide collection classes that extend Array:
 
 ```ts
 export class IssueSet extends Array<Issue> {
@@ -521,13 +521,13 @@ return urgent.summary();
 
 ## Lobster Workflow Integration
 
-Lobster workflows invoke DSL code through `openclaw.invoke`:
+Lobster workflows invoke code mode scripts through `openclaw.invoke`:
 
 ```yaml
 steps:
   - id: fetch
     command: >
-      openclaw.invoke --tool execute_dsl --args-json '{
+      openclaw.invoke --tool execute_code --args-json '{
         "hydrationId": "m365",
         "code": "return (await M365.messages.list({ top: 20 })).summary();"
       }'
@@ -543,7 +543,7 @@ steps:
 Wrap the API adapter before registration to intercept write operations:
 
 ```ts
-import { registerDslHydration } from "@openclaw/tools-code-mode/api";
+import { registerHydration } from "@openclaw/tools-code-mode/api";
 
 const rawAdapter = createLiveGraphAdapter(config);
 
@@ -560,7 +560,7 @@ const guardedAdapter = wrapWithApprovalGuard(rawAdapter, {
   },
 });
 
-registerDslHydration(m365Hydration, guardedAdapter);
+registerHydration(m365Hydration, guardedAdapter);
 ```
 
 The engine never knows about approvals — it just runs code against whatever adapter was registered.
@@ -573,11 +573,11 @@ Plugin manifest (`openclaw.plugin.json`):
 {
   "id": "tools-code-mode",
   "activation": { "onStartup": false },
-  "contracts": { "tools": ["execute_dsl"] }
+  "contracts": { "tools": ["execute_code"] }
 }
 ```
 
-The `execute_dsl` tool only appears when at least one hydration is registered.
+The `execute_code` tool only appears when at least one hydration is registered.
 
 ## Testing
 

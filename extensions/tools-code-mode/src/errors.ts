@@ -1,4 +1,4 @@
-export type DslErrorKind =
+export type CodeModeErrorKind =
   | "timeout"
   | "codeSizeExceeded"
   | "sandboxViolation"
@@ -7,12 +7,12 @@ export type DslErrorKind =
   | "validationError"
   | "concurrencyLimitReached";
 
-export class DslError extends Error {
+export class CodeModeError extends Error {
   constructor(
-    public readonly kind: DslErrorKind,
+    public readonly kind: CodeModeErrorKind,
     message: string,
   ) {
     super(message);
-    this.name = "DslError";
+    this.name = "CodeModeError";
   }
 }

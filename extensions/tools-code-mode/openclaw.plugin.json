@@ -1,12 +1,12 @@
 {
   "id": "tools-code-mode",
-  "name": "DSL Engine",
-  "description": "Generic DSL execution engine for registered domain hydrations",
+  "name": "Tools Code Mode",
+  "description": "Generic code mode execution engine for registered domain hydrations",
   "activation": {
     "onStartup": false
   },
   "contracts": {
-    "tools": ["execute_dsl"]
+    "tools": ["execute_code"]
   },
   "configSchema": {
     "type": "object",

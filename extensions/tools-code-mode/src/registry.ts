@@ -1,20 +1,20 @@
-import type { DslHydration } from "./types.js";
-import { DslModeManager } from "./mode-manager.js";
+import type { CodeModeHydration } from "./types.js";
+import { CodeModeSessionManager } from "./mode-manager.js";
 
-export type DslHydrationRegistration<TApi = unknown, TNamespace = unknown> = {
-  hydration: DslHydration<TApi, TNamespace>;
+export type CodeModeHydrationRegistration<TApi = unknown, TNamespace = unknown> = {
+  hydration: CodeModeHydration<TApi, TNamespace>;
   apiAdapter: TApi;
 };
 
-export class DslEngineRegistry {
-  private readonly registrations = new Map<string, DslHydrationRegistration>();
+export class CodeModeRegistry {
+  private readonly registrations = new Map<string, CodeModeHydrationRegistration>();
 
   register<TApi, TNamespace>(
-    hydration: DslHydration<TApi, TNamespace>,
+    hydration: CodeModeHydration<TApi, TNamespace>,
     apiAdapter: TApi,
   ): void {
     this.registrations.set(hydration.id, {
-      hydration: hydration as DslHydration,
+      hydration: hydration as CodeModeHydration,
       apiAdapter,
     });
   }
@@ -23,18 +23,18 @@ export class DslEngineRegistry {
     return this.registrations.delete(hydrationId);
   }
 
-  get(hydrationId: string): DslHydrationRegistration | undefined {
+  get(hydrationId: string): CodeModeHydrationRegistration | undefined {
     return this.registrations.get(hydrationId);
   }
 
-  list(): DslHydrationRegistration[] {
+  list(): CodeModeHydrationRegistration[] {
     return Array.from(this.registrations.values());
   }
 
-  listHydrations(): DslHydration[] {
+  listHydrations(): CodeModeHydration[] {
     return this.list().map((entry) => entry.hydration);
   }
 }
 
-export const globalDslEngineRegistry = new DslEngineRegistry();
-export const globalDslModeManager = new DslModeManager([]);
+export const globalCodeModeRegistry = new CodeModeRegistry();
+export const globalCodeModeSessionManager = new CodeModeSessionManager([]);

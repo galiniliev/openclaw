@@ -1,29 +1,29 @@
 import { definePluginEntry, type AnyAgentTool } from "openclaw/plugin-sdk/plugin-entry";
-import { createDslTool } from "./src/tool-factory.js";
-import { globalDslEngineRegistry, globalDslModeManager } from "./src/registry.js";
+import { createCodeModeTool } from "./src/tool-factory.js";
+import { globalCodeModeRegistry, globalCodeModeSessionManager } from "./src/registry.js";
 import { shutdown } from "./src/executor.js";
-import type { DslToolInput } from "./src/types.js";
+import type { CodeModeToolInput } from "./src/types.js";
 
-type ExecuteDslToolParams = DslToolInput & {
+type ExecuteCodeToolParams = CodeModeToolInput & {
   hydrationId?: string;
 };
 
-function createExecuteDslTool(): AnyAgentTool {
+function createExecuteCodeModeTool(): AnyAgentTool {
   return {
-    name: "execute_dsl",
+    name: "execute_code",
     description:
-      "Execute JavaScript DSL code for a registered DSL hydration. Use hydrationId to choose the domain.",
+      "Execute JavaScript code for a registered code mode hydration. Use hydrationId to choose the domain.",
     parameters: {
       type: "object",
       additionalProperties: false,
       properties: {
         hydrationId: {
           type: "string",
-          description: "Registered DSL hydration id, for example m365, engage, or planner.",
+          description: "Registered code mode hydration id, for example m365, engage, or planner.",
         },
         code: {
           type: "string",
-          description: "JavaScript code to execute against the selected DSL namespace.",
+          description: "JavaScript code to execute against the selected code mode namespace.",
         },
         timeoutMs: {
           type: "number",
@@ -33,19 +33,19 @@ function createExecuteDslTool(): AnyAgentTool {
       required: ["hydrationId", "code"],
     },
     async execute(toolCallId, params) {
-      const input = readExecuteDslToolParams(params);
-      const registration = globalDslEngineRegistry.get(input.hydrationId);
+      const input = readExecuteCodeToolParams(params);
+      const registration = globalCodeModeRegistry.get(input.hydrationId);
       if (!registration) {
-        const available = globalDslEngineRegistry
+        const available = globalCodeModeRegistry
           .listHydrations()
           .map((hydration) => hydration.id)
           .sort();
         throw new Error(
-          `DSL hydration "${input.hydrationId}" is not registered. Available hydrations: ${available.join(", ") || "(none)"}`,
+          `code mode hydration "${input.hydrationId}" is not registered. Available hydrations: ${available.join(", ") || "(none)"}`,
         );
       }
 
-      const tool = createDslTool(registration.hydration, registration.apiAdapter);
+      const tool = createCodeModeTool(registration.hydration, registration.apiAdapter);
       return await tool.execute(toolCallId, {
         code: input.code,
         timeoutMs: input.timeoutMs,
@@ -54,38 +54,38 @@ function createExecuteDslTool(): AnyAgentTool {
   };
 }
 
-function readExecuteDslToolParams(params: unknown): Required<Pick<ExecuteDslToolParams, "hydrationId" | "code">> &
-  Pick<ExecuteDslToolParams, "timeoutMs"> {
+function readExecuteCodeToolParams(params: unknown): Required<Pick<ExecuteCodeToolParams, "hydrationId" | "code">> &
+  Pick<ExecuteCodeToolParams, "timeoutMs"> {
   if (!params || typeof params !== "object" || Array.isArray(params)) {
-    throw new Error("execute_dsl params must be an object.");
+    throw new Error("execute_code params must be an object.");
   }
   const record = params as Record<string, unknown>;
   const hydrationId = typeof record.hydrationId === "string" ? record.hydrationId.trim() : "";
   const code = typeof record.code === "string" ? record.code : "";
   const timeoutMs = typeof record.timeoutMs === "number" ? record.timeoutMs : undefined;
   if (!hydrationId) {
-    throw new Error("execute_dsl requires hydrationId.");
+    throw new Error("execute_code requires hydrationId.");
   }
   if (!code) {
-    throw new Error("execute_dsl requires code.");
+    throw new Error("execute_code requires code.");
   }
   return { hydrationId, code, timeoutMs };
 }
 
 export default definePluginEntry({
   id: "tools-code-mode",
-  name: "DSL Engine",
-  description: "Generic DSL execution engine for registered domain hydrations.",
+  name: "Code Mode Engine",
+  description: "Generic code mode execution engine for registered domain hydrations.",
   register(api) {
-    for (const hydration of globalDslEngineRegistry.listHydrations()) {
-      globalDslModeManager.register(hydration);
+    for (const hydration of globalCodeModeRegistry.listHydrations()) {
+      globalCodeModeSessionManager.register(hydration);
     }
 
     // Mode activation injects the hydration's system prompt into agent context.
-    // This is a prompt hint only — it does NOT gate execute_dsl access.
+    // This is a prompt hint only — it does NOT gate execute_code access.
     // Any registered hydration can be executed regardless of active mode.
     api.on("agent_turn_prepare", (_event, ctx) => {
-      const prompt = globalDslModeManager.getActivePrompt(ctx.sessionKey);
+      const prompt = globalCodeModeSessionManager.getActivePrompt(ctx.sessionKey);
       if (!prompt) {
         return undefined;
       }
@@ -95,8 +95,8 @@ export default definePluginEntry({
     });
 
     api.registerTool(
-      () => (globalDslEngineRegistry.list().length > 0 ? createExecuteDslTool() : null),
-      { name: "execute_dsl", optional: true },
+      () => (globalCodeModeRegistry.list().length > 0 ? createExecuteCodeModeTool() : null),
+      { name: "execute_code", optional: true },
     );
 
     api.on("dispose", () => {
