@@ -63,6 +63,43 @@ describe("tools-code-mode plugin entry", () => {
     expect(result.details.returnValue).toBe("Hello, World!");
   });
 
+  it("returns structured validation errors for unknown hydrations", async () => {
+    const { api, toolFactories } = createApi();
+    plugin.register(api as never);
+    registerCodeModeHydration(hydration, {
+      greet: (name: string) => `Hello, ${name}!`,
+    });
+
+    const tool = (toolFactories[0] as () => any)();
+    const result = await tool.execute("call-1", {
+      hydrationId: "unknown",
+      code: "return 1;",
+    });
+
+    expect(result.details.ok).toBe(false);
+    expect(result.details.errorKind).toBe("validationError");
+    expect(result.details.error).toContain('code mode hydration "unknown" is not registered');
+    expect(result.content[0].text).toContain("Available hydrations: test");
+  });
+
+  it("returns structured validation errors for malformed execute_code params", async () => {
+    const { api, toolFactories } = createApi();
+    plugin.register(api as never);
+    registerCodeModeHydration(hydration, {
+      greet: (name: string) => `Hello, ${name}!`,
+    });
+
+    const tool = (toolFactories[0] as () => any)();
+    const result = await tool.execute("call-1", {
+      hydrationId: "",
+      code: "return 1;",
+    });
+
+    expect(result.details.ok).toBe(false);
+    expect(result.details.errorKind).toBe("validationError");
+    expect(result.details.error).toBe("execute_code requires hydrationId.");
+  });
+
   it("adds the active session prompt during agent turn preparation", () => {
     const { api, hooks } = createApi();
     plugin.register(api as never);

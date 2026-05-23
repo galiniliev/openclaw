@@ -113,23 +113,22 @@ try {
     codeGeneration: { strings: false, wasm: false },
   });
 
-  const setupScript = new vm.Script(` + "`" + `
-    const _setTimeout = (fn, ms) => {
-      // Minimal setTimeout within the VM realm
-      return new Promise(resolve => {
-        const start = Date.now();
-        const check = () => {
-          if (Date.now() - start >= ms) { fn(); resolve(); }
-          else { Promise.resolve().then(check); }
-        };
-        check();
-      });
-    };
-    globalThis.setTimeout = (fn, ms) => { _setTimeout(fn, ms || 0); return 0; };
-    globalThis.clearTimeout = () => {};
-    globalThis.Promise = Promise;
-    globalThis.JSON = JSON;
-  ` + "`" + `);
+  const setupScript = new vm.Script([
+    "const _setTimeout = (fn, ms) => {",
+    "  return new Promise(resolve => {",
+    "    const start = Date.now();",
+    "    const check = () => {",
+    "      if (Date.now() - start >= ms) { fn(); resolve(); }",
+    "      else { Promise.resolve().then(check); }",
+    "    };",
+    "    check();",
+    "  });",
+    "};",
+    "globalThis.setTimeout = (fn, ms) => { _setTimeout(fn, ms || 0); return 0; };",
+    "globalThis.clearTimeout = () => {};",
+    "globalThis.Promise = Promise;",
+    "globalThis.JSON = JSON;",
+  ].join("\n"));
   setupScript.runInContext(context);
 
   context[workerData.namespaceName] = deserialize(workerData.namespace);
@@ -250,7 +249,7 @@ export async function executeCodeMode<TApi, TNamespace>(
       namespace: serializeScopeValue(namespace, "namespace", []),
       collectionClassSources: Object.entries(hydration.collectionClasses).map(([name, cls]) => [
         assertIdentifier(name, "collection class name"),
-        Function.prototype.toString.call(cls),
+        serializeConstructorSource(cls),
       ]),
       extraGlobals: serializeScopeValue(opts?.extraGlobals ?? {}, "extraGlobals", []),
     };
@@ -267,6 +266,12 @@ export async function executeCodeMode<TApi, TNamespace>(
   } finally {
     executionSemaphore.release();
   }
+}
+
+function serializeConstructorSource(cls: Function): string {
+  return Function.prototype.toString
+    .call(cls)
+    .replace(/static\s*\{\s*__name\(this,\s*["'][^"']+["']\)\s*;?\s*\}/g, "");
 }
 
 function resolveTimeoutMs<TApi, TNamespace>(

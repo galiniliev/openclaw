@@ -3,7 +3,7 @@
   "name": "Tools Code Mode",
   "description": "Generic code mode execution engine for registered domain hydrations",
   "activation": {
-    "onStartup": false
+    "onStartup": true
   },
   "contracts": {
     "tools": ["execute_code"]

@@ -163,12 +163,12 @@ import { quickHydration, plugAdapter } from "@openclaw/tools-code-mode/quick";
 
 ## Registering a Hydration
 
-Owner plugins call `registerHydration` during their `register(api)` lifecycle:
+Owner plugins call `registerCodeModeHydration` during their `register(api)` lifecycle:
 
 ```ts
 // extensions/my-domain/index.ts
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { registerHydration } from "@openclaw/tools-code-mode/api";
+import { registerCodeModeHydration } from "@openclaw/tools-code-mode/api";
 import { createMyNamespace, MyItemSet } from "./namespace.js";
 import { getMySystemPrompt } from "./prompts.js";
 import { createMyApiAdapter } from "./adapter.js";
@@ -180,7 +180,7 @@ export default definePluginEntry({
   register(api) {
     const adapter = createMyApiAdapter(api);
 
-    registerHydration(
+    registerCodeModeHydration(
       {
         id: "my-domain",
         toolName: "execute_my_domain_code",
@@ -260,13 +260,16 @@ Once at least one hydration is registered, the `execute_code` tool appears:
 Activate a mode to inject the hydration's system prompt into the agent's context:
 
 ```ts
-import { activateCodeMode, deactivateCodeMode } from "@openclaw/tools-code-mode/api";
+import {
+  activateCodeModeSession,
+  deactivateCodeModeSession,
+} from "@openclaw/tools-code-mode/api";
 
 // Activate — injects getSystemPrompt() on every agent turn for this session
-activateCodeMode("m365", { user: "alice@contoso.com" }, sessionKey);
+activateCodeModeSession("m365", { user: "alice@contoso.com" }, sessionKey);
 
 // Deactivate — removes prompt contribution
-deactivateCodeMode(sessionKey);
+deactivateCodeModeSession(sessionKey);
 ```
 
 The engine hooks into `agent_turn_prepare` and appends the active hydration's system prompt as context.
@@ -344,7 +347,7 @@ export function createWeatherAdapter(apiKey: string): WeatherAPI {
 ```ts
 // extensions/weather-agent/index.ts
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { registerHydration } from "@openclaw/tools-code-mode/api";
+import { registerCodeModeHydration } from "@openclaw/tools-code-mode/api";
 import { createWeatherNamespace } from "./src/namespace.js";
 import { getWeatherSystemPrompt } from "./src/prompts.js";
 import { createWeatherAdapter } from "./src/adapter.js";
@@ -357,7 +360,7 @@ export default definePluginEntry({
     const config = api.getPluginConfig();
     const adapter = createWeatherAdapter(config?.apiKey ?? process.env.WEATHER_API_KEY ?? "");
 
-    registerHydration(
+    registerCodeModeHydration(
       {
         id: "weather",
         toolName: "execute_weather_code",
@@ -392,7 +395,7 @@ If you already have an MCP server exposing tools, you can create a thin code mod
 ```ts
 // extensions/github-code-mode/index.ts
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { registerHydration } from "@openclaw/tools-code-mode/api";
+import { registerCodeModeHydration } from "@openclaw/tools-code-mode/api";
 
 interface GitHubAPI {
   repos: { list(): Promise<{ name: string; url: string }[]> };
@@ -460,7 +463,7 @@ export default definePluginEntry({
     const token = process.env.GITHUB_TOKEN ?? "";
     if (!token) return;
 
-    registerHydration(
+    registerCodeModeHydration(
       {
         id: "github",
         toolName: "execute_github_code",
@@ -525,21 +528,23 @@ return urgent.summary();
 
 ## Lobster Workflow Integration
 
-Lobster workflows invoke code mode scripts through `openclaw.invoke`:
+Lobster workflows invoke code mode scripts through the Gateway `tools.invoke`
+model-tool path. `execute_code` is not an `exec` tool call and not an
+`openclaw execute_code` CLI command.
 
 ```yaml
 steps:
   - id: fetch
-    command: >
-      openclaw.invoke --tool execute_code --args-json '{
-        "hydrationId": "m365",
-        "code": "return (await M365.messages.list({ top: 20 })).summary();"
-      }'
+    tool: execute_code
+    args:
+      hydrationId: m365
+      code: return (await M365.messages.list({ top: 20 })).summary();
 
   - id: summarize
-    command: >
-      openclaw.invoke --tool llm-task --action json
-      --args-json '{"prompt":"Summarize these messages","inputFrom":"fetch"}'
+    tool: llm-task
+    args:
+      prompt: Summarize these messages
+      inputFrom: fetch
 ```
 
 ## Adding Approval Guards (Future)
@@ -547,7 +552,7 @@ steps:
 Wrap the API adapter before registration to intercept write operations:
 
 ```ts
-import { registerHydration } from "@openclaw/tools-code-mode/api";
+import { registerCodeModeHydration } from "@openclaw/tools-code-mode/api";
 
 const rawAdapter = createLiveGraphAdapter(config);
 
@@ -564,7 +569,7 @@ const guardedAdapter = wrapWithApprovalGuard(rawAdapter, {
   },
 });
 
-registerHydration(m365Hydration, guardedAdapter);
+registerCodeModeHydration(m365Hydration, guardedAdapter);
 ```
 
 The engine never knows about approvals — it just runs code against whatever adapter was registered.
@@ -576,12 +581,14 @@ Plugin manifest (`openclaw.plugin.json`):
 ```json
 {
   "id": "tools-code-mode",
-  "activation": { "onStartup": false },
+  "activation": { "onStartup": true },
   "contracts": { "tools": ["execute_code"] }
 }
 ```
 
 The `execute_code` tool only appears when at least one hydration is registered.
+
+For packaged or bundled plugins, import the API via the package path (`@openclaw/tools-code-mode/api` or the package name configured for the engine). For local side-by-side plugins loaded with `plugins.load.paths`, use a relative import to the colocated engine plugin, for example `../tools-code-mode/api.js`, so both plugins share the same registry instance.
 
 ---
 

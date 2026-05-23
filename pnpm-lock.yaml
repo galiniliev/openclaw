@@ -1539,6 +1539,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
 
+  extensions/tools-code-mode:
+    devDependencies:
+      '@openclaw/plugin-sdk':
+        specifier: workspace:*
+        version: link:../../packages/plugin-sdk
+
   extensions/tts-local-cli:
     devDependencies:
       '@openclaw/plugin-sdk':

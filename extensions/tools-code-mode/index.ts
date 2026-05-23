@@ -3,7 +3,7 @@ import { createCodeModeTool } from "./src/tool-factory.js";
 import { globalCodeModeRegistry, globalCodeModeSessionManager } from "./src/registry.js";
 import { shutdown } from "./src/executor.js";
 import { loadJsonHydrations } from "./src/hydration/json-loader.js";
-import type { CodeModeToolInput } from "./src/types.js";
+import type { CodeModeToolInput, CodeModeToolOutput } from "./src/types.js";
 
 type ExecuteCodeToolParams = CodeModeToolInput & {
   hydrationId?: string;
@@ -34,15 +34,22 @@ function createExecuteCodeModeTool(): AnyAgentTool {
       required: ["hydrationId", "code"],
     },
     async execute(toolCallId, params) {
+      const startTime = Date.now();
       const input = readExecuteCodeToolParams(params);
+      if ("error" in input) {
+        return createFailureToolResult(input.error, "validationError", Date.now() - startTime);
+      }
+
       const registration = globalCodeModeRegistry.get(input.hydrationId);
       if (!registration) {
         const available = globalCodeModeRegistry
           .listHydrations()
           .map((hydration) => hydration.id)
           .sort();
-        throw new Error(
+        return createFailureToolResult(
           `code mode hydration "${input.hydrationId}" is not registered. Available hydrations: ${available.join(", ") || "(none)"}`,
+          "validationError",
+          Date.now() - startTime,
         );
       }
 
@@ -55,22 +62,46 @@ function createExecuteCodeModeTool(): AnyAgentTool {
   };
 }
 
-function readExecuteCodeToolParams(params: unknown): Required<Pick<ExecuteCodeToolParams, "hydrationId" | "code">> &
-  Pick<ExecuteCodeToolParams, "timeoutMs"> {
+function readExecuteCodeToolParams(params: unknown):
+  | (Required<Pick<ExecuteCodeToolParams, "hydrationId" | "code">> & Pick<ExecuteCodeToolParams, "timeoutMs">)
+  | { error: string } {
   if (!params || typeof params !== "object" || Array.isArray(params)) {
-    throw new Error("execute_code params must be an object.");
+    return { error: "execute_code params must be an object." };
   }
   const record = params as Record<string, unknown>;
   const hydrationId = typeof record.hydrationId === "string" ? record.hydrationId.trim() : "";
   const code = typeof record.code === "string" ? record.code : "";
   const timeoutMs = typeof record.timeoutMs === "number" ? record.timeoutMs : undefined;
   if (!hydrationId) {
-    throw new Error("execute_code requires hydrationId.");
+    return { error: "execute_code requires hydrationId." };
   }
   if (!code) {
-    throw new Error("execute_code requires code.");
+    return { error: "execute_code requires code." };
   }
   return { hydrationId, code, timeoutMs };
+}
+
+function createFailureToolResult(
+  error: string,
+  errorKind: CodeModeToolOutput["errorKind"],
+  durationMs: number,
+) {
+  const toolOutput: CodeModeToolOutput = {
+    ok: false,
+    consoleOutput: [],
+    error,
+    errorKind,
+    durationMs,
+  };
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(toolOutput, null, 2),
+      },
+    ],
+    details: toolOutput,
+  };
 }
 
 export default definePluginEntry({
