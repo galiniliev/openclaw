@@ -8,6 +8,11 @@
   "contracts": {
     "tools": ["execute_code"]
   },
+  "toolMetadata": {
+    "execute_code": {
+      "optional": true
+    }
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

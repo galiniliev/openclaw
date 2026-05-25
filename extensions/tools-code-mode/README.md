@@ -127,6 +127,147 @@ return comparison;
 | Latency | N * (LLM think + API call) | 1 * (API calls run in parallel) |
 | Composability | None (each call isolated) | Full (variables, loops, conditionals) |
 
+#### Reproducible micro-benchmark
+
+[`tests/comparison.test.ts`](./tests/comparison.test.ts) runs the same task —
+"list users with more than 5 posts, sorted by post count descending" — two ways
+against an instrumented mock API. It records concrete numbers so the table above
+can be quoted with proof rather than estimates:
+
+```
+metric                | direct tool calls | code mode
+----------------------|-------------------|----------
+agent round-trips     |                12 | 1
+underlying API calls  |                11 | 11
+bytes into LLM context|             14076 | 163
+wall-clock ms         |                 1 | 43
+```
+
+Reading the numbers:
+
+- **agent round-trips** is the headline metric: 12 LLM turns vs. 1. Every extra
+  turn costs prefill (whole growing context re-encoded) plus decoding plus
+  network — typically the dominant cost in a real run.
+- **underlying API calls** is identical (11). Code mode does not skip work; it
+  just keeps it inside one execute_code turn.
+- **bytes into LLM context** drops ~86x (14,076 → 163). In direct mode every
+  intermediate tool result is appended to the conversation; in code mode only
+  the final filtered/sorted return value lands in the prompt.
+- **wall-clock ms** is *not* a fair LLM-cost comparison in this micro-benchmark
+  — the direct path is a synchronous in-process loop with no LLM and no real
+  network, while code mode pays a worker-thread spin-up cost. Against a real
+  agent + real network the round-trip and context-bytes columns dominate and
+  code mode wins by a large margin.
+
+Run it locally:
+
+```bash
+node node_modules/vitest/vitest.mjs run extensions/tools-code-mode/tests/comparison.test.ts --reporter=verbose
+```
+
+The test asserts that both modes return the **same result**, that direct mode
+uses exactly 12 round-trips and code mode uses 1, that the underlying API call
+count is identical, and that code mode's context payload is at least 5x smaller.
+
+#### Reproducing the same comparison in a live OpenClaw agent
+
+The unit test above proves the mechanics. To see the same effect end-to-end
+against a real model + real network, point both modes at a public API — this
+recipe uses JSONPlaceholder (`https://jsonplaceholder.typicode.com`) because it
+exposes `/users` (10 users) and `/posts?userId=X`, which matches the test
+fixture without auth.
+
+**1. Set up the code-mode side.** Drop a hydration in the workspace:
+
+`~/.openclaw/workspace/code-mode-hydrations.json`
+
+```json
+{
+  "hydrations": [
+    {
+      "id": "demo",
+      "namespaceName": "Demo",
+      "baseUrl": "https://jsonplaceholder.typicode.com",
+      "auth": { "type": "none" },
+      "endpoints": {
+        "users.list":   "GET /users",
+        "posts.byUser": "GET /posts?{userId}"
+      },
+      "prompt": "Demo.users.list() → User[]; Demo.posts.byUser({userId}) → Post[]. Use these to answer the task."
+    }
+  ]
+}
+```
+
+This registers a Tier 0 hydration; the engine activates `execute_code` on
+startup as soon as it sees this file. (`tools-code-mode`'s manifest sets
+`activation.onStartup: true`, and the JSON loader runs at register time.)
+
+**2. Set up the direct-tools side.** Configure a generic HTTP MCP server so
+the same two endpoints are reachable as discrete agent tools. Any MCP fetch
+server works; the widely-published `@modelcontextprotocol/server-fetch` is the
+simplest:
+
+`~/.openclaw/config/openclaw.mcp.json`
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "jsonplaceholder": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-fetch"]
+      }
+    }
+  }
+}
+```
+
+The agent now has a `fetch` tool that, like any per-call tool, lands one
+response in the LLM context per invocation.
+
+**3. Run the same prompt under each configuration.** Use identical model,
+prompt, and seed; only vary the tool allowlist:
+
+```bash
+# Code mode: only execute_code is allowed.
+openclaw run \
+  --tools-allow "execute_code" \
+  "List the JSONPlaceholder users who have more than 5 posts, sorted by post count descending. Return name and post count."
+
+# Direct mode: only the MCP fetch tool is allowed.
+openclaw run \
+  --tools-allow "jsonplaceholder/*" \
+  "List the JSONPlaceholder users who have more than 5 posts, sorted by post count descending. Return name and post count."
+```
+
+**4. Compare telemetry.** OpenClaw records tool calls, turn counts, and token
+usage per session. Inspect either run with:
+
+```bash
+openclaw sessions list --limit 2
+openclaw sessions show <session-id> --json | jq '.turns | length, .usage'
+```
+
+You should see roughly the same shape as the unit test:
+
+| Metric | Direct (fetch tool) | Code mode (`execute_code`) |
+|---|---|---|
+| Tool-call turns | ~11–12 (one per resource) | 1 |
+| Prompt tokens (cumulative) | high — every response re-encoded each turn | low — only final return value |
+| Wall-clock | dominated by N × (model think + HTTP) | dominated by 1 × model think + parallel HTTP inside worker |
+
+The direct path's prompt-token total typically dwarfs code mode by 10–100x on
+this scenario because each user-posts response (~1–4 KB of JSON) is re-encoded
+into every subsequent turn's prompt; code mode reduces the same workload to a
+single structured return value (~150–300 bytes in our fixture).
+
+**Caveats for honest measurement.** Pin the same model + temperature on both
+runs, disable any caching, and run each at least 3 times — model token usage
+varies turn-to-turn even for identical prompts. The unit test stays the
+reproducible "lower bound" proof; the live agent run shows the real LLM-cost
+impact those numbers translate to.
+
 ---
 
 Generic code mode execution engine. Owner plugins register domain-specific **hydrations** (typed namespace + prompt + collection classes + API adapter). The engine provides sandboxed code execution, session-scoped mode switching, and prompt injection.
