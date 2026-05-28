@@ -113,6 +113,11 @@ try {
     codeGeneration: { strings: false, wasm: false },
   });
 
+  // SECURITY: No host-realm functions or objects are injected into the VM
+  // context. Host closures would let sandboxed code escape via
+  // .constructor.constructor("return process")(). Console output uses a
+  // VM-created array; the host reads it after execution completes.
+
   const setupScript = new vm.Script([
     "const _setTimeout = (fn, ms) => {",
     "  return new Promise(resolve => {",
@@ -128,15 +133,23 @@ try {
     "globalThis.clearTimeout = () => {};",
     "globalThis.Promise = Promise;",
     "globalThis.JSON = JSON;",
+    "const __cStringify = (arg) => {",
+    "  if (typeof arg === 'string') return arg;",
+    "  if (typeof arg === 'undefined') return 'undefined';",
+    "  try { return JSON.stringify(arg); } catch { return String(arg); }",
+    "};",
+    "globalThis.console = {",
+    "  log: (...args) => { globalThis.__consoleLines.push(args.map(__cStringify).join(' ')); },",
+    "  warn: (...args) => { globalThis.__consoleLines.push('WARN: ' + args.map(__cStringify).join(' ')); },",
+    "  error: (...args) => { globalThis.__consoleLines.push('ERROR: ' + args.map(__cStringify).join(' ')); },",
+    "};",
   ].join("\n"));
+  new vm.Script("globalThis.__consoleLines = [];").runInContext(context);
   setupScript.runInContext(context);
+  const vmConsoleLines = context.__consoleLines;
+  delete context.__consoleLines;
 
   context[workerData.namespaceName] = deserialize(workerData.namespace);
-  context.console = {
-    log: (...args) => consoleOutput.push(args.map(stringifyConsoleArg).join(" ")),
-    warn: (...args) => consoleOutput.push("WARN: " + args.map(stringifyConsoleArg).join(" ")),
-    error: (...args) => consoleOutput.push("ERROR: " + args.map(stringifyConsoleArg).join(" ")),
-  };
 
   for (const [name, source] of workerData.collectionClassSources) {
     const classScript = new vm.Script("(" + source + ")");
@@ -159,14 +172,15 @@ try {
 
   resultPromise.then(
     (result) => {
-      const finalResult = result === undefined && consoleOutput.length > 0 ? consoleOutput.join("\n") : result;
-      parentPort.postMessage({ type: "done", result: finalResult, consoleOutput });
+      const lines = Array.from(vmConsoleLines);
+      const finalResult = result === undefined && lines.length > 0 ? lines.join("\n") : result;
+      parentPort.postMessage({ type: "done", result: finalResult, consoleOutput: lines });
     },
     (err) => {
       parentPort.postMessage({
         type: "failed",
         error: err && err.message ? err.message : String(err),
-        consoleOutput,
+        consoleOutput: Array.from(vmConsoleLines),
       });
     },
   );
