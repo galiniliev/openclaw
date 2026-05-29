@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from "vitest";
 import { createCodeModeTool } from "../src/tool-factory.js";
-import type { CodeModeHydration } from "../src/types.js";
+import type { CodeModeNamespace } from "../src/types.js";
 
 // Test API and Namespace types
 interface TestApi {
@@ -20,9 +20,9 @@ interface TestNamespace {
 }
 
 // Create a test hydration
-function createTestHydration(
-  overrides?: Partial<CodeModeHydration<TestApi, TestNamespace>>,
-): CodeModeHydration<TestApi, TestNamespace> {
+function createTestNamespace(
+  overrides?: Partial<CodeModeNamespace<TestApi, TestNamespace>>,
+): CodeModeNamespace<TestApi, TestNamespace> {
   return {
     id: "test",
     toolName: "execute_test_code",
@@ -53,9 +53,9 @@ function createTestApi(): TestApi {
 
 describe("createCodeModeTool", () => {
   it("creates a tool with correct name and description", () => {
-    const hydration = createTestHydration();
+    const ns = createTestNamespace();
     const api = createTestApi();
-    const tool = createCodeModeTool(hydration, api);
+    const tool = createCodeModeTool(ns, api);
 
     expect(tool.name).toBe("execute_test_code");
     expect(tool.description).toContain("Test Code Mode");
@@ -63,9 +63,9 @@ describe("createCodeModeTool", () => {
   });
 
   it("creates a tool with correct parameter schema", () => {
-    const hydration = createTestHydration();
+    const ns = createTestNamespace();
     const api = createTestApi();
-    const tool = createCodeModeTool(hydration, api);
+    const tool = createCodeModeTool(ns, api);
 
     expect(tool.parameters).toMatchObject({
       type: "object",
@@ -82,9 +82,9 @@ describe("createCodeModeTool", () => {
   });
 
   it("executes valid code and returns ok=true with returnValue", async () => {
-    const hydration = createTestHydration();
+    const ns = createTestNamespace();
     const api = createTestApi();
-    const tool = createCodeModeTool(hydration, api);
+    const tool = createCodeModeTool(ns, api);
 
     const result = await tool.execute("call-1", {
       code: `return Test.greet("World");`,
@@ -98,9 +98,9 @@ describe("createCodeModeTool", () => {
   });
 
   it("returns ok=false with error for invalid code", async () => {
-    const hydration = createTestHydration();
+    const ns = createTestNamespace();
     const api = createTestApi();
-    const tool = createCodeModeTool(hydration, api);
+    const tool = createCodeModeTool(ns, api);
 
     const result = await tool.execute("call-2", {
       code: `throw new Error("Test error");`,
@@ -114,11 +114,11 @@ describe("createCodeModeTool", () => {
   });
 
   it("respects timeoutMs override", async () => {
-    const hydration = createTestHydration({
+    const ns = createTestNamespace({
       defaultTimeoutMs: 1000, // 1 second default
     });
     const api = createTestApi();
-    const tool = createCodeModeTool(hydration, api);
+    const tool = createCodeModeTool(ns, api);
 
     const result = await tool.execute("call-3", {
       code: `await new Promise(resolve => setTimeout(resolve, 200)); return "done";`,
@@ -131,9 +131,9 @@ describe("createCodeModeTool", () => {
   });
 
   it("includes durationMs in output", async () => {
-    const hydration = createTestHydration();
+    const ns = createTestNamespace();
     const api = createTestApi();
-    const tool = createCodeModeTool(hydration, api);
+    const tool = createCodeModeTool(ns, api);
 
     const result = await tool.execute("call-4", {
       code: `return "quick";`,
@@ -145,9 +145,9 @@ describe("createCodeModeTool", () => {
   });
 
   it("captures console output", async () => {
-    const hydration = createTestHydration();
+    const ns = createTestNamespace();
     const api = createTestApi();
-    const tool = createCodeModeTool(hydration, api);
+    const tool = createCodeModeTool(ns, api);
 
     const result = await tool.execute("call-5", {
       code: `
@@ -163,9 +163,9 @@ describe("createCodeModeTool", () => {
   });
 
   it("handles async operations", async () => {
-    const hydration = createTestHydration();
+    const ns = createTestNamespace();
     const api = createTestApi();
-    const tool = createCodeModeTool(hydration, api);
+    const tool = createCodeModeTool(ns, api);
 
     const result = await tool.execute("call-6", {
       code: `return await Test.asyncOperation();`,
@@ -176,13 +176,13 @@ describe("createCodeModeTool", () => {
   });
 
   it("injects extraGlobals when provided by hydration", async () => {
-    const hydration = createTestHydration({
+    const ns = createTestNamespace({
       extraGlobals: (api: TestApi, context?: any) => ({
         customValue: context?.value ?? 100,
       }),
     });
     const api = createTestApi();
-    const tool = createCodeModeTool(hydration, api, { value: 42 });
+    const tool = createCodeModeTool(ns, api, { value: 42 });
 
     const result = await tool.execute("call-7", {
       code: `return customValue + 8;`,
@@ -193,9 +193,9 @@ describe("createCodeModeTool", () => {
   });
 
   it("returns content with JSON-stringified output", async () => {
-    const hydration = createTestHydration();
+    const ns = createTestNamespace();
     const api = createTestApi();
-    const tool = createCodeModeTool(hydration, api);
+    const tool = createCodeModeTool(ns, api);
 
     const result = await tool.execute("call-8", {
       code: `return "test";`,
@@ -209,9 +209,9 @@ describe("createCodeModeTool", () => {
   });
 
   it("handles syntax errors", async () => {
-    const hydration = createTestHydration();
+    const ns = createTestNamespace();
     const api = createTestApi();
-    const tool = createCodeModeTool(hydration, api);
+    const tool = createCodeModeTool(ns, api);
 
     const result = await tool.execute("call-9", {
       code: `this is not valid javascript syntax!!!`,
@@ -223,9 +223,9 @@ describe("createCodeModeTool", () => {
   });
 
   it("handles code that returns undefined", async () => {
-    const hydration = createTestHydration();
+    const ns = createTestNamespace();
     const api = createTestApi();
-    const tool = createCodeModeTool(hydration, api);
+    const tool = createCodeModeTool(ns, api);
 
     const result = await tool.execute("call-10", {
       code: `// No return statement`,
@@ -237,9 +237,9 @@ describe("createCodeModeTool", () => {
   });
 
   it("uses console output as returnValue when result is undefined", async () => {
-    const hydration = createTestHydration();
+    const ns = createTestNamespace();
     const api = createTestApi();
-    const tool = createCodeModeTool(hydration, api);
+    const tool = createCodeModeTool(ns, api);
 
     const result = await tool.execute("call-11", {
       code: `
@@ -255,15 +255,15 @@ describe("createCodeModeTool", () => {
   });
 
   it("handles multiple tool instances with different APIs", async () => {
-    const hydration = createTestHydration();
+    const ns = createTestNamespace();
     const api1 = createTestApi();
     const api2 = {
       ...createTestApi(),
       greet: (name: string) => `Bonjour, ${name}!`,
     };
 
-    const tool1 = createCodeModeTool(hydration, api1);
-    const tool2 = createCodeModeTool(hydration, api2);
+    const tool1 = createCodeModeTool(ns, api1);
+    const tool2 = createCodeModeTool(ns, api2);
 
     const result1 = await tool1.execute("call-12a", {
       code: `return Test.greet("Alice");`,
@@ -279,7 +279,7 @@ describe("createCodeModeTool", () => {
   it("creates namespace per execution for freshness", async () => {
     let namespaceCreationCount = 0;
 
-    const hydration = createTestHydration({
+    const ns = createTestNamespace({
       createNamespace: (api: TestApi) => {
         namespaceCreationCount++;
         return {
@@ -291,7 +291,7 @@ describe("createCodeModeTool", () => {
     });
 
     const api = createTestApi();
-    const tool = createCodeModeTool(hydration, api);
+    const tool = createCodeModeTool(ns, api);
 
     // Namespace not created at tool creation time
     expect(namespaceCreationCount).toBe(0);

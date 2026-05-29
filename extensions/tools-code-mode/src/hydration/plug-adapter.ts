@@ -1,8 +1,8 @@
 import type { AuthConfig, ResolvedAuth } from "./auth-resolver.js";
 import { resolveAuth } from "./auth-resolver.js";
-import { registerCodeModeHydration } from "../../api.js";
+import { registerCodeModeNamespace } from "../../api.js";
 import { CodeModeError } from "../errors.js";
-import type { CodeModeHydration } from "../types.js";
+import type { CodeModeNamespace } from "../types.js";
 
 export interface PlugAdapterConfig<TApi, TNamespace> {
   id: string;
@@ -70,7 +70,7 @@ export function plugAdapter<TApi, TNamespace>(
     },
   });
 
-  const hydration: CodeModeHydration<unknown, unknown> = {
+  const ns: CodeModeNamespace<unknown, unknown> = {
     id: config.id,
     toolName: `execute_${config.id}_code`,
     displayName: config.displayName ?? `${config.namespaceName} Code Mode`,
@@ -89,5 +89,5 @@ export function plugAdapter<TApi, TNamespace>(
       : undefined,
   };
 
-  registerCodeModeHydration(hydration, null);
+  registerCodeModeNamespace(ns, null);
 }

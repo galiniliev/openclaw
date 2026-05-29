@@ -1,7 +1,7 @@
 {
   "id": "tools-code-mode",
   "name": "Tools Code Mode",
-  "description": "Generic code mode execution engine for registered domain hydrations",
+  "description": "Generic code mode execution engine for registered domain namespaces",
   "activation": {
     "onStartup": true
   },

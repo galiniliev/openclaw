@@ -3,8 +3,8 @@ import type { EndpointConfig } from "./endpoint-parser.js";
 import { parseEndpointConfig } from "./endpoint-parser.js";
 import { resolveAuth } from "./auth-resolver.js";
 import { buildLazyNamespace } from "./rest-adapter.js";
-import { registerCodeModeHydration } from "../../api.js";
-import type { CodeModeHydration } from "../types.js";
+import { registerCodeModeNamespace } from "../../api.js";
+import type { CodeModeNamespace } from "../types.js";
 
 export interface QuickHydrationConfig {
   id: string;
@@ -34,7 +34,7 @@ export function quickHydration(config: QuickHydrationConfig, openclawConfig?: un
     () => resolveAuth(config.auth, openclawConfig),
   );
 
-  const hydration: CodeModeHydration<null, Record<string, unknown>> = {
+  const ns: CodeModeNamespace<null, Record<string, unknown>> = {
     id: config.id,
     toolName: `execute_${config.id}_code`,
     displayName: config.displayName ?? `${config.namespaceName} Code Mode`,
@@ -47,7 +47,7 @@ export function quickHydration(config: QuickHydrationConfig, openclawConfig?: un
     maxCodeBytes: config.maxCodeBytes ?? 100_000,
   };
 
-  registerCodeModeHydration(hydration, null);
+  registerCodeModeNamespace(ns, null);
 }
 
 function generatePrompt(namespaceName: string, endpoints: Record<string, string | EndpointConfig>): string {

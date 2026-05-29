@@ -4,10 +4,10 @@
 
 import { describe, it, expect, beforeEach } from "vitest";
 import { CodeModeSessionManager } from "../src/mode-manager.js";
-import type { CodeModeHydration } from "../src/types.js";
+import type { CodeModeNamespace } from "../src/types.js";
 
 // Create test hydrations
-function createTestHydration(id: string, displayName: string): CodeModeHydration {
+function createTestNamespace(id: string, displayName: string): CodeModeNamespace {
   return {
     id,
     toolName: `execute_${id}_code`,
@@ -24,18 +24,18 @@ function createTestHydration(id: string, displayName: string): CodeModeHydration
 
 describe("CodeModeSessionManager", () => {
   let manager: CodeModeSessionManager;
-  let hydration1: CodeModeHydration;
-  let hydration2: CodeModeHydration;
+  let ns1: CodeModeNamespace;
+  let ns2: CodeModeNamespace;
 
   beforeEach(() => {
-    hydration1 = createTestHydration("test1", "Test 1");
-    hydration2 = createTestHydration("test2", "Test 2");
-    manager = new CodeModeSessionManager([hydration1, hydration2]);
+    ns1 = createTestNamespace("test1", "Test 1");
+    ns2 = createTestNamespace("test2", "Test 2");
+    manager = new CodeModeSessionManager([ns1, ns2]);
   });
 
   it("starts with no active mode", () => {
     expect(manager.getActiveMode()).toBeNull();
-    expect(manager.getActiveHydration()).toBeNull();
+    expect(manager.getActiveNamespace()).toBeNull();
     expect(manager.getActivePrompt()).toBeNull();
   });
 
@@ -44,7 +44,7 @@ describe("CodeModeSessionManager", () => {
 
     const mode = manager.getActiveMode();
     expect(mode).not.toBeNull();
-    expect(mode?.hydrationId).toBe("test1");
+    expect(mode?.namespaceId).toBe("test1");
     expect(mode?.activatedAt).toBeGreaterThan(0);
     expect(mode?.context).toBeUndefined();
   });
@@ -60,21 +60,21 @@ describe("CodeModeSessionManager", () => {
   it("switches mode (activate different one)", () => {
     manager.activate("test1");
     const firstMode = manager.getActiveMode();
-    expect(firstMode?.hydrationId).toBe("test1");
+    expect(firstMode?.namespaceId).toBe("test1");
 
     // Wait a bit to ensure timestamp changes
     const firstTimestamp = firstMode?.activatedAt ?? 0;
 
     manager.activate("test2");
     const secondMode = manager.getActiveMode();
-    expect(secondMode?.hydrationId).toBe("test2");
+    expect(secondMode?.namespaceId).toBe("test2");
     expect(secondMode?.activatedAt).toBeGreaterThanOrEqual(firstTimestamp);
   });
 
   it("returns hydration for active mode", () => {
     manager.activate("test1");
 
-    const hydration = manager.getActiveHydration();
+    const hydration = manager.getActiveNamespace();
     expect(hydration).not.toBeNull();
     expect(hydration?.id).toBe("test1");
     expect(hydration?.displayName).toBe("Test 1");
@@ -86,7 +86,7 @@ describe("CodeModeSessionManager", () => {
 
     manager.deactivate();
     expect(manager.getActiveMode()).toBeNull();
-    expect(manager.getActiveHydration()).toBeNull();
+    expect(manager.getActiveNamespace()).toBeNull();
     expect(manager.getActivePrompt()).toBeNull();
   });
 
@@ -99,7 +99,7 @@ describe("CodeModeSessionManager", () => {
   it("throws on unknown hydration id", () => {
     expect(() => {
       manager.activate("unknown");
-    }).toThrow("Unknown hydration ID: unknown");
+    }).toThrow("Unknown namespace ID: unknown");
   });
 
   it("getActivePrompt returns the hydration's system prompt", () => {
@@ -118,8 +118,8 @@ describe("CodeModeSessionManager", () => {
   });
 
   it("registers new hydration", () => {
-    const hydration3 = createTestHydration("test3", "Test 3");
-    manager.register(hydration3);
+    const ns3 = createTestNamespace("test3", "Test 3");
+    manager.register(ns3);
 
     const available = manager.listAvailable();
     expect(available).toHaveLength(3);
@@ -127,11 +127,11 @@ describe("CodeModeSessionManager", () => {
 
     // Can activate the newly registered hydration
     manager.activate("test3");
-    expect(manager.getActiveMode()?.hydrationId).toBe("test3");
+    expect(manager.getActiveMode()?.namespaceId).toBe("test3");
   });
 
   it("returns null hydration when no mode is active", () => {
-    expect(manager.getActiveHydration()).toBeNull();
+    expect(manager.getActiveNamespace()).toBeNull();
   });
 
   it("returns null prompt when no mode is active", () => {
@@ -153,8 +153,8 @@ describe("CodeModeSessionManager", () => {
     manager.activate("test1", { value: 1 }, "agent:one");
     manager.activate("test2", { value: 2 }, "agent:two");
 
-    expect(manager.getActiveMode("agent:one")?.hydrationId).toBe("test1");
-    expect(manager.getActiveMode("agent:two")?.hydrationId).toBe("test2");
+    expect(manager.getActiveMode("agent:one")?.namespaceId).toBe("test1");
+    expect(manager.getActiveMode("agent:two")?.namespaceId).toBe("test2");
     expect(manager.getActivePrompt("agent:one")).toBe('Test 1 code mode system prompt (context: {"value":1})');
     expect(manager.getActivePrompt("agent:two")).toBe('Test 2 code mode system prompt (context: {"value":2})');
   });
@@ -166,6 +166,6 @@ describe("CodeModeSessionManager", () => {
     manager.deactivate("agent:one");
 
     expect(manager.getActiveMode("agent:one")).toBeNull();
-    expect(manager.getActiveMode("agent:two")?.hydrationId).toBe("test2");
+    expect(manager.getActiveMode("agent:two")?.namespaceId).toBe("test2");
   });
 });

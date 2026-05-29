@@ -1,38 +1,53 @@
-import type { CodeModeHydration } from "./types.js";
+import type { CodeModeNamespace } from "./types.js";
 import { CodeModeSessionManager } from "./mode-manager.js";
 
-export type CodeModeHydrationRegistration<TApi = unknown, TNamespace = unknown> = {
-  hydration: CodeModeHydration<TApi, TNamespace>;
+export type CodeModeNamespaceRegistration<TApi = unknown, TNamespace = unknown> = {
+  namespace: CodeModeNamespace<TApi, TNamespace>;
   apiAdapter: TApi;
 };
 
 export class CodeModeRegistry {
-  private readonly registrations = new Map<string, CodeModeHydrationRegistration>();
+  private readonly registrations = new Map<string, CodeModeNamespaceRegistration>();
 
   register<TApi, TNamespace>(
-    hydration: CodeModeHydration<TApi, TNamespace>,
+    namespace: CodeModeNamespace<TApi, TNamespace>,
     apiAdapter: TApi,
   ): void {
-    this.registrations.set(hydration.id, {
-      hydration: hydration as CodeModeHydration,
+    const existing = this.registrations.get(namespace.id);
+    if (existing && existing.namespace !== namespace) {
+      throw new Error(
+        `CodeModeRegistry: namespace id "${namespace.id}" already registered with a different implementation`,
+      );
+    }
+    // Reject namespaceName collisions across distinct ids — combined sandbox
+    // scope would shadow one of them silently otherwise.
+    for (const [otherId, entry] of this.registrations) {
+      if (otherId !== namespace.id && entry.namespace.namespaceName === namespace.namespaceName) {
+        throw new Error(
+          `CodeModeRegistry: namespaceName "${namespace.namespaceName}" collides between "${otherId}" and "${namespace.id}"`,
+        );
+      }
+    }
+    this.registrations.set(namespace.id, {
+      namespace: namespace as CodeModeNamespace,
       apiAdapter,
     });
   }
 
-  unregister(hydrationId: string): boolean {
-    return this.registrations.delete(hydrationId);
+  unregister(namespaceId: string): boolean {
+    return this.registrations.delete(namespaceId);
   }
 
-  get(hydrationId: string): CodeModeHydrationRegistration | undefined {
-    return this.registrations.get(hydrationId);
+  get(namespaceId: string): CodeModeNamespaceRegistration | undefined {
+    return this.registrations.get(namespaceId);
   }
 
-  list(): CodeModeHydrationRegistration[] {
+  list(): CodeModeNamespaceRegistration[] {
     return Array.from(this.registrations.values());
   }
 
-  listHydrations(): CodeModeHydration[] {
-    return this.list().map((entry) => entry.hydration);
+  listNamespaces(): CodeModeNamespace[] {
+    return this.list().map((entry) => entry.namespace);
   }
 }
 

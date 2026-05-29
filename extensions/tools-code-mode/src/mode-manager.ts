@@ -2,46 +2,46 @@
  * Code Mode Session Manager
  *
  * Manages session-scoped code mode switching.
- * Tracks available hydrations and the currently active mode.
+ * Tracks available namespaces and the currently active mode.
  */
 
-import type { CodeModeHydration, CodeModeSession } from "./types.js";
+import type { CodeModeNamespace, CodeModeSession } from "./types.js";
 
 /**
  * Manages code mode activation and switching within a session.
- * Provides a registry of available hydrations and tracks which one is active.
+ * Provides a registry of available namespaces and tracks which one is active.
  */
 export class CodeModeSessionManager {
-  private hydrations: Map<string, CodeModeHydration>;
+  private namespaces: Map<string, CodeModeNamespace>;
   private readonly activeModes = new Map<string, CodeModeSession>();
 
   private static readonly defaultSessionKey = "__global__";
 
   /**
-   * Create a new mode manager with the given hydrations.
-   * @param hydrations - Initial list of available hydrations
+   * Create a new mode manager with the given namespaces.
+   * @param namespaces - Initial list of available namespaces
    */
-  constructor(hydrations: CodeModeHydration[]) {
-    this.hydrations = new Map();
-    for (const hydration of hydrations) {
-      this.hydrations.set(hydration.id, hydration);
+  constructor(namespaces: CodeModeNamespace[]) {
+    this.namespaces = new Map();
+    for (const ns of namespaces) {
+      this.namespaces.set(ns.id, ns);
     }
   }
 
   /**
-   * Activate a code mode by hydration ID.
-   * @param hydrationId - The ID of the hydration to activate
+   * Activate a code mode by namespace ID.
+   * @param namespaceId - The ID of the namespace to activate
    * @param context - Optional domain-specific context
-   * @throws Error if hydration ID is not found
+   * @throws Error if namespace ID is not found
    */
-  activate(hydrationId: string, context?: unknown, sessionKey?: string): void {
-    const hydration = this.hydrations.get(hydrationId);
-    if (!hydration) {
-      throw new Error(`Unknown hydration ID: ${hydrationId}`);
+  activate(namespaceId: string, context?: unknown, sessionKey?: string): void {
+    const ns = this.namespaces.get(namespaceId);
+    if (!ns) {
+      throw new Error(`Unknown namespace ID: ${namespaceId}`);
     }
 
     this.activeModes.set(this.resolveSessionKey(sessionKey), {
-      hydrationId,
+      namespaceId,
       activatedAt: Date.now(),
       context,
     });
@@ -63,15 +63,15 @@ export class CodeModeSessionManager {
   }
 
   /**
-   * Get the hydration for the currently active mode.
-   * @returns The active hydration or null if no mode is active
+   * Get the namespace for the currently active mode.
+   * @returns The active namespace or null if no mode is active
    */
-  getActiveHydration(sessionKey?: string): CodeModeHydration | null {
+  getActiveNamespace(sessionKey?: string): CodeModeNamespace | null {
     const activeMode = this.getActiveMode(sessionKey);
     if (!activeMode) {
       return null;
     }
-    return this.hydrations.get(activeMode.hydrationId) ?? null;
+    return this.namespaces.get(activeMode.namespaceId) ?? null;
   }
 
   /**
@@ -80,36 +80,34 @@ export class CodeModeSessionManager {
    */
   getActivePrompt(sessionKey?: string): string | null {
     const activeMode = this.getActiveMode(sessionKey);
-    const hydration = this.getActiveHydration(sessionKey);
-    if (!hydration) {
+    const ns = this.getActiveNamespace(sessionKey);
+    if (!ns) {
       return null;
     }
-    return hydration.getSystemPrompt(activeMode?.context);
+    return ns.getSystemPrompt(activeMode?.context);
   }
 
   /**
-   * List all available hydrations.
-   * @returns Array of all registered hydrations
+   * List all available namespaces.
    */
-  listAvailable(): CodeModeHydration[] {
-    return Array.from(this.hydrations.values());
+  listAvailable(): CodeModeNamespace[] {
+    return Array.from(this.namespaces.values());
   }
 
   /**
-   * Register a new hydration.
-   * @param hydration - The hydration to register
+   * Register a new namespace.
    */
-  register(hydration: CodeModeHydration): void {
-    this.hydrations.set(hydration.id, hydration);
+  register(ns: CodeModeNamespace): void {
+    this.namespaces.set(ns.id, ns);
   }
 
-  unregister(hydrationId: string): boolean {
+  unregister(namespaceId: string): boolean {
     for (const [sessionKey, mode] of this.activeModes.entries()) {
-      if (mode.hydrationId === hydrationId) {
+      if (mode.namespaceId === namespaceId) {
         this.activeModes.delete(sessionKey);
       }
     }
-    return this.hydrations.delete(hydrationId);
+    return this.namespaces.delete(namespaceId);
   }
 
   private resolveSessionKey(sessionKey: string | undefined): string {

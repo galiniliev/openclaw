@@ -21,7 +21,7 @@
 
 import { describe, it, expect, afterAll } from "vitest";
 import { executeCodeMode, shutdown } from "../src/executor.js";
-import type { CodeModeHydration } from "../src/types.js";
+import type { CodeModeNamespace } from "../src/types.js";
 
 // ---------- Fixture: instrumented API ----------
 
@@ -73,7 +73,7 @@ function instrumentApi(stats: CallStats) {
 
 type Api = ReturnType<typeof instrumentApi>;
 
-const hydration: CodeModeHydration<Api, Api> = {
+const ns: CodeModeNamespace<Api, Api> = {
   id: "demo",
   toolName: "execute_code",
   displayName: "Demo Code Mode",
@@ -154,7 +154,7 @@ describe("direct tool calls vs. code mode", () => {
     const codeStats: CallStats = { calls: 0, bytesReturned: 0 };
     const codeApi = instrumentApi(codeStats);
     const t1 = Date.now();
-    const codeOutcome = await executeCodeMode(CODE_MODE_SCRIPT, hydration, codeApi);
+    const codeOutcome = await executeCodeMode(CODE_MODE_SCRIPT, [{ namespace: ns, scope: codeApi }]);
     const codeMs = Date.now() - t1;
 
     expect(codeOutcome.kind).toBe("Succeeded");

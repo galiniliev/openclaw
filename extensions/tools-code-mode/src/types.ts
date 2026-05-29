@@ -1,8 +1,11 @@
 /**
  * Generic Code Mode Engine Types
  *
- * This module defines the core abstractions for pluggable code mode hydrations.
- * Any domain (M365, Engage, Planner, or future) implements CodeModeHydration to plug into the generic code mode engine.
+ * Core abstractions for pluggable code-mode namespaces. Any domain
+ * (M365, Engage, Planner, future) implements CodeModeNamespace to plug
+ * into the generic code mode engine. A single `execute_code` tool-call
+ * can compose multiple registered namespaces — see `namespaceIds` on
+ * the tool input.
  */
 
 /**
@@ -20,6 +23,8 @@ export interface CodeModeExecutionResult {
  * Input parameters for code mode tool execution.
  */
 export interface CodeModeToolInput {
+  /** Registered namespace ids to compose into the sandbox (e.g. ["m365"] or ["m365","outlook"]). */
+  namespaceIds: string[];
   /** The code to execute */
   code: string;
   /** Optional timeout in milliseconds (default: domain-specific) */
@@ -47,11 +52,13 @@ export interface CodeModeToolOutput {
 
 /**
  * Code mode session state.
- * Tracks which hydration is currently active and when it was activated.
+ * Tracks which namespace is currently active (single-namespace identity
+ * inside the engine; multi-namespace composition happens per-call via
+ * `CodeModeToolInput.namespaceIds`).
  */
 export interface CodeModeSession {
-  /** Identifier of the active hydration (e.g., "m365", "engage", "planner") */
-  hydrationId: string;
+  /** Identifier of the active namespace (e.g., "m365", "engage", "planner") */
+  namespaceId: string;
   /** Timestamp when the mode was activated */
   activatedAt: number;
   /** Optional domain-specific context (e.g., API connection state, session data) */
@@ -59,21 +66,21 @@ export interface CodeModeSession {
 }
 
 /**
- * Core abstraction for a code mode hydration.
+ * Core abstraction for a code mode namespace.
  * Each domain implements this interface to provide:
  * - API contract (tool-shaped interface)
  * - Namespace creation (fluent API builder)
  * - Code execution (worker-backed VM with timeout)
  * - System prompt (code mode reference documentation)
  *
- * @template TApi - The API interface that this hydration requires (e.g., M365Api)
+ * @template TApi - The API interface that this namespace requires (e.g., M365Api)
  * @template TNamespace - The namespace object returned by createNamespace (e.g., M365Namespace)
  */
-export interface CodeModeHydration<TApi = unknown, TNamespace = unknown> {
+export interface CodeModeNamespace<TApi = unknown, TNamespace = unknown> {
   /** Unique identifier (e.g., "m365", "engage", "planner"). */
   readonly id: string;
 
-  /** OpenClaw tool name (e.g., "execute_m365_code"). */
+  /** OpenClaw tool name (e.g., "execute_m365_code"). Reserved for per-namespace tools; the generic `execute_code` ignores this. */
   readonly toolName: string;
 
   /** Human-readable display name (e.g., "M365 Copilot"). */
@@ -81,7 +88,9 @@ export interface CodeModeHydration<TApi = unknown, TNamespace = unknown> {
 
   /**
    * Variable name injected into generated code scope.
-   * E.g., "M365" means code calls `M365.messages.list()`.
+   * E.g., "M365" means code calls `M365.messages.list()`. Two registered
+   * namespaces sharing the same namespaceName will be rejected at
+   * registration time (collision).
    */
   readonly namespaceName: string;
 
@@ -114,6 +123,6 @@ export interface CodeModeHydration<TApi = unknown, TNamespace = unknown> {
 }
 
 /**
- * Factory function type for creating a hydration.
+ * Factory function type for creating a namespace.
  */
-export type CodeModeHydrationFactory<TApi = unknown, TNamespace = unknown> = () => CodeModeHydration<TApi, TNamespace>;
+export type CodeModeNamespaceFactory<TApi = unknown, TNamespace = unknown> = () => CodeModeNamespace<TApi, TNamespace>;

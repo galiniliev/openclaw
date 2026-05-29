@@ -1,43 +1,43 @@
 export type {
   CodeModeExecutionResult,
-  CodeModeHydration,
-  CodeModeHydrationFactory,
+  CodeModeNamespace,
+  CodeModeNamespaceFactory,
   CodeModeSession,
   CodeModeToolInput,
   CodeModeToolOutput,
 } from "./src/types.js";
 export { CodeModeError, type CodeModeErrorKind } from "./src/errors.js";
 export { CodeModeSessionManager } from "./src/mode-manager.js";
-export { shutdown as shutdownCodeMode } from "./src/executor.js";
+export { shutdown as shutdownCodeMode, type NamespaceBinding } from "./src/executor.js";
 export {
   CodeModeRegistry,
   globalCodeModeRegistry,
   globalCodeModeSessionManager,
-  type CodeModeHydrationRegistration,
+  type CodeModeNamespaceRegistration,
 } from "./src/registry.js";
 
-import type { CodeModeHydration } from "./src/types.js";
+import type { CodeModeNamespace } from "./src/types.js";
 import { globalCodeModeRegistry, globalCodeModeSessionManager } from "./src/registry.js";
 
-export function registerCodeModeHydration<TApi, TNamespace>(
-  hydration: CodeModeHydration<TApi, TNamespace>,
+export function registerCodeModeNamespace<TApi, TNamespace>(
+  ns: CodeModeNamespace<TApi, TNamespace>,
   apiAdapter: TApi,
 ): void {
-  globalCodeModeRegistry.register(hydration, apiAdapter);
-  globalCodeModeSessionManager.register(hydration as CodeModeHydration);
+  globalCodeModeRegistry.register(ns, apiAdapter);
+  globalCodeModeSessionManager.register(ns as CodeModeNamespace);
 }
 
-export function unregisterCodeModeHydration(hydrationId: string): boolean {
-  globalCodeModeSessionManager.unregister(hydrationId);
-  return globalCodeModeRegistry.unregister(hydrationId);
+export function unregisterCodeModeNamespace(namespaceId: string): boolean {
+  globalCodeModeSessionManager.unregister(namespaceId);
+  return globalCodeModeRegistry.unregister(namespaceId);
 }
 
 export function activateCodeModeSession(
-  hydrationId: string,
+  namespaceId: string,
   context?: unknown,
   sessionKey?: string,
 ): void {
-  globalCodeModeSessionManager.activate(hydrationId, context, sessionKey);
+  globalCodeModeSessionManager.activate(namespaceId, context, sessionKey);
 }
 
 export function deactivateCodeModeSession(sessionKey?: string): void {

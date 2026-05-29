@@ -3,7 +3,7 @@ import path from "node:path";
 import { quickHydration, type QuickHydrationConfig } from "./quick-hydration.js";
 import { globalCodeModeRegistry } from "../registry.js";
 
-interface JsonHydrationEntry {
+interface JsonNamespaceEntry {
   id: string;
   namespaceName: string;
   displayName?: string;
@@ -17,12 +17,12 @@ interface JsonHydrationEntry {
   maxCodeBytes?: number;
 }
 
-interface JsonHydrationFile {
-  hydrations: JsonHydrationEntry[];
+interface JsonNamespaceFile {
+  namespaces: JsonNamespaceEntry[];
 }
 
 export function loadJsonHydrations(workspacePath: string, openclawConfig?: unknown): void {
-  const filePath = path.join(workspacePath, "code-mode-hydrations.json");
+  const filePath = path.join(workspacePath, "code-mode-namespaces.json");
   if (!fs.existsSync(filePath)) return;
 
   let raw: string;
@@ -33,7 +33,7 @@ export function loadJsonHydrations(workspacePath: string, openclawConfig?: unkno
     return;
   }
 
-  let parsed: JsonHydrationFile;
+  let parsed: JsonNamespaceFile;
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
@@ -41,26 +41,26 @@ export function loadJsonHydrations(workspacePath: string, openclawConfig?: unkno
     return;
   }
 
-  if (!parsed.hydrations || !Array.isArray(parsed.hydrations)) {
-    console.warn(`[code-mode] ${filePath}: missing or invalid "hydrations" array`);
+  if (!parsed.namespaces || !Array.isArray(parsed.namespaces)) {
+    console.warn(`[code-mode] ${filePath}: missing or invalid "namespaces" array`);
     return;
   }
 
-  for (const entry of parsed.hydrations) {
+  for (const entry of parsed.namespaces) {
     if (!entry.id || !entry.namespaceName || !entry.baseUrl || !entry.auth || !entry.endpoints) {
-      console.warn(`[code-mode] Skipping invalid hydration entry: missing required fields (id, namespaceName, baseUrl, auth, endpoints)`);
+      console.warn(`[code-mode] Skipping invalid namespace entry: missing required fields (id, namespaceName, baseUrl, auth, endpoints)`);
       continue;
     }
 
     if (globalCodeModeRegistry.get(entry.id)) {
-      console.warn(`[code-mode] Skipping JSON hydration "${entry.id}": already registered by extension`);
+      console.warn(`[code-mode] Skipping JSON namespace "${entry.id}": already registered by extension`);
       continue;
     }
 
     try {
       quickHydration(entry as unknown as QuickHydrationConfig, openclawConfig);
     } catch (err) {
-      console.warn(`[code-mode] Failed to register hydration "${entry.id}":`, err);
+      console.warn(`[code-mode] Failed to register namespace "${entry.id}":`, err);
     }
   }
 }

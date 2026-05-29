@@ -1,11 +1,15 @@
 /**
  * Code Mode Tool Factory
  *
- * Creates OpenClaw-compatible tools from code mode hydrations.
+ * Creates OpenClaw-compatible per-namespace tools from a single namespace.
+ * The generic multi-namespace `execute_code` tool lives in
+ * `extensions/tools-code-mode/index.ts`; this factory is retained for
+ * domain plugins that want to expose a dedicated `execute_<domain>_code`
+ * tool name alongside the generic one.
  */
 
 import { executeCodeMode } from "./executor.js";
-import type { CodeModeHydration, CodeModeToolInput, CodeModeToolOutput } from "./types.js";
+import type { CodeModeNamespace, CodeModeToolInput, CodeModeToolOutput } from "./types.js";
 
 /**
  * OpenClaw tool interface.
@@ -21,25 +25,31 @@ export interface CodeModeTool {
 }
 
 /**
- * Creates an OpenClaw-compatible tool from a code mode hydration.
- * Namespace is recreated per execution to avoid stale references on token refresh.
+ * Creates an OpenClaw-compatible tool from a code mode namespace.
+ * Scope is recreated per execution to avoid stale references on token refresh.
  */
 export function createCodeModeTool<TApi, TNamespace>(
-  hydration: CodeModeHydration<TApi, TNamespace>,
+  ns: CodeModeNamespace<TApi, TNamespace>,
   api: TApi,
   context?: any,
 ): CodeModeTool {
-  const validationError = hydration.validateApi?.(api);
+  const validationError = ns.validateApi?.(api);
   if (validationError) {
     throw new Error(validationError);
   }
 
   return {
-    name: hydration.toolName,
-    description: `Execute ${hydration.displayName} code. Provides the ${hydration.namespaceName} namespace for scripting.`,
+    name: ns.toolName,
+    description: `Execute ${ns.displayName} code. Provides the ${ns.namespaceName} namespace for scripting.`,
     parameters: {
       type: "object",
       properties: {
+        namespaceIds: {
+          type: "array",
+          items: { type: "string" },
+          minItems: 1,
+          description: `Namespace ids to bind. Defaults to ["${ns.id}"] when omitted.`,
+        },
         code: {
           type: "string",
           description: "The code to execute",
@@ -53,14 +63,18 @@ export function createCodeModeTool<TApi, TNamespace>(
     },
     execute: async (toolCallId: string, params: CodeModeToolInput) => {
       const startTime = Date.now();
-      const namespace = hydration.createNamespace(api);
-      const extraGlobals = hydration.extraGlobals?.(api, context);
+      const scope = ns.createNamespace(api);
+      const extraGlobals = ns.extraGlobals?.(api, context);
 
-      const executionResult = await executeCodeMode(params.code, hydration, namespace, {
-        timeoutMs: params.timeoutMs,
-        extraGlobals,
-        toolCallId,
-      });
+      const executionResult = await executeCodeMode(
+        params.code,
+        [{ namespace: ns, scope }],
+        {
+          timeoutMs: params.timeoutMs,
+          extraGlobals,
+          toolCallId,
+        },
+      );
 
       const durationMs = Date.now() - startTime;
 

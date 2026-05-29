@@ -1,5 +1,5 @@
 import { Worker } from "node:worker_threads";
-import type { CodeModeHydration, CodeModeExecutionResult } from "./types.js";
+import type { CodeModeNamespace, CodeModeExecutionResult } from "./types.js";
 import { CodeModeError } from "./errors.js";
 
 const DEFAULT_MAX_CODE_BYTES = 100 * 1024;
@@ -9,6 +9,8 @@ const DEFAULT_MAX_MEMORY_MB = 1024;
 const DEFAULT_MAX_CONCURRENCY = 4;
 
 const FORBIDDEN_PATH_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
+
+const EXTRA_GLOBALS_ROOT = "__extraGlobals__";
 
 export interface ExecuteCodeModeOptions {
   timeoutMs?: number;
@@ -20,10 +22,19 @@ export interface CodeModeExecutorConfig {
   maxConcurrency?: number;
 }
 
-type ScopeRoot = "namespace" | "extraGlobals";
+/**
+ * A single namespace participating in an execute_code call: the namespace
+ * descriptor plus the resolved scope value (typically the object returned by
+ * `namespace.createNamespace(api)`). Pass an array of these to
+ * `executeCodeMode` to compose multiple namespaces into one sandbox.
+ */
+export interface NamespaceBinding<TApi = unknown, TNamespace = unknown> {
+  namespace: CodeModeNamespace<TApi, TNamespace>;
+  scope: TNamespace;
+}
 
 type SerializedScopeValue =
-  | { kind: "function"; root: ScopeRoot; path: string[] }
+  | { kind: "function"; root: string; path: string[] }
   | { kind: "array"; items: SerializedScopeValue[] }
   | { kind: "object"; entries: Array<[string, SerializedScopeValue]> }
   | { kind: "value"; value: unknown };
@@ -43,7 +54,7 @@ type WorkerFailedMessage = {
 type WorkerCallMessage = {
   type: "call";
   id: number;
-  root: ScopeRoot;
+  root: string;
   path: string[];
   args: unknown[];
 };
@@ -59,16 +70,6 @@ import vm from "node:vm";
 const pendingCalls = new Map();
 let nextCallId = 1;
 const consoleOutput = [];
-
-function stringifyConsoleArg(arg) {
-  if (typeof arg === "string") return arg;
-  if (typeof arg === "undefined") return "undefined";
-  try {
-    return JSON.stringify(arg);
-  } catch {
-    return String(arg);
-  }
-}
 
 function makeRemoteFunction(root, path) {
   return (...args) => new Promise((resolve, reject) => {
@@ -149,7 +150,9 @@ try {
   const vmConsoleLines = context.__consoleLines;
   delete context.__consoleLines;
 
-  context[workerData.namespaceName] = deserialize(workerData.namespace);
+  for (const [name, serialized] of workerData.namespaces) {
+    context[name] = deserialize(serialized);
+  }
 
   for (const [name, source] of workerData.collectionClassSources) {
     const classScript = new vm.Script("(" + source + ")");
@@ -234,13 +237,47 @@ export function shutdown(): void {
   activeWorkers.clear();
 }
 
-export async function executeCodeMode<TApi, TNamespace>(
+/**
+ * Execute user code against one or more namespace bindings. The first binding
+ * acts as the "primary" for the purpose of telemetry filename and code-size /
+ * timeout limits — when multiple bindings disagree on a limit, the most
+ * restrictive value wins (smallest maxCodeBytes / maxTimeoutMs, smallest
+ * defaultTimeoutMs).
+ */
+export async function executeCodeMode(
   code: string,
-  hydration: CodeModeHydration<TApi, TNamespace>,
-  namespace: TNamespace,
+  bindings: NamespaceBinding[],
   opts?: ExecuteCodeModeOptions,
 ): Promise<CodeModeExecutionResult> {
-  const maxBytes = hydration.maxCodeBytes ?? DEFAULT_MAX_CODE_BYTES;
+  if (!Array.isArray(bindings) || bindings.length === 0) {
+    return {
+      kind: "Failed",
+      errorKind: "validationError",
+      error: "executeCodeMode requires at least one namespace binding",
+      consoleOutput: [],
+    };
+  }
+
+  // Reject namespaceName collisions inside one call.
+  const namespaceNames = new Map<string, string>();
+  for (const b of bindings) {
+    const name = b.namespace.namespaceName;
+    const prevId = namespaceNames.get(name);
+    if (prevId && prevId !== b.namespace.id) {
+      return {
+        kind: "Failed",
+        errorKind: "validationError",
+        error: `Namespace name "${name}" collides between "${prevId}" and "${b.namespace.id}"`,
+        consoleOutput: [],
+      };
+    }
+    namespaceNames.set(name, b.namespace.id);
+  }
+
+  const maxBytes = bindings.reduce(
+    (acc, b) => Math.min(acc, b.namespace.maxCodeBytes ?? DEFAULT_MAX_CODE_BYTES),
+    DEFAULT_MAX_CODE_BYTES,
+  );
   const codeBytes = new TextEncoder().encode(code).length;
   if (codeBytes > maxBytes) {
     return {
@@ -251,24 +288,38 @@ export async function executeCodeMode<TApi, TNamespace>(
     };
   }
 
-  const timeoutMs = resolveTimeoutMs(hydration, opts?.timeoutMs);
+  const timeoutMs = resolveTimeoutMs(bindings, opts?.timeoutMs);
+  const primary = bindings[0]!;
 
   await executionSemaphore.acquire();
   try {
+    // Build per-namespace roots map for call-back resolution. The host side
+    // looks up `roots[message.root]` to find the object whose method to call.
+    const roots: Record<string, unknown> = {
+      [EXTRA_GLOBALS_ROOT]: opts?.extraGlobals ?? {},
+    };
+    const namespacesSerialized: Array<[string, SerializedScopeValue]> = [];
+    const collectionSources: Array<[string, string]> = [];
+
+    for (const b of bindings) {
+      const name = assertIdentifier(b.namespace.namespaceName, "namespaceName");
+      roots[name] = b.scope;
+      namespacesSerialized.push([name, serializeScopeValue(b.scope, name, [])]);
+      for (const [clsName, cls] of Object.entries(b.namespace.collectionClasses)) {
+        collectionSources.push([assertIdentifier(clsName, "collection class name"), serializeConstructorSource(cls)]);
+      }
+    }
+
     const workerData = {
       code,
-      filename: `${hydration.id || "code"}-generated.js`,
+      filename: `${primary.namespace.id || "code"}-generated.js`,
       timeoutMs,
-      namespaceName: assertIdentifier(hydration.namespaceName, "namespaceName"),
-      namespace: serializeScopeValue(namespace, "namespace", []),
-      collectionClassSources: Object.entries(hydration.collectionClasses).map(([name, cls]) => [
-        assertIdentifier(name, "collection class name"),
-        serializeConstructorSource(cls),
-      ]),
-      extraGlobals: serializeScopeValue(opts?.extraGlobals ?? {}, "extraGlobals", []),
+      namespaces: namespacesSerialized,
+      collectionClassSources: collectionSources,
+      extraGlobals: serializeScopeValue(opts?.extraGlobals ?? {}, EXTRA_GLOBALS_ROOT, []),
     };
 
-    return await runWorker(workerData, { namespace, extraGlobals: opts?.extraGlobals ?? {} }, timeoutMs);
+    return await runWorker(workerData, roots, timeoutMs);
   } catch (err) {
     const error = err instanceof CodeModeError ? err : new CodeModeError("executionError", err instanceof Error ? err.message : String(err));
     return {
@@ -288,12 +339,15 @@ function serializeConstructorSource(cls: Function): string {
     .replace(/static\s*\{\s*__name\(this,\s*["'][^"']+["']\)\s*;?\s*\}/g, "");
 }
 
-function resolveTimeoutMs<TApi, TNamespace>(
-  hydration: CodeModeHydration<TApi, TNamespace>,
-  requestedTimeoutMs: number | undefined,
-): number {
-  const defaultTimeout = hydration.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const maxTimeout = hydration.maxTimeoutMs ?? DEFAULT_MAX_TIMEOUT_MS;
+function resolveTimeoutMs(bindings: NamespaceBinding[], requestedTimeoutMs: number | undefined): number {
+  const defaultTimeout = bindings.reduce(
+    (acc, b) => Math.min(acc, b.namespace.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS),
+    DEFAULT_TIMEOUT_MS,
+  );
+  const maxTimeout = bindings.reduce(
+    (acc, b) => Math.min(acc, b.namespace.maxTimeoutMs ?? DEFAULT_MAX_TIMEOUT_MS),
+    DEFAULT_MAX_TIMEOUT_MS,
+  );
   const timeout = requestedTimeoutMs ?? defaultTimeout;
   return Math.max(1, Math.min(timeout, maxTimeout));
 }
@@ -307,7 +361,7 @@ function assertIdentifier(value: string, label: string): string {
 
 function serializeScopeValue(
   value: unknown,
-  root: ScopeRoot,
+  root: string,
   path: string[],
   seen = new WeakSet<object>(),
 ): SerializedScopeValue {
@@ -340,7 +394,7 @@ function serializeScopeValue(
 
 async function runWorker(
   workerData: unknown,
-  roots: { namespace: unknown; extraGlobals: Record<string, unknown> },
+  roots: Record<string, unknown>,
   timeoutMs: number,
 ): Promise<CodeModeExecutionResult> {
   return await new Promise<CodeModeExecutionResult>((resolve) => {
@@ -425,7 +479,7 @@ async function runWorker(
 
 async function handleWorkerCall(
   worker: Worker,
-  roots: { namespace: unknown; extraGlobals: Record<string, unknown> },
+  roots: Record<string, unknown>,
   message: WorkerCallMessage,
   isSettled: boolean,
 ): Promise<void> {
@@ -439,7 +493,10 @@ async function handleWorkerCall(
       }
     }
 
-    const root = message.root === "namespace" ? roots.namespace : roots.extraGlobals;
+    const root = roots[message.root];
+    if (root === undefined) {
+      throw new CodeModeError("apiCallFailed", `unknown code mode scope root: ${message.root}`);
+    }
     const target = resolvePath(root, message.path);
     if (typeof target !== "function") {
       throw new CodeModeError("apiCallFailed", `code mode scope path is not callable: ${message.path.join(".")}`);

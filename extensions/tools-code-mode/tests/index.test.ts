@@ -1,22 +1,30 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import plugin from "../index.js";
-import type { CodeModeHydration } from "../src/types.js";
+import type { CodeModeNamespace } from "../src/types.js";
 import {
   activateCodeModeSession,
-  registerCodeModeHydration,
-  unregisterCodeModeHydration,
+  registerCodeModeNamespace,
+  unregisterCodeModeNamespace,
 } from "../api.js";
 
-const hydration: CodeModeHydration<{ greet(name: string): string }, { greet(name: string): string }> = {
+const ns: CodeModeNamespace<{ greet(name: string): string }, { greet(name: string): string }> = {
   id: "test",
   toolName: "execute_test_code",
   displayName: "Test Code Mode",
   namespaceName: "Test",
-  createNamespace: (api) => ({
-    greet: api.greet,
-  }),
+  createNamespace: (api) => ({ greet: api.greet }),
   collectionClasses: {},
   getSystemPrompt: () => "Use Test.greet(name).",
+};
+
+const ns2: CodeModeNamespace<{ shout(name: string): string }, { shout(name: string): string }> = {
+  id: "other",
+  toolName: "execute_other_code",
+  displayName: "Other Code Mode",
+  namespaceName: "Other",
+  createNamespace: (api) => ({ shout: api.shout }),
+  collectionClasses: {},
+  getSystemPrompt: () => "Use Other.shout(name).",
 };
 
 function createApi() {
@@ -31,10 +39,11 @@ function createApi() {
 
 describe("tools-code-mode plugin entry", () => {
   beforeEach(() => {
-    unregisterCodeModeHydration("test");
+    unregisterCodeModeNamespace("test");
+    unregisterCodeModeNamespace("other");
   });
 
-  it("does not expose execute_code until a hydration is registered", () => {
+  it("does not expose execute_code until a namespace is registered", () => {
     const { api, toolFactories } = createApi();
     plugin.register(api as never);
 
@@ -46,16 +55,14 @@ describe("tools-code-mode plugin entry", () => {
     expect(factory()).toBeNull();
   });
 
-  it("executes registered hydrations through the generic tool", async () => {
+  it("executes single-namespace code through the generic tool", async () => {
     const { api, toolFactories } = createApi();
     plugin.register(api as never);
-    registerCodeModeHydration(hydration, {
-      greet: (name: string) => `Hello, ${name}!`,
-    });
+    registerCodeModeNamespace(ns, { greet: (name: string) => `Hello, ${name}!` });
 
     const tool = (toolFactories[0] as () => any)();
     const result = await tool.execute("call-1", {
-      hydrationId: "test",
+      namespaceIds: ["test"],
       code: 'return await Test.greet("World");',
     });
 
@@ -63,47 +70,75 @@ describe("tools-code-mode plugin entry", () => {
     expect(result.details.returnValue).toBe("Hello, World!");
   });
 
-  it("returns structured validation errors for unknown hydrations", async () => {
+  it("composes two namespaces in one execute_code call", async () => {
     const { api, toolFactories } = createApi();
     plugin.register(api as never);
-    registerCodeModeHydration(hydration, {
-      greet: (name: string) => `Hello, ${name}!`,
-    });
+    registerCodeModeNamespace(ns, { greet: (name: string) => `Hello, ${name}!` });
+    registerCodeModeNamespace(ns2, { shout: (name: string) => `HEY ${name}` });
 
     const tool = (toolFactories[0] as () => any)();
     const result = await tool.execute("call-1", {
-      hydrationId: "unknown",
-      code: "return 1;",
+      namespaceIds: ["test", "other"],
+      code: 'const a = await Test.greet("a"); const b = await Other.shout("b"); return a + "|" + b;',
     });
 
-    expect(result.details.ok).toBe(false);
-    expect(result.details.errorKind).toBe("validationError");
-    expect(result.details.error).toContain('code mode hydration "unknown" is not registered');
-    expect(result.content[0].text).toContain("Available hydrations: test");
+    expect(result.details.ok).toBe(true);
+    expect(result.details.returnValue).toBe("Hello, a!|HEY b");
   });
 
-  it("returns structured validation errors for malformed execute_code params", async () => {
+  it("returns structured validation errors for unknown namespaces", async () => {
     const { api, toolFactories } = createApi();
     plugin.register(api as never);
-    registerCodeModeHydration(hydration, {
-      greet: (name: string) => `Hello, ${name}!`,
-    });
+    registerCodeModeNamespace(ns, { greet: (name: string) => `Hello, ${name}!` });
 
     const tool = (toolFactories[0] as () => any)();
     const result = await tool.execute("call-1", {
-      hydrationId: "",
+      namespaceIds: ["unknown"],
       code: "return 1;",
     });
 
     expect(result.details.ok).toBe(false);
     expect(result.details.errorKind).toBe("validationError");
-    expect(result.details.error).toBe("execute_code requires hydrationId.");
+    expect(result.details.error).toContain('code mode namespace "unknown" is not registered');
+    expect(result.content[0].text).toContain("Available namespaces: test");
+  });
+
+  it("returns structured validation errors for missing/empty namespaceIds", async () => {
+    const { api, toolFactories } = createApi();
+    plugin.register(api as never);
+    registerCodeModeNamespace(ns, { greet: (name: string) => `Hello, ${name}!` });
+
+    const tool = (toolFactories[0] as () => any)();
+    const result = await tool.execute("call-1", {
+      namespaceIds: [],
+      code: "return 1;",
+    });
+
+    expect(result.details.ok).toBe(false);
+    expect(result.details.errorKind).toBe("validationError");
+    expect(result.details.error).toContain("non-empty array");
+  });
+
+  it("rejects duplicate namespaceIds in a single call", async () => {
+    const { api, toolFactories } = createApi();
+    plugin.register(api as never);
+    registerCodeModeNamespace(ns, { greet: (name: string) => `Hello, ${name}!` });
+
+    const tool = (toolFactories[0] as () => any)();
+    const result = await tool.execute("call-1", {
+      namespaceIds: ["test", "test"],
+      code: "return 1;",
+    });
+
+    expect(result.details.ok).toBe(false);
+    expect(result.details.errorKind).toBe("validationError");
+    expect(result.details.error).toContain("duplicate");
   });
 
   it("adds the active session prompt during agent turn preparation", () => {
     const { api, hooks } = createApi();
     plugin.register(api as never);
-    registerCodeModeHydration(hydration, {});
+    registerCodeModeNamespace(ns, {});
     activateCodeModeSession("test", undefined, "agent:test");
 
     const hook = hooks.find((entry) => entry.name === "agent_turn_prepare");

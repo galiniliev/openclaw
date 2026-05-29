@@ -8,7 +8,7 @@ import { describe, it, expect } from "vitest";
 import { executeCodeMode } from "../src/executor.js";
 import { createCodeModeTool } from "../src/tool-factory.js";
 import { CodeModeSessionManager } from "../src/mode-manager.js";
-import type { CodeModeHydration } from "../src/types.js";
+import type { CodeModeNamespace } from "../src/types.js";
 
 // Test API and Namespace types
 interface TestApi {
@@ -37,7 +37,7 @@ class TestCollection {
 }
 
 // Create a test hydration with mock API
-function createTestHydration(overrides?: Partial<CodeModeHydration<TestApi, TestNamespace>>): CodeModeHydration<TestApi, TestNamespace> {
+function createTestNamespace(overrides?: Partial<CodeModeNamespace<TestApi, TestNamespace>>): CodeModeNamespace<TestApi, TestNamespace> {
   return {
     id: "test",
     toolName: "execute_test_code",
@@ -74,11 +74,11 @@ describe("Integration Tests", () => {
   describe("Full flow with mock hydration", () => {
     it("creates tool, executes code, and returns result", async () => {
       // 1. Create hydration and API
-      const hydration = createTestHydration();
+      const ns = createTestNamespace();
       const api = createMockApi();
 
       // 2. Build tool from hydration
-      const tool = createCodeModeTool(hydration, api);
+      const tool = createCodeModeTool(ns, api);
 
       // 3. Execute code via tool
       const code = `
@@ -103,9 +103,9 @@ describe("Integration Tests", () => {
     });
 
     it("executes async code with collection classes", async () => {
-      const hydration = createTestHydration();
+      const ns = createTestNamespace();
       const api = createMockApi();
-      const tool = createCodeModeTool(hydration, api);
+      const tool = createCodeModeTool(ns, api);
 
       const code = `
         const collection = new TestCollection();
@@ -126,7 +126,7 @@ describe("Integration Tests", () => {
     });
 
     it("supports extra globals via hydration", async () => {
-      const hydration = createTestHydration({
+      const ns = createTestNamespace({
         extraGlobals: (api: TestApi, context?: any) => ({
           customValue: 100,
           contextData: context?.userId || "anonymous",
@@ -134,7 +134,7 @@ describe("Integration Tests", () => {
       });
       const api = createMockApi();
       const context = { userId: "user-123" };
-      const tool = createCodeModeTool(hydration, api, context);
+      const tool = createCodeModeTool(ns, api, context);
 
       const code = `
         return {
@@ -156,8 +156,8 @@ describe("Integration Tests", () => {
   describe("Mode manager + tool creation", () => {
     it("registers hydrations, activates mode, and verifies prompt switching", () => {
       // Create multiple hydrations
-      const testHydration = createTestHydration();
-      const altHydration = createTestHydration({
+      const testNs = createTestNamespace();
+      const altNs = createTestNamespace({
         id: "alt",
         toolName: "execute_alt_code",
         displayName: "Alt Code Mode",
@@ -165,11 +165,11 @@ describe("Integration Tests", () => {
       });
 
       // Create mode manager
-      const manager = new CodeModeSessionManager([testHydration, altHydration]);
+      const manager = new CodeModeSessionManager([testNs, altNs]);
 
       // Verify initial state
       expect(manager.getActiveMode()).toBeNull();
-      expect(manager.getActiveHydration()).toBeNull();
+      expect(manager.getActiveNamespace()).toBeNull();
       expect(manager.getActivePrompt()).toBeNull();
 
       // Activate test mode
@@ -177,13 +177,13 @@ describe("Integration Tests", () => {
 
       const mode = manager.getActiveMode();
       expect(mode).not.toBeNull();
-      expect(mode?.hydrationId).toBe("test");
+      expect(mode?.namespaceId).toBe("test");
       expect(mode?.context).toEqual({ feature: "testing" });
       expect(mode?.activatedAt).toBeGreaterThan(0);
 
-      const hydration = manager.getActiveHydration();
-      expect(hydration?.id).toBe("test");
-      expect(hydration?.displayName).toBe("Test Code Mode");
+      const activeNs = manager.getActiveNamespace();
+      expect(activeNs?.id).toBe("test");
+      expect(activeNs?.displayName).toBe("Test Code Mode");
 
       const prompt = manager.getActivePrompt();
       expect(prompt).toContain("Test Code Mode system prompt");
@@ -192,8 +192,8 @@ describe("Integration Tests", () => {
       // Switch to alt mode
       manager.activate("alt");
 
-      expect(manager.getActiveMode()?.hydrationId).toBe("alt");
-      expect(manager.getActiveHydration()?.id).toBe("alt");
+      expect(manager.getActiveMode()?.namespaceId).toBe("alt");
+      expect(manager.getActiveNamespace()?.id).toBe("alt");
       expect(manager.getActivePrompt()).toBe("Alt Code Mode system prompt");
 
       // Deactivate
@@ -202,13 +202,13 @@ describe("Integration Tests", () => {
     });
 
     it("lists available hydrations", () => {
-      const hydration1 = createTestHydration();
-      const hydration2 = createTestHydration({
+      const ns1 = createTestNamespace();
+      const ns2 = createTestNamespace({
         id: "test2",
         toolName: "execute_test2_code",
       });
 
-      const manager = new CodeModeSessionManager([hydration1, hydration2]);
+      const manager = new CodeModeSessionManager([ns1, ns2]);
 
       const available = manager.listAvailable();
       expect(available).toHaveLength(2);
@@ -219,29 +219,29 @@ describe("Integration Tests", () => {
       const manager = new CodeModeSessionManager([]);
       expect(manager.listAvailable()).toHaveLength(0);
 
-      const hydration = createTestHydration();
-      manager.register(hydration);
+      const ns = createTestNamespace();
+      manager.register(ns);
 
       expect(manager.listAvailable()).toHaveLength(1);
       expect(manager.listAvailable()[0].id).toBe("test");
 
       // Can now activate it
       manager.activate("test");
-      expect(manager.getActiveMode()?.hydrationId).toBe("test");
+      expect(manager.getActiveMode()?.namespaceId).toBe("test");
     });
 
     it("throws error when activating unknown hydration", () => {
       const manager = new CodeModeSessionManager([]);
 
-      expect(() => manager.activate("unknown")).toThrow("Unknown hydration ID: unknown");
+      expect(() => manager.activate("unknown")).toThrow("Unknown namespace ID: unknown");
     });
   });
 
   describe("Console capture end-to-end", () => {
     it("captures console output through tool execution", async () => {
-      const hydration = createTestHydration();
+      const ns = createTestNamespace();
       const api = createMockApi();
-      const tool = createCodeModeTool(hydration, api);
+      const tool = createCodeModeTool(ns, api);
 
       const code = `
         console.log("Starting execution");
@@ -265,9 +265,9 @@ describe("Integration Tests", () => {
     });
 
     it("returns console output as result when no explicit return", async () => {
-      const hydration = createTestHydration();
+      const ns = createTestNamespace();
       const api = createMockApi();
-      const tool = createCodeModeTool(hydration, api);
+      const tool = createCodeModeTool(ns, api);
 
       const code = `
         console.log("First line");
@@ -288,9 +288,9 @@ describe("Integration Tests", () => {
 
   describe("Error propagation", () => {
     it("returns ok:false when API throws error", async () => {
-      const hydration = createTestHydration();
+      const ns = createTestNamespace();
       const api = createMockApi();
-      const tool = createCodeModeTool(hydration, api);
+      const tool = createCodeModeTool(ns, api);
 
       const code = `Test.throwError("Something went wrong");`;
 
@@ -303,9 +303,9 @@ describe("Integration Tests", () => {
     });
 
     it("returns error message when code throws", async () => {
-      const hydration = createTestHydration();
+      const ns = createTestNamespace();
       const api = createMockApi();
-      const tool = createCodeModeTool(hydration, api);
+      const tool = createCodeModeTool(ns, api);
 
       const code = `throw new Error("Custom error");`;
 
@@ -316,9 +316,9 @@ describe("Integration Tests", () => {
     });
 
     it("returns error when code has syntax error", async () => {
-      const hydration = createTestHydration();
+      const ns = createTestNamespace();
       const api = createMockApi();
-      const tool = createCodeModeTool(hydration, api);
+      const tool = createCodeModeTool(ns, api);
 
       const code = `this is invalid javascript syntax {{{`;
 
@@ -330,9 +330,9 @@ describe("Integration Tests", () => {
     });
 
     it("preserves console output before error", async () => {
-      const hydration = createTestHydration();
+      const ns = createTestNamespace();
       const api = createMockApi();
-      const tool = createCodeModeTool(hydration, api);
+      const tool = createCodeModeTool(ns, api);
 
       const code = `
         console.log("Before error");
@@ -353,11 +353,11 @@ describe("Integration Tests", () => {
 
   describe("Timeout end-to-end", () => {
     it("respects timeout and returns error", async () => {
-      const hydration = createTestHydration({
+      const ns = createTestNamespace({
         defaultTimeoutMs: 100, // Short timeout
       });
       const api = createMockApi();
-      const tool = createCodeModeTool(hydration, api);
+      const tool = createCodeModeTool(ns, api);
 
       const code = `
         await new Promise(resolve => setTimeout(resolve, 500));
@@ -372,11 +372,11 @@ describe("Integration Tests", () => {
     });
 
     it("respects custom timeout from tool input", async () => {
-      const hydration = createTestHydration({
+      const ns = createTestNamespace({
         defaultTimeoutMs: 5000, // Long default
       });
       const api = createMockApi();
-      const tool = createCodeModeTool(hydration, api);
+      const tool = createCodeModeTool(ns, api);
 
       const code = `
         await new Promise(resolve => setTimeout(resolve, 200));
@@ -395,11 +395,11 @@ describe("Integration Tests", () => {
     });
 
     it("completes successfully before timeout", async () => {
-      const hydration = createTestHydration({
+      const ns = createTestNamespace({
         defaultTimeoutMs: 500, // Generous timeout
       });
       const api = createMockApi();
-      const tool = createCodeModeTool(hydration, api);
+      const tool = createCodeModeTool(ns, api);
 
       const code = `
         await new Promise(resolve => setTimeout(resolve, 50));
@@ -426,18 +426,18 @@ describe("Integration Tests", () => {
         },
       };
 
-      const hydration1 = createTestHydration();
-      const hydration2 = createTestHydration({
+      const ns1 = createTestNamespace();
+      const ns2 = createTestNamespace({
         id: "alt",
         toolName: "execute_alt_code",
         displayName: "Alt Code Mode",
       });
 
-      const manager = new CodeModeSessionManager([hydration1, hydration2]);
+      const manager = new CodeModeSessionManager([ns1, ns2]);
 
       // Activate first mode and create tool
       manager.activate("test");
-      const tool1 = createCodeModeTool(hydration1, api1);
+      const tool1 = createCodeModeTool(ns1, api1);
 
       const result1 = await tool1.execute("call-1", {
         code: `return Test.greet("User");`,
@@ -448,7 +448,7 @@ describe("Integration Tests", () => {
 
       // Switch mode and create new tool with different API
       manager.activate("alt");
-      const tool2 = createCodeModeTool(hydration2, api2);
+      const tool2 = createCodeModeTool(ns2, api2);
 
       const result2 = await tool2.execute("call-2", {
         code: `return Test.greet("User");`,
