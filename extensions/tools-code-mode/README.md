@@ -73,7 +73,7 @@ Turn 9 → LLM formats comparison table
 ##### Code mode (1 round-trip)
 
 ```js
-// execute_code({ hydrationId: "web", code: "..." })
+// execute_code({ namespaceIds: ["web"], code: "..." })
 const products = ["Linear", "Shortcut", "Jira"];
 const comparison = [];
 
@@ -177,13 +177,13 @@ recipe uses JSONPlaceholder (`https://jsonplaceholder.typicode.com`) because it
 exposes `/users` (10 users) and `/posts?userId=X`, which matches the test
 fixture without auth.
 
-**1. Set up the code-mode side.** Drop a hydration in the workspace:
+**1. Set up the code-mode side.** Drop a namespace in the workspace:
 
-`~/.openclaw/workspace/code-mode-hydrations.json`
+`~/.openclaw/workspace/code-mode-namespaces.json`
 
 ```json
 {
-  "hydrations": [
+  "namespaces": [
     {
       "id": "demo",
       "namespaceName": "Demo",
@@ -199,7 +199,7 @@ fixture without auth.
 }
 ```
 
-This registers a Tier 0 hydration; the engine activates `execute_code` on
+This registers a Tier 0 namespace; the engine activates `execute_code` on
 startup as soon as it sees this file. (`tools-code-mode`'s manifest sets
 `activation.onStartup: true`, and the JSON loader runs at register time.)
 
@@ -270,12 +270,12 @@ impact those numbers translate to.
 
 ---
 
-Generic code mode execution engine. Owner plugins register domain-specific **hydrations** (typed namespace + prompt + collection classes + API adapter). The engine provides sandboxed code execution, session-scoped mode switching, and prompt injection.
+Generic code mode execution engine. Owner plugins register domain-specific **namespaces** (typed scope + prompt + collection classes + API adapter). The engine provides sandboxed code execution, session-scoped mode switching, and prompt injection. A single `execute_code` call can compose multiple registered namespaces by passing their ids in `namespaceIds`.
 
 ## How It Works
 
 ```
-Owner plugin registers hydration + API adapter
+Owner plugin registers namespace + API adapter
   → tools-code-mode stores it in the global registry
   → execute_code tool becomes available
   → LLM generates JS code using the typed namespace
@@ -285,31 +285,66 @@ Owner plugin registers hydration + API adapter
 
 The engine never imports domain code. Owner plugins bring their own namespace factories, prompts, and adapters.
 
+## Sandbox & Security Model
+
+`execute_code` runs in a Node.js `worker_thread` with a `vm.createContext`
+sandbox. The host process never injects host-realm functions or objects into
+the VM context — doing so would let sandboxed code escape via
+`.constructor.constructor("return process")()`.
+
+Concrete properties enforced by the executor:
+
+- **No host closures inside the VM.** `console`, `setTimeout`, `Promise`, and
+  `JSON` are reconstructed *inside* the VM realm. Console output is collected
+  into a VM-side array (`__consoleLines`) and read back from the host only
+  after the script resolves.
+- **`codeGeneration: { strings: false, wasm: false }`** — `eval`, `new
+  Function`, and WebAssembly compilation are disabled in the sandbox.
+- **Forbidden path segments.** Scope traversal rejects `__proto__`,
+  `constructor`, and `prototype` keys to prevent prototype-pollution probes
+  against the bridged namespace object.
+- **Bridged calls only.** Namespace methods are serialized to thin proxies
+  that `postMessage` a `{ type: "call", root, path, args }` request back to
+  the host. The host invokes the real adapter and returns the result. Args
+  and return values must round-trip through structured clone — non-cloneable
+  values (functions, class instances with private state) will fail at the
+  boundary by design.
+- **Collection class injection.** Classes from `collectionClasses` are
+  serialized via `Function.prototype.toString` and re-evaluated in the VM
+  realm so `instanceof` checks work inside the sandbox without leaking the
+  host-realm constructor.
+- **Resource limits.** Per-namespace `maxCodeBytes` (default 100 KB),
+  `defaultTimeoutMs` (30 s), and `maxTimeoutMs` (120 s) are enforced; when
+  multiple namespaces are composed, the *most restrictive* value wins. A
+  per-process semaphore caps concurrent executions (default 4).
+- **Clean shutdown.** The `dispose` plugin event terminates any live worker
+  threads.
+
 ## Public API
 
 ```ts
-// Full hydration registration (Tier 3)
+// Full namespace registration
 import {
-  registerCodeModeHydration,
-  unregisterCodeModeHydration,
+  registerCodeModeNamespace,
+  unregisterCodeModeNamespace,
   activateCodeModeSession,
   deactivateCodeModeSession,
 } from "@openclaw/tools-code-mode/api";
 
-import type { CodeModeHydration } from "@openclaw/tools-code-mode/api";
+import type { CodeModeNamespace } from "@openclaw/tools-code-mode/api";
 
-// Quick hydration helpers (Tier 1 & 2)
+// Quick helpers
 import { quickHydration, plugAdapter } from "@openclaw/tools-code-mode/quick";
 ```
 
-## Registering a Hydration
+## Registering a Namespace
 
-Owner plugins call `registerCodeModeHydration` during their `register(api)` lifecycle:
+Owner plugins call `registerCodeModeNamespace` during their `register(api)` lifecycle:
 
 ```ts
 // extensions/my-domain/index.ts
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { registerCodeModeHydration } from "@openclaw/tools-code-mode/api";
+import { registerCodeModeNamespace } from "@openclaw/tools-code-mode/api";
 import { createMyNamespace, MyItemSet } from "./namespace.js";
 import { getMySystemPrompt } from "./prompts.js";
 import { createMyApiAdapter } from "./adapter.js";
@@ -317,11 +352,11 @@ import { createMyApiAdapter } from "./adapter.js";
 export default definePluginEntry({
   id: "my-domain",
   name: "My Domain Agent",
-  description: "Registers the MyDomain code mode hydration.",
+  description: "Registers the MyDomain code mode namespace.",
   register(api) {
     const adapter = createMyApiAdapter(api);
 
-    registerCodeModeHydration(
+    registerCodeModeNamespace(
       {
         id: "my-domain",
         toolName: "execute_my_domain_code",
@@ -340,10 +375,10 @@ export default definePluginEntry({
 });
 ```
 
-## The CodeModeHydration Interface
+## The CodeModeNamespace Interface
 
 ```ts
-interface CodeModeHydration<TApi = unknown, TNamespace = unknown> {
+interface CodeModeNamespace<TApi = unknown, TNamespace = unknown> {
   // Identity
   readonly id: string;              // "m365", "engage", "planner", "my-domain"
   readonly toolName: string;        // "execute_m365_code" (informational)
@@ -370,18 +405,36 @@ interface CodeModeHydration<TApi = unknown, TNamespace = unknown> {
 
 ## Tool: execute_code
 
-Once at least one hydration is registered, the `execute_code` tool appears:
+Once at least one namespace is registered, the `execute_code` tool appears:
 
 ```json
 {
   "name": "execute_code",
   "parameters": {
-    "hydrationId": "m365",
+    "namespaceIds": ["m365"],
     "code": "const msgs = await M365.messages.list({ top: 5 }); return msgs.summary();",
     "timeoutMs": 15000
   }
 }
 ```
+
+`namespaceIds` is always an array. To compose multiple namespaces in a single sandbox, pass more than one id:
+
+```json
+{
+  "name": "execute_code",
+  "parameters": {
+    "namespaceIds": ["m365", "outlook"],
+    "code": "const inbox = await M365.messages.list({ top: 5 }); return Outlook.summarize(inbox);"
+  }
+}
+```
+
+When multiple namespaces are composed:
+- Each namespace's `namespaceName` becomes a top-level scope variable. Names must be unique across the composed set; collisions reject the call with `errorKind: "validationError"`.
+- `maxCodeBytes`, `defaultTimeoutMs`, and `maxTimeoutMs` resolve to the **most restrictive** value across the composed namespaces.
+- `extraGlobals` from each namespace are merged into a single object; later entries override earlier on key collisions.
+- `collectionClasses` from all namespaces are injected; same-name collisions take the last one in iteration order.
 
 **Response:**
 
@@ -398,7 +451,7 @@ Once at least one hydration is registered, the `execute_code` tool appears:
 
 ## Session Mode (Prompt Injection)
 
-Activate a mode to inject the hydration's system prompt into the agent's context:
+Activate a mode to inject the namespace's system prompt into the agent's context:
 
 ```ts
 import {
@@ -413,11 +466,11 @@ activateCodeModeSession("m365", { user: "alice@contoso.com" }, sessionKey);
 deactivateCodeModeSession(sessionKey);
 ```
 
-The engine hooks into `agent_turn_prepare` and appends the active hydration's system prompt as context.
+The engine hooks into `agent_turn_prepare` and appends the active namespace's system prompt as context.
 
 ## Complete Example: Weather Code Mode
 
-A minimal example showing how to create a hydration from scratch:
+A minimal example showing how to create a namespace from scratch:
 
 ### 1. Define the API interface
 
@@ -450,7 +503,7 @@ export type WeatherNamespace = ReturnType<typeof createWeatherNamespace>;
 ```ts
 // extensions/weather-agent/src/prompts.ts
 export function getWeatherSystemPrompt(): string {
-  return `You have access to **execute_code** with hydrationId "weather".
+  return `You have access to **execute_code** with namespaceIds: ["weather"].
 The code has access to the \`Weather\` namespace:
 
 | Method | Signature | Returns |
@@ -483,12 +536,12 @@ export function createWeatherAdapter(apiKey: string): WeatherAPI {
 }
 ```
 
-### 5. Register the hydration
+### 5. Register the namespace
 
 ```ts
 // extensions/weather-agent/index.ts
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { registerCodeModeHydration } from "@openclaw/tools-code-mode/api";
+import { registerCodeModeNamespace } from "@openclaw/tools-code-mode/api";
 import { createWeatherNamespace } from "./src/namespace.js";
 import { getWeatherSystemPrompt } from "./src/prompts.js";
 import { createWeatherAdapter } from "./src/adapter.js";
@@ -496,12 +549,12 @@ import { createWeatherAdapter } from "./src/adapter.js";
 export default definePluginEntry({
   id: "weather-agent",
   name: "Weather Agent",
-  description: "Weather code mode hydration for tools-code-mode.",
+  description: "Weather code mode namespace for tools-code-mode.",
   register(api) {
     const config = api.getPluginConfig();
     const adapter = createWeatherAdapter(config?.apiKey ?? process.env.WEATHER_API_KEY ?? "");
 
-    registerCodeModeHydration(
+    registerCodeModeNamespace(
       {
         id: "weather",
         toolName: "execute_weather_code",
@@ -523,7 +576,7 @@ export default definePluginEntry({
 Once registered, the LLM can call:
 
 ```js
-// execute_code({ hydrationId: "weather", code: "..." })
+// execute_code({ namespaceIds: ["weather"], code: "..." })
 const current = await Weather.current("Seattle");
 const forecast = await Weather.forecast("Seattle", 3);
 return { current, forecast };
@@ -536,7 +589,7 @@ If you already have an MCP server exposing tools, you can create a thin code mod
 ```ts
 // extensions/github-code-mode/index.ts
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { registerCodeModeHydration } from "@openclaw/tools-code-mode/api";
+import { registerCodeModeNamespace } from "@openclaw/tools-code-mode/api";
 
 interface GitHubAPI {
   repos: { list(): Promise<{ name: string; url: string }[]> };
@@ -599,12 +652,12 @@ function createGitHubAdapter(token: string): GitHubAPI {
 export default definePluginEntry({
   id: "github-code-mode",
   name: "GitHub Code Mode",
-  description: "GitHub code mode hydration — repos, issues, PRs via typed namespace.",
+  description: "GitHub code mode namespace — repos, issues, PRs via typed scope.",
   register(api) {
     const token = process.env.GITHUB_TOKEN ?? "";
     if (!token) return;
 
-    registerCodeModeHydration(
+    registerCodeModeNamespace(
       {
         id: "github",
         toolName: "execute_github_code",
@@ -612,7 +665,7 @@ export default definePluginEntry({
         namespaceName: "GitHub",
         createNamespace: (a) => createGitHubNamespace(a),
         collectionClasses: {},
-        getSystemPrompt: () => `You have access to execute_code with hydrationId "github".
+        getSystemPrompt: () => `You have access to execute_code with namespaceIds: ["github"].
 
 | Namespace | Method | Returns |
 |-----------|--------|---------|
@@ -678,7 +731,7 @@ steps:
   - id: fetch
     tool: execute_code
     args:
-      hydrationId: m365
+      namespaceIds: [m365]
       code: return (await M365.messages.list({ top: 20 })).summary();
 
   - id: summarize
@@ -693,7 +746,7 @@ steps:
 Wrap the API adapter before registration to intercept write operations:
 
 ```ts
-import { registerCodeModeHydration } from "@openclaw/tools-code-mode/api";
+import { registerCodeModeNamespace } from "@openclaw/tools-code-mode/api";
 
 const rawAdapter = createLiveGraphAdapter(config);
 
@@ -710,7 +763,7 @@ const guardedAdapter = wrapWithApprovalGuard(rawAdapter, {
   },
 });
 
-registerCodeModeHydration(m365Hydration, guardedAdapter);
+registerCodeModeNamespace(m365Namespace, guardedAdapter);
 ```
 
 The engine never knows about approvals — it just runs code against whatever adapter was registered.
@@ -722,12 +775,26 @@ Plugin manifest (`openclaw.plugin.json`):
 ```json
 {
   "id": "tools-code-mode",
+  "name": "Tools Code Mode",
+  "description": "Generic code mode execution engine for registered domain namespaces",
   "activation": { "onStartup": true },
-  "contracts": { "tools": ["execute_code"] }
+  "contracts": { "tools": ["execute_code"] },
+  "toolMetadata": {
+    "execute_code": { "optional": true }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
 }
 ```
 
-The `execute_code` tool only appears when at least one hydration is registered.
+The `execute_code` tool only appears when at least one namespace is registered.
+`toolMetadata.execute_code.optional: true` is intentionally aligned with the
+runtime `api.registerTool(..., { optional: true })` call so OpenClaw skips
+loading the engine (and the workspace JSON hydration scan) for sessions that
+do not allowlist the tool.
 
 For packaged or bundled plugins, import the API via the package path (`@openclaw/tools-code-mode/api` or the package name configured for the engine). For local side-by-side plugins loaded with `plugins.load.paths`, use a relative import to the colocated engine plugin, for example `../tools-code-mode/api.js`, so both plugins share the same registry instance.
 
@@ -735,20 +802,20 @@ For packaged or bundled plugins, import the API via the package path (`@openclaw
 
 ## Quick Hydration: Register Without Writing a Plugin
 
-You don't need a full extension to add a hydration. The engine supports three progressively powerful shortcuts:
+You don't need a full extension to add a namespace. The engine supports three progressively powerful shortcuts:
 
 ### Tier 0: JSON Config (zero code)
 
-Drop a `code-mode-hydrations.json` in your OpenClaw workspace:
+Drop a `code-mode-namespaces.json` in your OpenClaw workspace:
 
 ```
-~/.openclaw/workspace/code-mode-hydrations.json              # main workspace
-~/.openclaw/workspaces/[agent-name]/code-mode-hydrations.json # per-agent
+~/.openclaw/workspace/code-mode-namespaces.json              # main workspace
+~/.openclaw/workspaces/[agent-name]/code-mode-namespaces.json # per-agent
 ```
 
 ```json
 {
-  "hydrations": [
+  "namespaces": [
     {
       "id": "github",
       "namespaceName": "GitHub",
@@ -766,11 +833,27 @@ Drop a `code-mode-hydrations.json` in your OpenClaw workspace:
 }
 ```
 
-Restart OpenClaw — `execute_code` with `hydrationId: "github"` is ready.
+Restart OpenClaw — `execute_code` with `namespaceIds: ["github"]` is ready.
 
 **Auth** uses OpenClaw's standard resolution: `configPath` (resolved via `resolveConfiguredSecretInputString`) with `env` fallback. Auth is resolved lazily on first execution, not at startup.
 
 **Endpoint shorthand:** `METHOD /path?query={param}` — path params from `{name}` in path, query params from `{name}` in query string, body inferred from POST/PUT/PATCH.
+
+**Structured form** (use when the shorthand isn't expressive enough — e.g. to
+declare param types, override body inference, or set per-endpoint headers):
+
+```json
+"issues.create": {
+  "method": "POST",
+  "path": "/repos/{owner}/{repo}/issues",
+  "params": {
+    "owner": { "type": "string", "required": true, "in": "path" },
+    "repo":  { "type": "string", "required": true, "in": "path" }
+  },
+  "body": true,
+  "headers": { "X-GitHub-Api-Version": "2022-11-28" }
+}
+```
 
 If `prompt` is omitted, one is auto-generated from endpoint definitions.
 
@@ -841,6 +924,8 @@ node scripts/run-vitest.mjs \
   extensions/tools-code-mode/tests/tool-factory.test.ts \
   extensions/tools-code-mode/tests/mode-manager.test.ts \
   extensions/tools-code-mode/tests/integration.test.ts \
+  extensions/tools-code-mode/tests/index.test.ts \
+  extensions/tools-code-mode/tests/comparison.test.ts \
   extensions/tools-code-mode/tests/hydration/endpoint-parser.test.ts \
   extensions/tools-code-mode/tests/hydration/rest-adapter.test.ts \
   extensions/tools-code-mode/tests/hydration/quick-hydration.e2e.test.ts \
