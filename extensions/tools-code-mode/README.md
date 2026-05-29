@@ -743,30 +743,133 @@ steps:
 
 ## Adding Approval Guards (Future)
 
-Wrap the API adapter before registration to intercept write operations:
+Code mode multiplies the cost of an unsupervised write: a single
+`execute_code` call can issue dozens of API requests before the agent
+ever yields back to the user. Per-call confirmation prompts ("approve
+this delete?") work for one-tool-per-turn agents but fall apart in code
+mode — interrupting the script after every protected method either
+kills throughput or trains the user to click "yes" reflexively.
+
+The proposed approval model addresses this with **two passes**:
+
+1. **Plan mode** — first run drafts the set of writes, returns it for
+   review, executes nothing destructive.
+2. **Batch approval** — the user approves (or edits) the entire plan
+   once; the second run replays it under the approved budget.
+
+### Pass 1: plan mode (dry-run)
+
+The adapter is wrapped so that *write-classified* methods short-circuit
+into a recorded `PlannedAction` instead of hitting the API. Reads still
+execute normally so the script can branch on real data.
 
 ```ts
 import { registerCodeModeNamespace } from "@openclaw/tools-code-mode/api";
 
 const rawAdapter = createLiveGraphAdapter(config);
 
-const guardedAdapter = wrapWithApprovalGuard(rawAdapter, {
+const planningAdapter = wrapWithApprovalGuard(rawAdapter, {
   classify: (namespace, method) => {
     if (["list", "get", "search", "count"].includes(method)) return "read";
     if (["createDraft", "createReplyDraft"].includes(method)) return "draft";
     if (["delete", "deleteAll"].includes(method)) return "destructive";
     return "write";
   },
-  onProtected: (method, args) => {
-    // Halt execution, return needs_approval to Lobster
-    throw new ApprovalRequiredError({ method, args });
+  mode: "plan",                       // dry-run: writes record, do not execute
+  onPlanned: (action) => {
+    // action = { id, namespace, method, args, classification, idempotencyKey }
+    plan.push(action);
+    return synthesizeOptimisticResult(action); // so the script can continue
   },
 });
 
-registerCodeModeNamespace(m365Namespace, guardedAdapter);
+registerCodeModeNamespace(m365Namespace, planningAdapter);
 ```
 
-The engine never knows about approvals — it just runs code against whatever adapter was registered.
+The script's `returnValue` is whatever the user-authored code produces;
+the engine surfaces the recorded plan alongside it:
+
+```json
+{
+  "ok": true,
+  "returnValue": { "summary": "5 stale drafts identified" },
+  "plannedActions": [
+    { "id": "a1", "namespace": "M365", "method": "messages.delete",
+      "args": { "id": "AAMkAG..." }, "classification": "destructive",
+      "idempotencyKey": "del:AAMkAG..." }
+    /* … */
+  ],
+  "consoleOutput": [],
+  "durationMs": 412
+}
+```
+
+The agent presents `plannedActions` to the user (or to a Lobster
+approval step). Nothing has been written yet.
+
+### Pass 2: batch approval & replay
+
+Once the user approves (optionally editing or removing entries), the
+host re-invokes `execute_code` with the approved plan as an
+**execution budget**. The same script runs again, but writes only fire
+when the call's `idempotencyKey` is present in the approved budget:
+
+```ts
+const approvedAdapter = wrapWithApprovalGuard(rawAdapter, {
+  classify: /* same as above */,
+  mode: "execute",
+  approvedBudget: userEditedPlan,     // Set<idempotencyKey>
+  onUnapproved: (action) => {
+    throw new ApprovalRequiredError({ method: action.method, args: action.args });
+  },
+});
+
+registerCodeModeNamespace(m365Namespace, approvedAdapter);
+```
+
+Why a re-run instead of "resume": the VM is destroyed on every
+`execute_code` call (no shared heap, no persistent worker), so the only
+reliable way to "continue" a script is to run it again. The
+`idempotencyKey` (derived from `{namespace, method, normalized args}`)
+makes the second pass deterministic — the same writes that the user
+saw in the plan are the ones that fire. Anything new the model
+generates on replay (e.g. a divergent branch caused by drifted read
+data) shows up as an unapproved action and halts the script with
+`ApprovalRequiredError`, surfacing back to the user as a fresh planning
+round.
+
+### Recommended classification tiers
+
+| Tier | Examples | Plan-mode behavior | Replay behavior |
+|------|----------|--------------------|-----------------|
+| `read` | `list`, `get`, `search`, `count` | execute normally | execute normally |
+| `draft` | `createDraft`, `createReplyDraft` | record + synthesize id | execute if key in budget |
+| `write` | `update`, `move`, `send` | record + synthesize result | execute if key in budget |
+| `destructive` | `delete`, `deleteAll`, `purge` | record + return `{ deleted: true }` | execute if key in budget |
+
+Drafts and destructive actions should always require explicit
+per-action approval (no blanket "approve all writes"). The agent UI can
+choose to auto-approve reads + drafts and only prompt on writes +
+destructive.
+
+### Integration points
+
+- **Engine:** unchanged. The adapter wrapper lives in the owner plugin;
+  the executor still just calls whatever methods the namespace exposes.
+- **Tool output:** `plannedActions` is added as an optional field on
+  `CodeModeToolOutput` so plan-mode results are first-class. Implementations
+  in execute-mode leave the field unset.
+- **Lobster workflows:** a workflow step can branch on
+  `details.plannedActions` — empty/absent → done; non-empty → emit
+  `needs_approval` event with the plan, wait, then re-invoke with the
+  approved budget.
+- **Telemetry:** both passes share a `planId` so the audit trail links
+  the dry-run plan, the user's edits, and the executed writes.
+
+The engine itself never knows about approvals — it just runs code
+against whatever adapter was registered. Plan mode and batch approval
+are entirely a property of the adapter wrapper an owner plugin chooses
+to install.
 
 ## Configuration
 
