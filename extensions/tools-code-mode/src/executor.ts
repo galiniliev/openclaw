@@ -1,12 +1,22 @@
+import { createHash } from "node:crypto";
 import { Worker } from "node:worker_threads";
-import type { CodeModeNamespace, CodeModeExecutionResult } from "./types.js";
 import { CodeModeError } from "./errors.js";
+import {
+  classifyReturnValueKind,
+  emit,
+  emitJudgeInput,
+  JUDGE_INPUT_RESULT_MAX_BYTES,
+  safeStringifyForJudge,
+  truncateUtf8,
+  type ReturnValueKind,
+} from "./telemetry.js";
+import type { CodeModeNamespace, CodeModeExecutionResult } from "./types.js";
 
-const DEFAULT_MAX_CODE_BYTES = 100 * 1024;
-const DEFAULT_TIMEOUT_MS = 30000;
-const DEFAULT_MAX_TIMEOUT_MS = 120000;
+export const DEFAULT_MAX_CODE_BYTES = 100 * 1024;
+export const DEFAULT_TIMEOUT_MS = 30000;
+export const DEFAULT_MAX_TIMEOUT_MS = 120000;
 const DEFAULT_MAX_MEMORY_MB = 1024;
-const DEFAULT_MAX_CONCURRENCY = 4;
+export const DEFAULT_MAX_CONCURRENCY = 4;
 
 const FORBIDDEN_PATH_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
 
@@ -224,17 +234,27 @@ class Semaphore {
   get activeCount(): number {
     return this.active;
   }
+
+  get queueDepth(): number {
+    return this.queue.length;
+  }
 }
 
 const executionSemaphore = new Semaphore(DEFAULT_MAX_CONCURRENCY);
 
 const activeWorkers = new Set<Worker>();
 
-export function shutdown(): void {
+export function shutdown(reason: "container_shutdown" | "explicit" = "explicit"): void {
+  const count = activeWorkers.size;
   for (const worker of activeWorkers) {
     worker.terminate();
   }
   activeWorkers.clear();
+  emit({
+    event: "openclaw.code_mode.executor.shutdown",
+    activeWorkers: count,
+    reason,
+  });
 }
 
 /**
@@ -249,88 +269,281 @@ export async function executeCodeMode(
   bindings: NamespaceBinding[],
   opts?: ExecuteCodeModeOptions,
 ): Promise<CodeModeExecutionResult> {
-  if (!Array.isArray(bindings) || bindings.length === 0) {
-    return {
-      kind: "Failed",
-      errorKind: "validationError",
-      error: "executeCodeMode requires at least one namespace binding",
-      consoleOutput: [],
-    };
-  }
+  const startMs = Date.now();
+  const codeStr = typeof code === "string" ? code : "";
+  const codeBytes = new TextEncoder().encode(codeStr).length;
+  const codeSha256 = createHash("sha256").update(codeStr).digest("hex");
+  const namespaceIdsArr = Array.isArray(bindings)
+    ? bindings.map((b) => b?.namespace?.id).filter((id): id is string => typeof id === "string")
+    : [];
+  const toolCallId = opts?.toolCallId;
 
-  // Reject namespaceName collisions inside one call.
-  const namespaceNames = new Map<string, string>();
-  for (const b of bindings) {
-    const name = b.namespace.namespaceName;
-    const prevId = namespaceNames.get(name);
-    if (prevId && prevId !== b.namespace.id) {
-      return {
+  let resolvedTimeoutMs = 0;
+  let result: CodeModeExecutionResult = {
+    kind: "Failed",
+    errorKind: "executionError",
+    error: "executeCodeMode did not complete",
+    consoleOutput: [],
+  };
+
+  try {
+    if (!Array.isArray(bindings) || bindings.length === 0) {
+      emit({
+        event: "openclaw.code_mode.execute_code.validation_rejected",
+        errorKind: "validationError",
+        reasonCode: "no_bindings",
+        namespaceIds: namespaceIdsArr,
+        codeBytes,
+        toolCallId,
+      });
+      result = {
         kind: "Failed",
         errorKind: "validationError",
-        error: `Namespace name "${name}" collides between "${prevId}" and "${b.namespace.id}"`,
+        error: "executeCodeMode requires at least one namespace binding",
         consoleOutput: [],
       };
+      return result;
     }
-    namespaceNames.set(name, b.namespace.id);
-  }
 
-  const maxBytes = bindings.reduce(
-    (acc, b) => Math.min(acc, b.namespace.maxCodeBytes ?? DEFAULT_MAX_CODE_BYTES),
-    DEFAULT_MAX_CODE_BYTES,
-  );
-  const codeBytes = new TextEncoder().encode(code).length;
-  if (codeBytes > maxBytes) {
-    return {
-      kind: "Failed",
-      errorKind: "codeSizeExceeded",
-      error: `Code size (${codeBytes} bytes) exceeds maximum allowed (${maxBytes} bytes)`,
-      consoleOutput: [],
-    };
-  }
-
-  const timeoutMs = resolveTimeoutMs(bindings, opts?.timeoutMs);
-  const primary = bindings[0]!;
-
-  await executionSemaphore.acquire();
-  try {
-    // Build per-namespace roots map for call-back resolution. The host side
-    // looks up `roots[message.root]` to find the object whose method to call.
-    const roots: Record<string, unknown> = {
-      [EXTRA_GLOBALS_ROOT]: opts?.extraGlobals ?? {},
-    };
-    const namespacesSerialized: Array<[string, SerializedScopeValue]> = [];
-    const collectionSources: Array<[string, string]> = [];
-
+    // Reject namespaceName collisions inside one call.
+    const namespaceNames = new Map<string, string>();
     for (const b of bindings) {
-      const name = assertIdentifier(b.namespace.namespaceName, "namespaceName");
-      roots[name] = b.scope;
-      namespacesSerialized.push([name, serializeScopeValue(b.scope, name, [])]);
-      for (const [clsName, cls] of Object.entries(b.namespace.collectionClasses)) {
-        collectionSources.push([assertIdentifier(clsName, "collection class name"), serializeConstructorSource(cls)]);
+      const name = b.namespace.namespaceName;
+      const prevId = namespaceNames.get(name);
+      if (prevId && prevId !== b.namespace.id) {
+        emit({
+          event: "openclaw.code_mode.execute_code.validation_rejected",
+          errorKind: "validationError",
+          reasonCode: "duplicate_namespace_name",
+          namespaceIds: namespaceIdsArr,
+          codeBytes,
+          toolCallId,
+        });
+        result = {
+          kind: "Failed",
+          errorKind: "validationError",
+          error: `Namespace name "${name}" collides between "${prevId}" and "${b.namespace.id}"`,
+          consoleOutput: [],
+        };
+        return result;
       }
+      namespaceNames.set(name, b.namespace.id);
     }
 
-    const workerData = {
-      code,
-      filename: `${primary.namespace.id || "code"}-generated.js`,
-      timeoutMs,
-      namespaces: namespacesSerialized,
-      collectionClassSources: collectionSources,
-      extraGlobals: serializeScopeValue(opts?.extraGlobals ?? {}, EXTRA_GLOBALS_ROOT, []),
-    };
+    const maxBytes = bindings.reduce(
+      (acc, b) => Math.min(acc, b.namespace.maxCodeBytes ?? DEFAULT_MAX_CODE_BYTES),
+      DEFAULT_MAX_CODE_BYTES,
+    );
+    if (codeBytes > maxBytes) {
+      emit({
+        event: "openclaw.code_mode.execute_code.validation_rejected",
+        errorKind: "codeSizeExceeded",
+        reasonCode: "size_exceeded",
+        namespaceIds: namespaceIdsArr,
+        codeBytes,
+        maxCodeBytes: maxBytes,
+        toolCallId,
+      });
+      result = {
+        kind: "Failed",
+        errorKind: "codeSizeExceeded",
+        error: `Code size (${codeBytes} bytes) exceeds maximum allowed (${maxBytes} bytes)`,
+        consoleOutput: [],
+      };
+      return result;
+    }
 
-    return await runWorker(workerData, roots, timeoutMs);
+    const timeoutMs = resolveTimeoutMs(bindings, opts?.timeoutMs);
+    resolvedTimeoutMs = timeoutMs;
+    const primary = bindings[0]!;
+
+    await executionSemaphore.acquire();
+    const concurrencyActiveAtStart = executionSemaphore.activeCount;
+    const concurrencyQueueDepth = executionSemaphore.queueDepth;
+    try {
+      // Build per-namespace roots map for call-back resolution. The host side
+      // looks up `roots[message.root]` to find the object whose method to call.
+      const roots: Record<string, unknown> = {
+        [EXTRA_GLOBALS_ROOT]: opts?.extraGlobals ?? {},
+      };
+      const namespacesSerialized: Array<[string, SerializedScopeValue]> = [];
+      const collectionSources: Array<[string, string]> = [];
+
+      for (const b of bindings) {
+        let name: string;
+        try {
+          name = assertIdentifier(b.namespace.namespaceName, "namespaceName");
+        } catch (err) {
+          emit({
+            event: "openclaw.code_mode.execute_code.validation_rejected",
+            errorKind: "validationError",
+            reasonCode: "identifier_invalid",
+            namespaceIds: namespaceIdsArr,
+            codeBytes,
+            toolCallId,
+          });
+          throw err;
+        }
+        roots[name] = b.scope;
+        namespacesSerialized.push([name, serializeScopeValue(b.scope, name, [])]);
+        for (const [clsName, cls] of Object.entries(b.namespace.collectionClasses)) {
+          let safeClsName: string;
+          try {
+            safeClsName = assertIdentifier(clsName, "collection class name");
+          } catch (err) {
+            emit({
+              event: "openclaw.code_mode.execute_code.validation_rejected",
+              errorKind: "validationError",
+              reasonCode: "identifier_invalid",
+              namespaceIds: namespaceIdsArr,
+              codeBytes,
+              toolCallId,
+            });
+            throw err;
+          }
+          collectionSources.push([safeClsName, serializeConstructorSource(cls)]);
+        }
+      }
+
+      const workerData = {
+        code: codeStr,
+        filename: `${primary.namespace.id || "code"}-generated.js`,
+        timeoutMs,
+        namespaces: namespacesSerialized,
+        collectionClassSources: collectionSources,
+        extraGlobals: serializeScopeValue(opts?.extraGlobals ?? {}, EXTRA_GLOBALS_ROOT, []),
+      };
+
+      result = await runWorker(workerData, roots, timeoutMs);
+      return result;
+    } catch (err) {
+      const error =
+        err instanceof CodeModeError
+          ? err
+          : new CodeModeError("executionError", err instanceof Error ? err.message : String(err));
+      result = {
+        kind: "Failed",
+        errorKind: error.kind,
+        error: error.message,
+        consoleOutput: [],
+      };
+      return result;
+    } finally {
+      executionSemaphore.release();
+      // Judge-only emit channel: raw code+result paired with the
+      // headline by codeSha256. MUST fire before the headline so the
+      // adapter has the input buffered when the trigger arrives. The
+      // adapter filters this event by equality at promoter entry; it
+      // never reaches Geneva. Schema locked by
+      // project-lobster-vault/Tech/Tools/Code-Mode/judge-input-emit-channel.md.
+      const resultPayload = result.kind === "Succeeded" ? result.result : result.error;
+      const resultStr = safeStringifyForJudge(resultPayload);
+      const { value: resultCapped, truncated: resultTruncated } = truncateUtf8(
+        resultStr,
+        JUDGE_INPUT_RESULT_MAX_BYTES,
+      );
+      emitJudgeInput({
+        event: "openclaw.code_mode.judge.input",
+        toolCallId,
+        codeSha256,
+        code: codeStr,
+        result: resultCapped,
+        resultTruncated,
+        consoleOutput: result.consoleOutput ?? [],
+        namespaceIds: namespaceIdsArr,
+        timestampMs: Date.now(),
+      });
+      emitExecuteCodeTerminal({
+        ok: result.kind === "Succeeded",
+        errorKind: result.kind === "Failed" ? result.errorKind : undefined,
+        durationMs: Date.now() - startMs,
+        codeBytes,
+        codeSha256,
+        timeoutMs: resolvedTimeoutMs,
+        namespaceIds: namespaceIdsArr,
+        consoleLineCount: result.consoleOutput?.length ?? 0,
+        returnValue: result.kind === "Succeeded" ? result.result : undefined,
+        concurrencyActiveAtStart,
+        concurrencyQueueDepth,
+        toolCallId,
+      });
+    }
   } catch (err) {
-    const error = err instanceof CodeModeError ? err : new CodeModeError("executionError", err instanceof Error ? err.message : String(err));
-    return {
+    // Pre-acquire validation already emitted its own validation_rejected.
+    // Still emit a terminal record so the headline event count matches calls in.
+    const error =
+      err instanceof CodeModeError
+        ? err
+        : new CodeModeError("executionError", err instanceof Error ? err.message : String(err));
+    result = {
       kind: "Failed",
       errorKind: error.kind,
       error: error.message,
       consoleOutput: [],
     };
-  } finally {
-    executionSemaphore.release();
+    emitExecuteCodeTerminal({
+      ok: false,
+      errorKind: error.kind,
+      durationMs: Date.now() - startMs,
+      codeBytes,
+      codeSha256,
+      timeoutMs: resolvedTimeoutMs,
+      namespaceIds: namespaceIdsArr,
+      consoleLineCount: 0,
+      returnValue: undefined,
+      concurrencyActiveAtStart: 0,
+      concurrencyQueueDepth: 0,
+      toolCallId,
+    });
+    return result;
   }
+}
+
+interface TerminalEmitInput {
+  ok: boolean;
+  errorKind?: import("./errors.js").CodeModeErrorKind;
+  durationMs: number;
+  codeBytes: number;
+  codeSha256: string;
+  timeoutMs: number;
+  namespaceIds: string[];
+  consoleLineCount: number;
+  returnValue: unknown;
+  concurrencyActiveAtStart: number;
+  concurrencyQueueDepth: number;
+  toolCallId?: string;
+}
+
+function emitExecuteCodeTerminal(input: TerminalEmitInput): void {
+  let returnValueKind: ReturnValueKind = "undefined";
+  let returnValueBytes = 0;
+  if (input.ok) {
+    returnValueKind = classifyReturnValueKind(input.returnValue);
+    if (input.returnValue !== undefined) {
+      try {
+        returnValueBytes = new TextEncoder().encode(JSON.stringify(input.returnValue) ?? "").length;
+      } catch {
+        returnValueBytes = 0;
+      }
+    }
+  }
+  emit({
+    event: "openclaw.code_mode.execute_code",
+    ok: input.ok,
+    errorKind: input.errorKind,
+    durationMs: input.durationMs,
+    codeBytes: input.codeBytes,
+    codeSha256: input.codeSha256,
+    timeoutMs: input.timeoutMs,
+    namespaceIds: input.namespaceIds,
+    namespaceCount: input.namespaceIds.length,
+    consoleLineCount: input.consoleLineCount,
+    returnValueKind,
+    returnValueBytes,
+    concurrencyActiveAtStart: input.concurrencyActiveAtStart,
+    concurrencyQueueDepth: input.concurrencyQueueDepth,
+    toolCallId: input.toolCallId,
+  });
 }
 
 function serializeConstructorSource(cls: Function): string {
@@ -339,7 +552,10 @@ function serializeConstructorSource(cls: Function): string {
     .replace(/static\s*\{\s*__name\(this,\s*["'][^"']+["']\)\s*;?\s*\}/g, "");
 }
 
-function resolveTimeoutMs(bindings: NamespaceBinding[], requestedTimeoutMs: number | undefined): number {
+function resolveTimeoutMs(
+  bindings: NamespaceBinding[],
+  requestedTimeoutMs: number | undefined,
+): number {
   const defaultTimeout = bindings.reduce(
     (acc, b) => Math.min(acc, b.namespace.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS),
     DEFAULT_TIMEOUT_MS,
@@ -374,21 +590,29 @@ function serializeScopeValue(
   }
 
   if (seen.has(value)) {
-    throw new CodeModeError("validationError", `Cannot inject circular code mode scope value at ${path.join(".") || root}`);
+    throw new CodeModeError(
+      "validationError",
+      `Cannot inject circular code mode scope value at ${path.join(".") || root}`,
+    );
   }
   seen.add(value);
 
   if (Array.isArray(value)) {
     return {
       kind: "array",
-      items: value.map((item, index) => serializeScopeValue(item, root, [...path, String(index)], seen)),
+      items: value.map((item, index) =>
+        serializeScopeValue(item, root, [...path, String(index)], seen),
+      ),
     };
   }
 
-  const entries = Object.entries(value as Record<string, unknown>).map(([key, child]) => [
-    key,
-    serializeScopeValue(child, root, [...path, key], seen),
-  ] satisfies [string, SerializedScopeValue]);
+  const entries = Object.entries(value as Record<string, unknown>).map(
+    ([key, child]) =>
+      [key, serializeScopeValue(child, root, [...path, key], seen)] satisfies [
+        string,
+        SerializedScopeValue,
+      ],
+  );
   return { kind: "object", entries };
 }
 
@@ -489,7 +713,10 @@ async function handleWorkerCall(
     // P0 #4: Reject prototype pollution paths
     for (const segment of message.path) {
       if (FORBIDDEN_PATH_SEGMENTS.has(segment)) {
-        throw new CodeModeError("sandboxViolation", `Access to '${segment}' is forbidden in code mode scope paths`);
+        throw new CodeModeError(
+          "sandboxViolation",
+          `Access to '${segment}' is forbidden in code mode scope paths`,
+        );
       }
     }
 
@@ -499,13 +726,59 @@ async function handleWorkerCall(
     }
     const target = resolvePath(root, message.path);
     if (typeof target !== "function") {
-      throw new CodeModeError("apiCallFailed", `code mode scope path is not callable: ${message.path.join(".")}`);
+      throw new CodeModeError(
+        "apiCallFailed",
+        `code mode scope path is not callable: ${message.path.join(".")}`,
+      );
     }
-    const parent = message.path.length > 0 ? resolvePath(root, message.path.slice(0, -1)) : undefined;
+    const parent =
+      message.path.length > 0 ? resolvePath(root, message.path.slice(0, -1)) : undefined;
     const result = await target.apply(parent, message.args);
+    // Try a normal postMessage first (fast path — structured clone on plain
+    // objects/numbers/strings). Fall back to a JSON round-trip when the
+    // result holds non-clonable references (e.g. domain namespace methods
+    // like `M365.messages.list()` return a `MessageSet` whose `this.api` is
+    // a Proxy with closures over a live HTTP client; structured clone
+    // throws `DataCloneError` on it, and the legacy bare `catch` arm
+    // misattributed the failure to "worker already terminated", which left
+    // the worker's pending call unresolved → 30s sandbox timeout). JSON
+    // round-trip preserves the data the namespace methods actually want
+    // to surface (Graph / REST response shapes are pure JSON) and strips
+    // the non-clonable references; collection classes are reconstructed
+    // from `collectionClassSources` inside the sandbox, so the prototype
+    // loss on the wire is harmless.
     try {
       worker.postMessage({ type: "callResult", id: message.id, ok: true, result });
-    } catch { /* worker already terminated */ }
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        (err.name === "DataCloneError" || /could not be cloned/i.test(err.message))
+      ) {
+        try {
+          const sanitized = JSON.parse(JSON.stringify(result ?? null));
+          worker.postMessage({
+            type: "callResult",
+            id: message.id,
+            ok: true,
+            result: sanitized,
+          });
+        } catch (jsonErr) {
+          try {
+            worker.postMessage({
+              type: "callResult",
+              id: message.id,
+              ok: false,
+              error: `result not serialisable across worker boundary: ${
+                jsonErr instanceof Error ? jsonErr.message : String(jsonErr)
+              }`,
+            });
+          } catch {
+            /* worker already terminated */
+          }
+        }
+      }
+      // Any other postMessage failure means the worker is gone; nothing to do.
+    }
   } catch (err) {
     try {
       worker.postMessage({
@@ -514,7 +787,9 @@ async function handleWorkerCall(
         ok: false,
         error: err instanceof Error ? err.message : String(err),
       });
-    } catch { /* worker already terminated */ }
+    } catch {
+      /* worker already terminated */
+    }
   }
 }
 
