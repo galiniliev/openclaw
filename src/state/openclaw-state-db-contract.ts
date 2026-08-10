@@ -15,6 +15,9 @@ export const LAZY_ADDITIVE_STATE_TABLES = [
   ...FIRST_USE_STATE_TABLES,
   "model_catalog_remote",
   "gateway_origin_device_tokens",
+  "memory_identity_bindings",
+  "memory_pairing_identity_receipts",
+  "memory_principals",
   "sidebar_sections",
   "skill_workshop_proposal_events",
   "skill_workshop_proposal_origin_runs",
@@ -22,7 +25,14 @@ export const LAZY_ADDITIVE_STATE_TABLES = [
   "skill_workshop_proposals",
   "worker_environment_ssh_fallback_ports",
 ] as const;
-export const LAZY_ADDITIVE_STATE_INDEXES = [...FIRST_USE_STATE_INDEXES] as const;
+export const LAZY_ADDITIVE_STATE_INDEXES = [
+  ...FIRST_USE_STATE_INDEXES,
+  "idx_memory_identity_bindings_active_sender",
+  "idx_memory_identity_bindings_principal",
+  "idx_memory_pairing_identity_receipts_pending",
+  "idx_memory_principals_lookup",
+  "idx_memory_principals_user_profile",
+] as const;
 /** Maximum time one synchronous SQLite call may wait for a lock. */
 export const OPENCLAW_SQLITE_BUSY_TIMEOUT_MS = 5_000;
 /** User-facing guide for schema refusals; lives here so error sites avoid import cycles. */

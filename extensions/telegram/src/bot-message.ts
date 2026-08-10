@@ -228,6 +228,7 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
       runtime: contextRuntime,
       sessionRuntime,
       upsertPairingRequest: telegramDeps.upsertChannelPairingRequest,
+      memoryIdentityAdmission: telegramDeps.memoryIdentityAdmission,
     });
     if (!context) {
       if (ingressDebugEnabled && ingressReceivedAtMs && ingressContextStartMs) {

@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import { closedObject } from "./closed-object.js";
 import { NonEmptyString } from "./primitives.js";
 
-const UserProfileIdSchema = Type.String({ minLength: 1, maxLength: 128 });
+export const UserProfileIdSchema = Type.String({ minLength: 1, maxLength: 128 });
 const UserProfileDisplayNameSchema = Type.String({ maxLength: 256 });
 export const UserProfileAvatarMimeSchema = Type.Union([
   Type.Literal("image/png"),

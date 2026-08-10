@@ -205,7 +205,7 @@ describe("method scope resolution", () => {
     });
   });
 
-  it("requires admin only when DM pairing approval bootstraps a command owner", () => {
+  it("requires admin for command-owner bootstrap or explicit memory profile linking", () => {
     expect(resolveLeastPrivilegeOperatorScopesForMethod("channels.pairing.approve", {})).toEqual([
       "operator.pairing",
     ]);
@@ -226,6 +226,16 @@ describe("method scope resolution", () => {
         { bootstrapCommandOwner: true },
       ),
     ).toEqual({ allowed: true });
+    expect(
+      resolveLeastPrivilegeOperatorScopesForMethod("channels.pairing.approve", {
+        targetProfileId: "profile-alice",
+      }),
+    ).toEqual(["operator.pairing", "operator.admin"]);
+    expect(
+      authorizeOperatorScopesForMethod("channels.pairing.approve", ["operator.pairing"], {
+        targetProfileId: "profile-alice",
+      }),
+    ).toEqual({ allowed: false, missingScope: "operator.admin" });
   });
 
   it("classifies plugin session actions with a CLI-safe default operator scope", () => {
