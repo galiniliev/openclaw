@@ -18,6 +18,10 @@ import type { DiagnosticTraceContext } from "../infra/diagnostic-trace-context.j
 import { resolveEventSessionRoutingPolicy } from "../infra/event-session-routing.js";
 import { applyExecPolicyLayer } from "../infra/exec-policy.js";
 import { logWarn } from "../logger.js";
+import {
+  MEMORY_POSTBOX_RUN_ID_BINDING,
+  MEMORY_POSTBOX_TURN_CAPABILITY_BINDING,
+} from "../plugins/memory-postbox-tool-binding.js";
 import type {
   PluginHookChannelContext,
   PluginHookToolRequesterContext,
@@ -195,6 +199,8 @@ type OpenClawCodingToolsOptions = {
   clientCaps?: string[];
   /** Out-of-band plugin bindings attached by the run initiator. */
   toolBindings?: Readonly<Record<string, unknown>>;
+  /** Host-owned bindings delivered only to their named plugin tool factory. */
+  pluginToolBindings?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   /** Trusted runtime-only authorization for one bounded cross-conversation recall pass. */
   conversationRecall?: ConversationRecallContext;
   /** Normalized conversation kind when the caller already has channel metadata. */
@@ -208,6 +214,8 @@ type OpenClawCodingToolsOptions = {
   nativeChannelId?: string;
   /** Opaque host-issued capability for current-turn channel message actions. */
   messageActionTurnCapability?: string;
+  /** Opaque core-issued source-message capability for one postbox deposit. */
+  memoryPostboxTurnCapability?: string;
   sandbox?: SandboxContext | null;
   sessionKey?: string;
   /**
@@ -401,6 +409,21 @@ type OpenClawCodingToolsOptions = {
   /** Trusted server-stamped authority for an explicitly capped scheduled run. */
   scheduledToolPolicy?: ScheduledToolPolicyContext;
 };
+
+function resolvePluginToolBindings(options: OpenClawCodingToolsOptions | undefined) {
+  const turnCapability = options?.memoryPostboxTurnCapability?.trim();
+  const runId = options?.runId?.trim();
+  if (!turnCapability || !runId) {
+    return options?.pluginToolBindings;
+  }
+  return {
+    ...options?.pluginToolBindings,
+    "memory-core": {
+      [MEMORY_POSTBOX_TURN_CAPABILITY_BINDING]: turnCapability,
+      [MEMORY_POSTBOX_RUN_ID_BINDING]: runId,
+    },
+  } satisfies Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+}
 
 function createOpenClawCodingToolsInternal(options?: OpenClawCodingToolsOptions): AnyAgentTool[] {
   const sandbox = options?.sandbox?.enabled ? options.sandbox : undefined;
@@ -755,6 +778,7 @@ function createOpenClawCodingToolsInternal(options?: OpenClawCodingToolsOptions)
             allowGatewaySubagentBinding: options?.allowGatewaySubagentBinding,
             clientCaps: options?.clientCaps,
             toolBindings: options?.toolBindings,
+            pluginToolBindings: resolvePluginToolBindings(options),
             authProfileStore: options?.authProfileStore,
           },
           resolvedConfig: options?.config,
@@ -902,12 +926,11 @@ function createOpenClawCodingToolsInternal(options?: OpenClawCodingToolsOptions)
       toolsForMemoryFlush.push(tool);
     }
   }
-  const unavailableCoreToolReason =
-    isMemoryFlushRun
-      ? memoryIsolationCutover
-        ? "memory-triggered compaction runs expose only subject-scoped memory_remember"
-        : "memory-triggered compaction runs expose only read and append-only write"
-      : undefined;
+  const unavailableCoreToolReason = isMemoryFlushRun
+    ? memoryIsolationCutover
+      ? "memory-triggered compaction runs expose only subject-scoped memory_remember"
+      : "memory-triggered compaction runs expose only read and append-only write"
+    : undefined;
   const toolsForMessageProvider = filterToolsByMessageProvider(
     toolsForMemoryFlush,
     options?.toolPolicyMessageProvider ?? options?.messageProvider,
@@ -971,7 +994,9 @@ function createOpenClawCodingToolsInternal(options?: OpenClawCodingToolsOptions)
     ? authorizedTools.filter((tool) => AUTHORIZED_MEMORY_VIEW_TOOL_NAMES.has(tool.name))
     : memoryIsolationCutover
       ? isMemoryFlushRun
-        ? authorizedTools.filter((tool) => AUTHORIZED_MEMORY_FLUSH_ALLOWED_TOOL_NAMES.has(tool.name))
+        ? authorizedTools.filter((tool) =>
+            AUTHORIZED_MEMORY_FLUSH_ALLOWED_TOOL_NAMES.has(tool.name),
+          )
         : authorizedTools.filter((tool) => MEMORY_ISOLATION_READ_TOOL_NAMES.has(tool.name))
       : authorizedTools;
   if (

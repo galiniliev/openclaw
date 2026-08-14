@@ -260,6 +260,7 @@
   "qa-runner-runtime",
   "memory-authorization",
   "memory-authorization-conformance",
+  "memory-postbox-runtime",
   "memory-core-host-embedding-registry",
   "memory-core-host-engine-embeddings",
   "memory-core-host-engine-curated",

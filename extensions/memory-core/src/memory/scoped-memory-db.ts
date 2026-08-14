@@ -288,6 +288,7 @@ export type MemoryProjectionRow = {
 
 export type MemoryPostboxSettingRow = {
   agent_id: string;
+  target_store_id: string;
   mode: "off" | "review-required";
   updated_by_principal_id: string;
   updated_at: number;

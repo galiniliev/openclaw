@@ -3,6 +3,10 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { OpenClawPluginApi, OpenClawPluginCommandDefinition } from "openclaw/plugin-sdk/core";
 import type { MemoryPluginRuntime } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import type { MemoryPluginCapability } from "openclaw/plugin-sdk/memory-host-core";
+import {
+  MEMORY_POSTBOX_RUN_ID_BINDING,
+  MEMORY_POSTBOX_TURN_CAPABILITY_BINDING,
+} from "openclaw/plugin-sdk/memory-postbox-runtime";
 import { createTestPluginApi } from "openclaw/plugin-sdk/plugin-test-api";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MEMORY_CORE_AUTHORIZATION_CAPABILITIES } from "./src/authorization.js";
@@ -271,6 +275,33 @@ describe("memory-core plugin runtime registration", () => {
       details: { status: "committed", policyRevision: "p1" },
     });
     expect(host.remember).toHaveBeenCalledWith({ content: "durable fact" });
+  });
+
+  it("exposes postbox deposit only with the memory-core-scoped host binding", () => {
+    const factories = new Map<string, (ctx: never) => unknown>();
+    plugin.register(
+      createTestPluginApi({
+        config: {},
+        runtime: hostRuntime,
+        registerTool(factory, options) {
+          for (const name of options?.names ?? []) {
+            factories.set(name, factory as (ctx: never) => unknown);
+          }
+        },
+      }),
+    );
+    const postbox = factories.get("memory_postbox_deposit");
+    expect(postbox?.({ agentId: "main", sessionKey: "session" } as never)).toBeNull();
+    expect(
+      postbox?.({
+        agentId: "main",
+        sessionKey: "session",
+        toolBindings: {
+          [MEMORY_POSTBOX_TURN_CAPABILITY_BINDING]: "opaque-turn-capability",
+          [MEMORY_POSTBOX_RUN_ID_BINDING]: "run-1",
+        },
+      } as never),
+    ).toMatchObject({ name: "memory_postbox_deposit" });
   });
 
   it("keeps memory manager initialization demand-driven", () => {

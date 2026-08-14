@@ -2015,6 +2015,49 @@ describe("resolvePluginTools optional tools", () => {
     expect(registry.diagnostics).toHaveLength(0);
   });
 
+  it("delivers a host binding only to its selected plugin factory", () => {
+    const memoryFactory = vi.fn(() => makeTool("memory_postbox_deposit"));
+    const otherFactory = vi.fn(() => makeTool("other_tool"));
+    setRegistry([
+      {
+        pluginId: "memory-core",
+        optional: false,
+        source: "/tmp/memory-core.js",
+        names: ["memory_postbox_deposit"],
+        factory: memoryFactory,
+      },
+      {
+        pluginId: "other-plugin",
+        optional: false,
+        source: "/tmp/other-plugin.js",
+        names: ["other_tool"],
+        factory: otherFactory,
+      },
+    ]);
+
+    const tools = resolvePluginTools(
+      createResolveToolsParams({
+        context: {
+          ...createContext(),
+          toolBindings: { ordinaryBinding: "ordinary" },
+          pluginToolBindings: {
+            "memory-core": { memoryPostboxTurnCapability: "opaque" },
+          },
+        },
+      }),
+    );
+
+    expectResolvedToolNames(tools, ["memory_postbox_deposit", "other_tool"]);
+    expect(memoryFactory).toHaveBeenCalledWith(
+      expect.objectContaining({ toolBindings: { memoryPostboxTurnCapability: "opaque" } }),
+    );
+    expect(memoryFactory.mock.calls[0]?.[0]).not.toHaveProperty("pluginToolBindings");
+    expect(otherFactory).toHaveBeenCalledWith(
+      expect.objectContaining({ toolBindings: { ordinaryBinding: "ordinary" } }),
+    );
+    expect(otherFactory.mock.calls[0]?.[0]).not.toHaveProperty("pluginToolBindings");
+  });
+
   it("isolates tools with malformed required client capabilities", () => {
     const registry = setRegistry([
       {

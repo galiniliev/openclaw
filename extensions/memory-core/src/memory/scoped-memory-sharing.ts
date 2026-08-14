@@ -1,27 +1,25 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { AudienceRef } from "openclaw/plugin-sdk/memory-authorization";
+import { resolveMemoryPostboxTurnCapability } from "openclaw/plugin-sdk/memory-postbox-runtime";
 import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
   getNodeSqliteKysely,
   runSqliteImmediateTransactionSync,
 } from "openclaw/plugin-sdk/sqlite-runtime";
-import type { AudienceRef } from "openclaw/plugin-sdk/memory-authorization";
+import { type ScopedMemoryDatabase, withScopedMemoryDatabase } from "./scoped-memory-db.js";
+import { evaluateBuiltinScopedMemoryPolicy } from "./scoped-memory-policy.js";
 import {
   createBuiltinScopedMemoryResource,
   readBuiltinScopedMemoryRevisionSnapshot,
   type BuiltinScopedMemoryDerivedSource,
   type BuiltinScopedMemoryRevision,
 } from "./scoped-memory-resources.js";
-import { evaluateBuiltinScopedMemoryPolicy } from "./scoped-memory-policy.js";
 import {
   createScopedMemorySourcePolicySetId,
   normalizeScopedMemoryRequiredText,
   type BuiltinScopedMemoryStore,
 } from "./scoped-memory-store.js";
-import {
-  type ScopedMemoryDatabase,
-  withScopedMemoryDatabase,
-} from "./scoped-memory-db.js";
 
 const POSTBOX_HANDLE_TTL_MS = 10 * 60 * 1000;
 const POSTBOX_RATE_WINDOW_MS = 60 * 60 * 1000;
@@ -56,12 +54,11 @@ function normalize(value: string, label: string): string {
   return normalizeScopedMemoryRequiredText(value, label);
 }
 
-function targetAudience(params: { kind: ProjectionAudience["kind"]; id: string }): ProjectionAudience {
-  if (
-    params.kind !== "conversation" &&
-    params.kind !== "role" &&
-    params.kind !== "agent-shared"
-  ) {
+function targetAudience(params: {
+  kind: ProjectionAudience["kind"];
+  id: string;
+}): ProjectionAudience {
+  if (params.kind !== "conversation" && params.kind !== "role" && params.kind !== "agent-shared") {
     throw new Error("memory projection target is unavailable");
   }
   return Object.freeze({ kind: params.kind, id: normalize(params.id, "projection target id") });
@@ -115,6 +112,25 @@ function readTargetStore(params: {
   );
 }
 
+/** The private postbox target is selected from core-verified source identity, never tool input. */
+function readPostboxTargetStore(params: {
+  database: Parameters<typeof getNodeSqliteKysely<ScopedMemoryDatabase>>[0];
+  agentId: string;
+  targetPrincipalId: string;
+}) {
+  const db = getNodeSqliteKysely<ScopedMemoryDatabase>(params.database);
+  return executeSqliteQueryTakeFirstSync(
+    params.database,
+    db
+      .selectFrom("memory_stores")
+      .select(["store_id", "audience_kind", "audience_id"])
+      .where("agent_id", "=", params.agentId)
+      .where("audience_kind", "=", "user")
+      .where("audience_id", "=", params.targetPrincipalId)
+      .where("lifecycle_state", "=", "active"),
+  );
+}
+
 function readSource(params: {
   database: Parameters<typeof getNodeSqliteKysely<ScopedMemoryDatabase>>[0];
   agentId: string;
@@ -159,7 +175,10 @@ function readSourceRequirements(params: {
   if (policyRequirements.length === 0) {
     throw new Error("memory projection source is unavailable");
   }
-  return Object.freeze({ revisionId: params.revisionId, policyRequirements: Object.freeze(policyRequirements) });
+  return Object.freeze({
+    revisionId: params.revisionId,
+    policyRequirements: Object.freeze(policyRequirements),
+  });
 }
 
 /**
@@ -195,11 +214,7 @@ export function registerBuiltinMemoryProjectionTarget(params: {
           .where("agent_id", "=", params.agentId)
           .where("lifecycle_state", "=", "active"),
       );
-      if (
-        !store ||
-        store.audience_kind !== target.kind ||
-        store.audience_id !== target.id
-      ) {
+      if (!store || store.audience_kind !== target.kind || store.audience_id !== target.id) {
         throw new Error("memory projection target is unavailable");
       }
       executeSqliteQuerySync(
@@ -236,7 +251,9 @@ export function createBuiltinMemoryProjection(params: {
   purpose: string;
   preview: string;
   content: string;
-  expiry: Readonly<{ kind: "expires"; expiresAt: number }> | Readonly<{ kind: "no-expiry"; auditReason: string }>;
+  expiry:
+    | Readonly<{ kind: "expires"; expiresAt: number }>
+    | Readonly<{ kind: "no-expiry"; auditReason: string }>;
   nowMs?: number;
 }): BuiltinMemoryProjection {
   const target = targetAudience(params.target);
@@ -375,7 +392,9 @@ function tombstoneProjectionCopy(params: {
     );
     executeSqliteQuerySync(
       params.database,
-      db.deleteFrom("memory_scoped_chunks").where("revision_id", "=", params.projection.copy_revision_id),
+      db
+        .deleteFrom("memory_scoped_chunks")
+        .where("revision_id", "=", params.projection.copy_revision_id),
     );
     executeSqliteQuerySync(
       params.database,
@@ -498,7 +517,9 @@ export function refreshBuiltinMemoryProjection(params: {
   purpose: string;
   preview: string;
   content: string;
-  expiry: Readonly<{ kind: "expires"; expiresAt: number }> | Readonly<{ kind: "no-expiry"; auditReason: string }>;
+  expiry:
+    | Readonly<{ kind: "expires"; expiresAt: number }>
+    | Readonly<{ kind: "no-expiry"; auditReason: string }>;
   nowMs?: number;
 }): Readonly<{ projection: BuiltinMemoryProjection; replacedExposureSetIds: readonly string[] }> {
   const projectionId = normalize(params.projectionId, "projection id");
@@ -587,12 +608,13 @@ export function setBuiltinMemoryPostboxMode(params: {
         .insertInto("memory_postbox_settings")
         .values({
           agent_id: params.agentId,
+          target_store_id: params.targetStoreId,
           mode: params.mode,
           updated_by_principal_id: normalize(params.operatorPrincipalId, "operator principal id"),
           updated_at: nowMs,
         })
         .onConflict((conflict) =>
-          conflict.column("agent_id").doUpdateSet({
+          conflict.columns(["agent_id", "target_store_id"]).doUpdateSet({
             mode: params.mode,
             updated_by_principal_id: normalize(params.operatorPrincipalId, "operator principal id"),
             updated_at: nowMs,
@@ -603,7 +625,7 @@ export function setBuiltinMemoryPostboxMode(params: {
 }
 
 /** Only core/channel ingress may mint this opaque handle from current verified sender evidence. */
-export function issueBuiltinMemoryPostboxSourceHandle(params: {
+function issueBuiltinMemoryPostboxSourceHandle(params: {
   agentId: string;
   sourceSessionId: string;
   sourceChannelRef: string;
@@ -647,6 +669,62 @@ export function issueBuiltinMemoryPostboxSourceHandle(params: {
   });
 }
 
+/**
+ * Redeems the core-issued turn token before minting the persisted one-use handle. The selected
+ * memory plugin resolves the core-selected private subject to its quarantine store; tool input cannot.
+ */
+export function depositBuiltinMemoryPostboxFromTurnCapability(params: {
+  agentId: string;
+  runId: string;
+  sessionKey: string;
+  sessionId?: string;
+  turnCapability: string;
+  content: string;
+  nowMs?: number;
+}): BuiltinMemoryPostboxDeposit {
+  const source = resolveMemoryPostboxTurnCapability({
+    token: params.turnCapability,
+    agentId: params.agentId,
+    runId: params.runId,
+    sessionKey: params.sessionKey,
+    sessionId: params.sessionId,
+    nowMs: params.nowMs,
+  });
+  if (!source) {
+    return Object.freeze({ accepted: false });
+  }
+  try {
+    const targetStoreId = withScopedMemoryDatabase(params.agentId, (database) => {
+      const target = readPostboxTargetStore({
+        database,
+        agentId: params.agentId,
+        targetPrincipalId: source.targetPrincipalId,
+      });
+      return target?.store_id;
+    });
+    if (!targetStoreId) {
+      return Object.freeze({ accepted: false });
+    }
+    const sourceHandleId = issueBuiltinMemoryPostboxSourceHandle({
+      agentId: params.agentId,
+      sourceSessionId: params.sessionId ?? params.sessionKey,
+      sourceChannelRef: source.sourceChannelRef,
+      sourceMessageRef: source.sourceMessageRef,
+      senderEvidenceRef: source.senderEvidenceRef,
+      targetStoreId,
+      nowMs: params.nowMs,
+    });
+    return depositBuiltinMemoryPostbox({
+      agentId: params.agentId,
+      sourceHandleId,
+      content: params.content,
+      nowMs: params.nowMs,
+    });
+  } catch {
+    return Object.freeze({ accepted: false });
+  }
+}
+
 /** The source can only receive accepted/generic-refusal; there is no read, list, or exact-get continuation. */
 export function depositBuiltinMemoryPostbox(params: {
   agentId: string;
@@ -675,7 +753,8 @@ export function depositBuiltinMemoryPostbox(params: {
         db
           .selectFrom("memory_postbox_settings")
           .select("mode")
-          .where("agent_id", "=", params.agentId),
+          .where("agent_id", "=", params.agentId)
+          .where("target_store_id", "=", handle?.target_store_id ?? ""),
       );
       if (
         !handle ||
@@ -771,7 +850,13 @@ export function reviewBuiltinMemoryPostboxItem(params: {
       db
         .selectFrom("memory_postbox_items as item")
         .innerJoin("memory_stores as store", "store.store_id", "item.target_store_id")
-        .select(["item.item_id", "item.state", "item.target_store_id", "store.audience_kind", "store.audience_id"])
+        .select([
+          "item.item_id",
+          "item.state",
+          "item.target_store_id",
+          "store.audience_kind",
+          "store.audience_id",
+        ])
         .where("item.item_id", "=", params.itemId)
         .where("item.agent_id", "=", params.agentId),
     );
@@ -785,7 +870,12 @@ export function reviewBuiltinMemoryPostboxItem(params: {
       audience: { kind: item.audience_kind, id: item.audience_id },
       operation: "policy-admin",
     });
-    const state = params.decision === "approve" ? "reviewed" : params.decision === "reject" ? "rejected" : "purged";
+    const state =
+      params.decision === "approve"
+        ? "reviewed"
+        : params.decision === "reject"
+          ? "rejected"
+          : "purged";
     executeSqliteQuerySync(
       database,
       db

@@ -243,8 +243,14 @@ function resolvePluginToolFactory(
   pluginRegistry: PluginRegistry | undefined,
   ctx: OpenClawPluginToolContext,
 ) {
+  const { pluginToolBindings, ...context } = ctx;
+  const scopedBindings = pluginToolBindings?.[entry.pluginId];
   return runWithPluginToolScope(entry, pluginRegistry, () =>
-    wrapPluginToolFactoryResult(entry, pluginRegistry, entry.factory(ctx)),
+    wrapPluginToolFactoryResult(
+      entry,
+      pluginRegistry,
+      entry.factory(scopedBindings ? { ...context, toolBindings: scopedBindings } : context),
+    ),
   );
 }
 

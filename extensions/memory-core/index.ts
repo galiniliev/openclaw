@@ -9,6 +9,10 @@ import {
 } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import { resolveMemoryBackendConfig } from "openclaw/plugin-sdk/memory-core-host-runtime-files";
 import {
+  MEMORY_POSTBOX_RUN_ID_BINDING,
+  MEMORY_POSTBOX_TURN_CAPABILITY_BINDING,
+} from "openclaw/plugin-sdk/memory-postbox-runtime";
+import {
   definePluginEntry,
   type AnyAgentTool,
   type OpenClawPluginToolContext,
@@ -58,6 +62,9 @@ const loadStandingIntentToolModule = createLazyRuntimeModule(
 const loadRuntimeProviderModule = createLazyRuntimeModule(
   () => import("./src/runtime-provider.js"),
 );
+const loadScopedMemorySharingModule = createLazyRuntimeModule(
+  () => import("./src/memory/scoped-memory-sharing.js"),
+);
 
 function getToolConfig(options: MemoryToolOptions): OpenClawConfig | undefined {
   return options.getConfig?.() ?? options.config;
@@ -102,6 +109,15 @@ const MemoryGetSchema = {
 } as const satisfies TSchema;
 
 const MemoryRememberSchema = {
+  type: "object",
+  properties: {
+    content: { type: "string" },
+  },
+  required: ["content"],
+  additionalProperties: false,
+} as const satisfies TSchema;
+
+const MemoryPostboxDepositSchema = {
   type: "object",
   properties: {
     content: { type: "string" },
@@ -198,6 +214,45 @@ function createSubjectMemoryRememberTool(ctx: OpenClawPluginToolContext): AnyAge
         return jsonResult(result);
       }
       return jsonResult({ status: result.status, policyRevision: result.policyRevision });
+    },
+  };
+}
+
+/** A host-scoped turn capability makes postbox deposit a one-way, source-bound operation. */
+function createMemoryPostboxDepositTool(ctx: OpenClawPluginToolContext): AnyAgentTool | null {
+  const turnCapability = ctx.toolBindings?.[MEMORY_POSTBOX_TURN_CAPABILITY_BINDING];
+  const runId = ctx.toolBindings?.[MEMORY_POSTBOX_RUN_ID_BINDING];
+  const agentId = ctx.agentId?.trim();
+  const sessionKey = ctx.sessionKey?.trim();
+  if (typeof turnCapability !== "string" || typeof runId !== "string" || !agentId || !sessionKey) {
+    return null;
+  }
+  return {
+    label: "Memory Postbox Deposit",
+    name: "memory_postbox_deposit",
+    description:
+      "Submit a current-turn observation to the authorized memory postbox. Provide only the observation. The result only confirms acceptance; it cannot list, read, or identify postbox items.",
+    parameters: MemoryPostboxDepositSchema,
+    execute: async (_toolCallId, params) => {
+      const content =
+        params && typeof params === "object" && "content" in params
+          ? (params as { content?: unknown }).content
+          : undefined;
+      if (typeof content !== "string" || !content.trim()) {
+        return jsonResult({ accepted: false });
+      }
+      const { depositBuiltinMemoryPostboxFromTurnCapability } =
+        await loadScopedMemorySharingModule();
+      return jsonResult(
+        depositBuiltinMemoryPostboxFromTurnCapability({
+          agentId,
+          runId,
+          sessionKey,
+          ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
+          turnCapability,
+          content,
+        }),
+      );
     },
   };
 }
@@ -370,6 +425,10 @@ export default definePluginEntry({
 
     api.registerTool((ctx) => createSubjectMemoryRememberTool(ctx), {
       names: ["memory_remember"],
+    });
+
+    api.registerTool((ctx) => createMemoryPostboxDepositTool(ctx), {
+      names: ["memory_postbox_deposit"],
     });
 
     api.registerTool((ctx) => createLazyStandingIntentTool(ctx), {

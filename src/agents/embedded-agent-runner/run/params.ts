@@ -131,6 +131,8 @@ export type RunEmbeddedAgentParams = {
   memberRoleIds?: string[];
   /** Opaque host-issued capability for current-turn channel message actions. */
   messageActionTurnCapability?: string;
+  /** Opaque core-issued source-message capability for one postbox deposit. */
+  memoryPostboxTurnCapability?: string;
   /** Parent session key for subagent policy inheritance. */
   spawnedBy?: string | null;
   /** Whether workspaceDir points at the canonical agent workspace for bootstrap purposes. */

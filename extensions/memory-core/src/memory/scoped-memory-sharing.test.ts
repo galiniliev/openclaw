@@ -3,6 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import { closeOpenClawAgentDatabasesForTest } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  mintMemoryPostboxTurnCapability,
+  resetMemoryPostboxTurnCapabilitiesForTest,
+} from "../../../../src/gateway/memory-postbox-turn-capability.js";
 import { openOpenClawAgentDatabase } from "../../../../src/state/openclaw-agent-db.js";
 import {
   createBuiltinScopedMemoryResource,
@@ -11,9 +15,9 @@ import {
 import {
   createBuiltinMemoryProjection,
   depositBuiltinMemoryPostbox,
+  depositBuiltinMemoryPostboxFromTurnCapability,
   expireBuiltinMemoryProjections,
   refreshBuiltinMemoryProjection,
-  issueBuiltinMemoryPostboxSourceHandle,
   registerBuiltinMemoryProjectionTarget,
   revokeBuiltinMemoryProjection,
   reviewBuiltinMemoryPostboxItem,
@@ -34,6 +38,7 @@ describe("builtin scoped memory sharing", () => {
 
   afterEach(() => {
     closeOpenClawAgentDatabasesForTest();
+    resetMemoryPostboxTurnCapabilitiesForTest();
     vi.unstubAllEnvs();
     fs.rmSync(stateDir, { recursive: true, force: true });
   });
@@ -106,6 +111,29 @@ describe("builtin scoped memory sharing", () => {
     });
   }
 
+  function depositFromVerifiedTurn(params: { content: string; sourceMessageRef: string }) {
+    const runId = `run-${params.sourceMessageRef}`;
+    const sessionKey = "agent:main:direct:alice";
+    const token = mintMemoryPostboxTurnCapability({
+      agentId,
+      runId,
+      sessionKey,
+      sessionId: "session-alice",
+      sourceChannelRef: "telegram:alice",
+      sourceMessageRef: params.sourceMessageRef,
+      senderEvidenceRef: "telegram:sender-alice",
+      targetPrincipalId: alice,
+    });
+    return depositBuiltinMemoryPostboxFromTurnCapability({
+      agentId,
+      runId,
+      sessionKey,
+      sessionId: "session-alice",
+      turnCapability: token,
+      content: params.content,
+    });
+  }
+
   it("creates a reviewed target copy with source lineage and no private read grant", () => {
     const source = sourceStore();
     const target = projectionStore();
@@ -152,7 +180,9 @@ describe("builtin scoped memory sharing", () => {
     const database = openOpenClawAgentDatabase({ agentId });
     expect(
       database.db
-        .prepare("SELECT source_revision_id, reviewed_by_principal_id, expiry_kind FROM memory_projections")
+        .prepare(
+          "SELECT source_revision_id, reviewed_by_principal_id, expiry_kind FROM memory_projections",
+        )
         .get(),
     ).toEqual({
       source_revision_id: privateRevision.revisionId,
@@ -350,7 +380,9 @@ describe("builtin scoped memory sharing", () => {
       }),
     ).toBeUndefined();
     expect(
-      database.db.prepare("SELECT state FROM memory_projections WHERE projection_id = ?").get(projection.projectionId),
+      database.db
+        .prepare("SELECT state FROM memory_projections WHERE projection_id = ?")
+        .get(projection.projectionId),
     ).toEqual({ state: "expired" });
   });
 
@@ -422,15 +454,9 @@ describe("builtin scoped memory sharing", () => {
 
   it("keeps postbox off by default and makes review-required deposits one-way", () => {
     const target = privateTargetStore();
-    const offHandle = issueBuiltinMemoryPostboxSourceHandle({
-      agentId,
-      sourceSessionId: "group-session",
-      sourceChannelRef: "channel-ref",
-      sourceMessageRef: "message-ref-off",
-      senderEvidenceRef: "sender-proof",
-      targetStoreId: target.storeId,
-    });
-    expect(depositBuiltinMemoryPostbox({ agentId, sourceHandleId: offHandle, content: "observation" })).toEqual({ accepted: false });
+    expect(
+      depositFromVerifiedTurn({ content: "observation", sourceMessageRef: "message-ref-off" }),
+    ).toEqual({ accepted: false });
 
     setBuiltinMemoryPostboxMode({
       agentId,
@@ -438,30 +464,34 @@ describe("builtin scoped memory sharing", () => {
       operatorPrincipalId: alice,
       mode: "review-required",
     });
-    const handle = issueBuiltinMemoryPostboxSourceHandle({
-      agentId,
-      sourceSessionId: "group-session",
-      sourceChannelRef: "channel-ref",
-      sourceMessageRef: "message-ref-live",
-      senderEvidenceRef: "sender-proof",
-      targetStoreId: target.storeId,
-    });
-    expect(depositBuiltinMemoryPostbox({ agentId, sourceHandleId: "forged", content: "observation" })).toEqual({ accepted: false });
-    expect(depositBuiltinMemoryPostbox({ agentId, sourceHandleId: handle, content: "observation" })).toEqual({ accepted: true });
-    expect(depositBuiltinMemoryPostbox({ agentId, sourceHandleId: handle, content: "observation" })).toEqual({ accepted: false });
+    expect(
+      depositBuiltinMemoryPostbox({ agentId, sourceHandleId: "forged", content: "observation" }),
+    ).toEqual({ accepted: false });
+    expect(
+      depositFromVerifiedTurn({ content: "observation", sourceMessageRef: "message-ref-live" }),
+    ).toEqual({ accepted: true });
 
     const database = openOpenClawAgentDatabase({ agentId });
-    const item = database.db.prepare("SELECT item_id, state FROM memory_postbox_items").get() as { item_id: string; state: string };
+    const item = database.db.prepare("SELECT item_id, state FROM memory_postbox_items").get() as {
+      item_id: string;
+      state: string;
+    };
     expect(item.state).toBe("postbox");
-    expect(database.db.prepare("SELECT COUNT(*) AS count FROM memory_resources").get()).toEqual({ count: 0 });
+    expect(database.db.prepare("SELECT COUNT(*) AS count FROM memory_resources").get()).toEqual({
+      count: 0,
+    });
     reviewBuiltinMemoryPostboxItem({
       agentId,
       itemId: item.item_id,
       operatorPrincipalId: alice,
       decision: "approve",
     });
-    expect(database.db.prepare("SELECT state FROM memory_postbox_items").get()).toEqual({ state: "reviewed" });
-    expect(database.db.prepare("SELECT COUNT(*) AS count FROM memory_resources").get()).toEqual({ count: 0 });
+    expect(database.db.prepare("SELECT state FROM memory_postbox_items").get()).toEqual({
+      state: "reviewed",
+    });
+    expect(database.db.prepare("SELECT COUNT(*) AS count FROM memory_resources").get()).toEqual({
+      count: 0,
+    });
   });
 
   it("enforces the persisted per-channel target cap without exposing deposited content", () => {
@@ -473,24 +503,23 @@ describe("builtin scoped memory sharing", () => {
       mode: "review-required",
     });
     for (let index = 0; index < 13; index += 1) {
-      const handle = issueBuiltinMemoryPostboxSourceHandle({
-        agentId,
-        sourceSessionId: `source-session-${index}`,
-        sourceChannelRef: "channel-ref",
-        sourceMessageRef: `message-${index}`,
-        senderEvidenceRef: "sender-proof",
-        targetStoreId: target.storeId,
-      });
       expect(
-        depositBuiltinMemoryPostbox({ agentId, sourceHandleId: handle, content: `observation-${index}` }),
+        depositFromVerifiedTurn({
+          content: `observation-${index}`,
+          sourceMessageRef: `message-${index}`,
+        }),
       ).toEqual({ accepted: index < 12 });
     }
     const database = openOpenClawAgentDatabase({ agentId });
-    expect(database.db.prepare("SELECT deposit_count FROM memory_postbox_rate_limits").get()).toEqual({
+    expect(
+      database.db.prepare("SELECT deposit_count FROM memory_postbox_rate_limits").get(),
+    ).toEqual({
       deposit_count: 12,
     });
-    expect(database.db.prepare("SELECT COUNT(*) AS count FROM memory_postbox_items").get()).toEqual({
-      count: 12,
-    });
+    expect(database.db.prepare("SELECT COUNT(*) AS count FROM memory_postbox_items").get()).toEqual(
+      {
+        count: 12,
+      },
+    );
   });
 });

@@ -20,6 +20,11 @@ import {
   resolveMessageActionTurnCapabilityLifetime,
   revokeMessageActionTurnCapability,
 } from "../../gateway/message-action-turn-capability.js";
+import {
+  mintMemoryPostboxTurnCapability,
+  resolveMemoryPostboxTargetPrincipal,
+  revokeMemoryPostboxTurnCapability,
+} from "../../gateway/memory-postbox-turn-capability.js";
 import { logVerbose } from "../../globals.js";
 import {
   isMarkdownCapableMessageChannel,
@@ -171,6 +176,37 @@ export async function runEmbeddedFallbackCandidate(params: {
           ...resolveMessageActionTurnCapabilityLifetime(runBaseParams.timeoutMs),
         })
       : undefined;
+  const memoryPostboxTargetPrincipal =
+    embeddedContext.agentId && messageActionCapabilitySessionKey && embeddedContext.sessionId
+      ? resolveMemoryPostboxTargetPrincipal({
+          agentId: embeddedContext.agentId,
+          sessionKey: messageActionCapabilitySessionKey,
+          sessionId: embeddedContext.sessionId,
+        })
+      : undefined;
+  const memoryPostboxTurnCapability =
+    isTrustedMessageActionTurnIngress(turn.sessionCtx.Provider) &&
+    !turn.isHeartbeat &&
+    embeddedContext.agentId &&
+    messageActionCapabilitySessionKey &&
+    embeddedContext.sessionId &&
+    embeddedContext.messageProvider &&
+    embeddedContext.currentChannelId &&
+    embeddedContext.currentMessageId !== undefined &&
+    senderContext.senderId &&
+    memoryPostboxTargetPrincipal
+      ? mintMemoryPostboxTurnCapability({
+          agentId: embeddedContext.agentId,
+          runId: params.runId,
+          sessionKey: messageActionCapabilitySessionKey,
+          sessionId: embeddedContext.sessionId,
+          sourceChannelRef: `${embeddedContext.messageProvider}:${embeddedContext.currentChannelId}`,
+          sourceMessageRef: String(embeddedContext.currentMessageId),
+          senderEvidenceRef: `${embeddedContext.messageProvider}:${senderContext.senderId}`,
+          targetPrincipalId: memoryPostboxTargetPrincipal,
+          ...resolveMessageActionTurnCapabilityLifetime(runBaseParams.timeoutMs),
+        })
+      : undefined;
   let attemptCompactionCount = 0;
   const lifecycleBackstop = createAgentLifecycleTerminalBackstop({
     runId: params.runId,
@@ -200,6 +236,7 @@ export async function runEmbeddedFallbackCandidate(params: {
         preparedRunAdmission: params.preparedRunAdmission,
         ...embeddedContext,
         messageActionTurnCapability,
+        memoryPostboxTurnCapability,
         lifecycleGeneration: params.getLifecycleGeneration(),
         allowGatewaySubagentBinding: true,
         trigger: turn.isHeartbeat ? "heartbeat" : "user",
@@ -426,5 +463,6 @@ export async function runEmbeddedFallbackCandidate(params: {
   } finally {
     params.onCompactionCount(attemptCompactionCount);
     revokeMessageActionTurnCapability(messageActionTurnCapability);
+    revokeMemoryPostboxTurnCapability(memoryPostboxTurnCapability);
   }
 }

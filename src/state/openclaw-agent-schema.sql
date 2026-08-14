@@ -1541,10 +1541,13 @@ BEGIN
 END;
 
 CREATE TABLE IF NOT EXISTS memory_postbox_settings (
-  agent_id TEXT NOT NULL PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  target_store_id TEXT NOT NULL,
   mode TEXT NOT NULL CHECK (mode IN ('off', 'review-required')),
   updated_by_principal_id TEXT NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (agent_id, target_store_id),
+  FOREIGN KEY (target_store_id) REFERENCES memory_stores(store_id) ON DELETE RESTRICT
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS memory_postbox_source_handles (

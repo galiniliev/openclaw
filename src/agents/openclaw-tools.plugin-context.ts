@@ -60,6 +60,7 @@ export type OpenClawPluginToolOptions = {
   sandboxed?: boolean;
   allowGatewaySubagentBinding?: boolean;
   toolBindings?: Readonly<Record<string, unknown>>;
+  pluginToolBindings?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   activeProjectKeys?: readonly string[];
 };
 
@@ -137,6 +138,7 @@ export function resolveOpenClawPluginToolInputs(params: {
       sessionKey: options?.agentSessionKey,
       sessionId: options?.sessionId,
       toolBindings: options?.toolBindings,
+      pluginToolBindings: options?.pluginToolBindings,
       activeProjectKeys: options?.activeProjectKeys,
       conversationRecall: options?.conversationRecall,
       ...(memoryReadEnforced ? { memoryReadEnforced: true as const } : {}),
