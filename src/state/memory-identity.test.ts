@@ -12,6 +12,7 @@ import {
   recheckMemoryIdentityBinding,
   recheckMemoryIdentityBindingRecipient,
   resolveMemoryIdentityBindingFromAdmission,
+  resolveMemoryPrincipalForUserProfile,
 } from "./memory-identity.js";
 import {
   closeOpenClawStateDatabaseForTest,
@@ -160,6 +161,31 @@ describe("memory identity binding", () => {
         options: { env },
       }),
     ).toEqual({ kind: "unbound" });
+  });
+
+  it("resolves only the active memory principal for the current Gateway profile head", () => {
+    const { env, profileId } = fixture();
+    expect(
+      resolveMemoryPrincipalForUserProfile({ userProfileId: profileId, options: { env } }),
+    ).toBeUndefined();
+
+    const binding = adminLinkAdmittedMemoryIdentity({
+      admission: admitted("telegram", "default", "sender-profile-principal"),
+      authenticatedOperatorProfileId: profileId,
+      authenticatedOperatorScopes: ["operator.admin"],
+      options: { env },
+    });
+
+    expect(
+      resolveMemoryPrincipalForUserProfile({ userProfileId: profileId, options: { env } }),
+    ).toEqual({
+      principalId: binding.principalId,
+      kind: "user",
+      revision: expect.any(String),
+    });
+    expect(
+      resolveMemoryPrincipalForUserProfile({ userProfileId: "unknown-profile", options: { env } }),
+    ).toBeUndefined();
   });
 
   it("fails closed when a damaged shared database contains conflicting active bindings", () => {

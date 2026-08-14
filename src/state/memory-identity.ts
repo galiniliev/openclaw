@@ -267,6 +267,36 @@ export function recheckMemoryOperationalPrincipal(params: {
 }
 
 /**
+ * Resolves the Gateway-authenticated profile to its active memory principal.
+ * Control-plane callers must derive this here instead of accepting a principal
+ * identifier from RPC or CLI input.
+ */
+export function resolveMemoryPrincipalForUserProfile(params: {
+  userProfileId: string;
+  options?: OpenClawStateDatabaseOptions;
+}): MemoryPrincipal | undefined {
+  const options = params.options ?? {};
+  const userProfileId = resolveUserProfileId(
+    requireText(params.userProfileId, "userProfileId"),
+    options,
+  );
+  if (!userProfileId) {
+    return undefined;
+  }
+  ensureMemoryIdentitySchema(options);
+  const row = openOpenClawStateDatabase(options)
+    .db.prepare(
+      `SELECT principal_id, principal_kind, revision
+       FROM memory_principals
+       WHERE user_profile_id = ? AND principal_kind = 'user' AND state = 'active'`,
+    )
+    .get(userProfileId) as
+    | { principal_id: string; principal_kind: string; revision: string }
+    | undefined;
+  return row ? toPrincipal(row) : undefined;
+}
+
+/**
  * The only binding writer. Pairing admission supplies a one-use opaque proof;
  * a separately authenticated Gateway profile supplies the operator identity.
  */
