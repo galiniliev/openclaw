@@ -47,6 +47,7 @@ import {
   readBuiltinScopedMemoryRevisionSnapshot,
   resolveBuiltinScopedMemoryArtifactPath,
 } from "./scoped-memory-resources.js";
+import { createBuiltinMemoryProjection } from "./scoped-memory-sharing.js";
 import { createScopedMemorySourcePolicySetId } from "./scoped-memory-store.js";
 
 const PLAN_TTL_MS = 60_000;
@@ -603,6 +604,30 @@ function createHandle(params: {
   });
   params.plan.handles.set(handle.handleId, handle);
   return handle;
+}
+
+/** A projection accepts only an opaque handle minted by a still-live authorized content view. */
+function resolveProjectionSourceHandle(params: {
+  agentId: string;
+  handle: AuthorizedResourceHandle;
+}): string | undefined {
+  for (const state of plans.values()) {
+    if (state.expiresAtMs <= Date.now() || state.context.agentId !== params.agentId) {
+      continue;
+    }
+    const stored = state.handles.get(params.handle.handleId);
+    if (
+      stored &&
+      stored.planId === params.handle.planId &&
+      stored.contextFingerprint === params.handle.contextFingerprint &&
+      stored.resourceRevision === params.handle.resourceRevision &&
+      stored.policyRevision === params.handle.policyRevision &&
+      stored.expiresAt === params.handle.expiresAt
+    ) {
+      return stored.resourceRevision;
+    }
+  }
+  return undefined;
 }
 
 function createEnvelope<T>(params: {
@@ -1698,6 +1723,70 @@ async function writeAuthorizedMutation(params: {
     });
   }
 
+  if (params.mutation.kind === "project") {
+    if (params.context.actor.kind !== "principal" || params.mutation.sourceHandles.length !== 1) {
+      throw new Error("authorized memory projection is unavailable");
+    }
+    const sourceRevisionId = resolveProjectionSourceHandle({
+      agentId,
+      handle: params.mutation.sourceHandles[0]!,
+    });
+    if (!sourceRevisionId) {
+      throw new Error("authorized memory projection is unavailable");
+    }
+    const expiry =
+      params.mutation.target.expiry.kind === "expires"
+        ? (() => {
+            const expiresAt = Date.parse(params.mutation.target.expiry.expiresAt);
+            if (!Number.isSafeInteger(expiresAt)) {
+              throw new Error("authorized memory projection is unavailable");
+            }
+            return { kind: "expires" as const, expiresAt };
+          })()
+        : {
+            kind: "no-expiry" as const,
+            auditReason: params.mutation.target.expiry.auditReason,
+          };
+    const projection = createBuiltinMemoryProjection({
+      agentId,
+      sourceRevisionId,
+      target: params.mutation.target.audience,
+      publisherPrincipalId: params.context.actor.principalId,
+      reviewedByPrincipalId: params.context.actor.principalId,
+      purpose: params.mutation.target.purpose,
+      preview: params.mutation.target.preview,
+      content: params.mutation.content,
+      expiry,
+      nowMs,
+    });
+    const targetSnapshot = withScopedMemoryDatabase(agentId, (database) => {
+      const db = getNodeSqliteKysely<ScopedMemoryDatabase>(database);
+      return executeSqliteQueryTakeFirstSync(
+        database,
+        db
+          .selectFrom("memory_resource_revisions")
+          .select("policy_revision_id")
+          .where("revision_id", "=", projection.copyRevisionId),
+      );
+    });
+    if (!targetSnapshot) {
+      throw new Error("authorized memory projection is unavailable");
+    }
+    const handle = createHandle({
+      plan: state,
+      revisionId: projection.copyRevisionId,
+      policyRevision: targetSnapshot.policy_revision_id,
+    });
+    return Object.freeze({
+      version: 1,
+      mutationId: params.mutation.mutationId,
+      status: "committed" as const,
+      resourceHandle: handle,
+      policyRevision: targetSnapshot.policy_revision_id,
+      committedAt: new Date(nowMs).toISOString(),
+    });
+  }
+
   const result = withScopedMemoryDatabase(agentId, (database, databasePath) => {
     const store = selectWriteStore({ database, agentId, state });
     const db = getNodeSqliteKysely<ScopedMemoryDatabase>(database);
@@ -1729,6 +1818,10 @@ async function writeAuthorizedMutation(params: {
         ? params.mutation.derivationPurpose
         : undefined;
     const existing =
+      (params.mutation.kind === "append" ||
+        params.mutation.kind === "replace" ||
+        params.mutation.kind === "delete" ||
+        params.mutation.kind === "tombstone") &&
       "target" in params.mutation
         ? resolveWriteTarget({
             database,

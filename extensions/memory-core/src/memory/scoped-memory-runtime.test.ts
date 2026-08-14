@@ -71,6 +71,7 @@ import {
   readBuiltinScopedMemoryRevisionSnapshot,
   setBuiltinScopedMemoryRevisionLifecycle,
 } from "./scoped-memory-resources.js";
+import { registerBuiltinMemoryProjectionTarget } from "./scoped-memory-sharing.js";
 import {
   builtinScopedMemoryAuthorizedRuntime,
   builtinScopedMemoryVirtualView,
@@ -539,6 +540,131 @@ describe("builtin scoped authorized runtime", () => {
         handle: { ...hit.resourceHandle, resourceRevision: "forged" },
       }),
     ).rejects.toThrow("unavailable");
+  });
+
+  it("projects only from an opaque source handle into a registered non-private target", async () => {
+    const principalId = "projection-owner";
+    const sourceStore = createBuiltinScopedMemoryStore({
+      agentId: "main",
+      scopeKind: "user",
+      audienceKind: "user",
+      audienceId: principalId,
+      authorityKind: "user",
+      authorityOwnerId: principalId,
+      defaultCapabilities: ["retrieve", "read", "project"],
+      actor: { kind: "human", id: principalId },
+      reason: "projection source",
+    });
+    createBuiltinScopedMemoryResource({
+      agentId: "main",
+      store: sourceStore,
+      logicalLocator: "private.md",
+      content: "PROJECT_SOURCE_SENTINEL",
+      actor: { kind: "human", id: principalId },
+    });
+    const targetStore = createBuiltinScopedMemoryStore({
+      agentId: "main",
+      scopeKind: "conversation",
+      audienceKind: "conversation",
+      audienceId: "projection-channel",
+      authorityKind: "conversation",
+      authorityOwnerId: "projection-channel",
+      defaultCapabilities: ["retrieve", "read"],
+      policyEntries: [
+        {
+          kind: "publish",
+          effect: "allow",
+          principalId,
+          operation: "publish",
+          grantorPrincipalId: principalId,
+          reason: "named publisher",
+        },
+        {
+          effect: "allow",
+          principalId,
+          operation: "policy-admin",
+          grantorPrincipalId: principalId,
+          reason: "target administrator",
+        },
+      ],
+      actor: { kind: "human", id: principalId },
+      reason: "projection target",
+    });
+    registerBuiltinMemoryProjectionTarget({
+      agentId: "main",
+      target: { kind: "conversation", id: "projection-channel" },
+      store: targetStore,
+      operatorPrincipalId: principalId,
+    });
+
+    const readContext = createContext(principalId);
+    const readPlan = await builtinScopedMemoryAuthorizedRuntime.authorize(readContext);
+    const source = await builtinScopedMemoryAuthorizedRuntime.searchAuthorized({
+      context: readContext,
+      plan: readPlan,
+      query: "PROJECT_SOURCE_SENTINEL",
+      limit: 1,
+    });
+    const sourceHandle = source.value[0]?.resourceHandle;
+    if (!sourceHandle) {
+      throw new Error("fixture expected an opaque projection source handle");
+    }
+    const projectContext = {
+      ...readContext,
+      operation: "project" as const,
+    } satisfies MemoryAccessContext;
+    const projectPlan = await builtinScopedMemoryAuthorizedRuntime.authorize(projectContext);
+    const projected = await builtinScopedMemoryAuthorizedRuntime.writeAuthorized({
+      context: projectContext,
+      plan: projectPlan,
+      mutation: {
+        version: 1,
+        kind: "project",
+        mutationId: "project-output",
+        idempotencyKey: "project-output-request",
+        content: "PROJECT_COPY_SENTINEL",
+        contentType: "markdown",
+        sourceHandles: [sourceHandle],
+        target: {
+          audience: { kind: "conversation", id: "projection-channel" },
+          purpose: "approved channel reference",
+          preview: "approved reference",
+          expiry: { kind: "no-expiry", auditReason: "fixture owner approval" },
+        },
+      },
+    });
+    const copyRevisionId = projected.resourceHandle?.resourceRevision;
+    if (!copyRevisionId) {
+      throw new Error("fixture expected a projection copy");
+    }
+    expect(
+      readBuiltinScopedMemoryRevisionSnapshot({
+        agentId: "main",
+        storeIds: [targetStore.storeId],
+        revisionId: copyRevisionId,
+      })?.content,
+    ).toBe("PROJECT_COPY_SENTINEL");
+    await expect(
+      builtinScopedMemoryAuthorizedRuntime.writeAuthorized({
+        context: projectContext,
+        plan: projectPlan,
+        mutation: {
+          version: 1,
+          kind: "project",
+          mutationId: "project-forged",
+          idempotencyKey: "project-forged-request",
+          content: "forged",
+          contentType: "markdown",
+          sourceHandles: [{ ...sourceHandle, handleId: "forged" }],
+          target: {
+            audience: { kind: "conversation", id: "projection-channel" },
+            purpose: "forged",
+            preview: "forged",
+            expiry: { kind: "expires", expiresAt: new Date(Date.now() + 60_000).toISOString() },
+          },
+        },
+      }),
+    ).rejects.toThrow("projection is unavailable");
   });
 
   it("authorizes compaction sources with derive rather than downgrading them to read", async () => {

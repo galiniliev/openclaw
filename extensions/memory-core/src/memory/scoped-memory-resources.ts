@@ -55,6 +55,22 @@ export type ScopedMemoryChunk = Readonly<{
   text: string;
 }>;
 
+/** Immutable source evidence carried into an explicitly reviewed derived resource. */
+export type BuiltinScopedMemoryDerivedSource = Readonly<{
+  revisionId: string;
+  policyRequirements: readonly Readonly<{
+    policyId: string;
+    expectedRevisionId: string;
+    expectedRevocationEpoch: number;
+  }>[];
+}>;
+
+export type BuiltinScopedMemoryRevisionCommit = Readonly<{
+  database: DatabaseSync;
+  revision: BuiltinScopedMemoryRevision;
+  nowMs: number;
+}>;
+
 function contentHash(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
@@ -537,6 +553,9 @@ function createRevision(params: {
   expiresAt: number | null;
   actor: ScopedMemoryActor;
   nowMs: number;
+  derivedSources?: readonly BuiltinScopedMemoryDerivedSource[];
+  /** Runs inside the immutable revision transaction, before the revision becomes readable. */
+  commitAdditionalState?: (params: BuiltinScopedMemoryRevisionCommit) => void;
 }): BuiltinScopedMemoryRevision {
   const content = params.content;
   if (!content.trim()) {
@@ -648,6 +667,36 @@ function createRevision(params: {
             retired_at: null,
           }),
         );
+        for (const source of params.derivedSources ?? []) {
+          for (const requirement of source.policyRequirements) {
+            executeSqliteQuerySync(
+              database,
+              db
+                .insertInto("memory_revision_policy_requirements")
+                .values({
+                  revision_id: revisionId,
+                  policy_id: requirement.policyId,
+                  expected_revision_id: requirement.expectedRevisionId,
+                  expected_revocation_epoch: requirement.expectedRevocationEpoch,
+                  requirement_kind: "source-policy",
+                  created_at: params.nowMs,
+                })
+                .onConflict((conflict) =>
+                  conflict.columns(["revision_id", "policy_id"]).doNothing(),
+                ),
+            );
+          }
+          executeSqliteQuerySync(
+            database,
+            db.insertInto("memory_lineage_edges").values({
+              child_revision_id: revisionId,
+              parent_kind: "resource-revision",
+              parent_id: source.revisionId,
+              relation_kind: "derived-from",
+              created_at: params.nowMs,
+            }),
+          );
+        }
         executeSqliteQuerySync(
           database,
           db.insertInto("memory_revision_policy_requirements").values({
@@ -686,6 +735,7 @@ function createRevision(params: {
           sourcePolicySetId: createScopedMemorySourcePolicySetId(current.current_revision_id),
           artifactLocator,
         });
+        params.commitAdditionalState?.({ database, revision: output, nowMs: params.nowMs });
       });
       if (!output) {
         throw new Error("scoped-memory revision was not created");
@@ -708,6 +758,9 @@ export function createBuiltinScopedMemoryResource(params: {
   expiresAt?: number;
   actor: ScopedMemoryActor;
   nowMs?: number;
+  derivedSources?: readonly BuiltinScopedMemoryDerivedSource[];
+  /** Owner-only metadata that must commit atomically with the readable revision. */
+  commitAdditionalState?: (params: BuiltinScopedMemoryRevisionCommit) => void;
 }): BuiltinScopedMemoryRevision {
   const agentId = normalizeAgentId(params.agentId);
   const logicalLocator = normalizeLogicalLocator(params.logicalLocator);
@@ -748,6 +801,8 @@ export function createBuiltinScopedMemoryResource(params: {
       expiresAt: params.expiresAt ?? null,
       actor: params.actor,
       nowMs,
+      ...(params.derivedSources ? { derivedSources: params.derivedSources } : {}),
+      ...(params.commitAdditionalState ? { commitAdditionalState: params.commitAdditionalState } : {}),
     });
   });
 }
@@ -761,6 +816,8 @@ export function createBuiltinScopedMemoryResourceRevision(params: {
   expiresAt?: number;
   actor: ScopedMemoryActor;
   nowMs?: number;
+  derivedSources?: readonly BuiltinScopedMemoryDerivedSource[];
+  commitAdditionalState?: (params: BuiltinScopedMemoryRevisionCommit) => void;
 }): BuiltinScopedMemoryRevision {
   return createRevision({
     agentId: normalizeAgentId(params.agentId),
@@ -770,6 +827,8 @@ export function createBuiltinScopedMemoryResourceRevision(params: {
     expiresAt: params.expiresAt ?? null,
     actor: params.actor,
     nowMs: params.nowMs ?? Date.now(),
+    ...(params.derivedSources ? { derivedSources: params.derivedSources } : {}),
+    ...(params.commitAdditionalState ? { commitAdditionalState: params.commitAdditionalState } : {}),
   });
 }
 

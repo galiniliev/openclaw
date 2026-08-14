@@ -1479,6 +1479,132 @@ BEGIN
   SELECT RAISE(ABORT, 'transcript export artifact events cannot be deleted');
 END;
 
+-- Phase 3 sharing keeps a reviewed copy in a separately mounted target store.
+-- The source revision remains immutable lineage, never a target-side read grant.
+CREATE TABLE IF NOT EXISTS memory_projection_targets (
+  agent_id TEXT NOT NULL,
+  audience_kind TEXT NOT NULL CHECK (audience_kind IN ('conversation', 'role', 'agent-shared')),
+  audience_id TEXT NOT NULL,
+  store_id TEXT NOT NULL,
+  configured_by_principal_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (agent_id, audience_kind, audience_id),
+  UNIQUE (store_id),
+  FOREIGN KEY (store_id) REFERENCES memory_stores(store_id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS memory_projections (
+  projection_id TEXT NOT NULL PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  target_store_id TEXT NOT NULL,
+  target_audience_kind TEXT NOT NULL CHECK (target_audience_kind IN ('conversation', 'role', 'agent-shared')),
+  target_audience_id TEXT NOT NULL,
+  source_revision_id TEXT NOT NULL,
+  copy_revision_id TEXT NOT NULL UNIQUE,
+  publisher_principal_id TEXT NOT NULL,
+  reviewed_by_principal_id TEXT NOT NULL,
+  purpose TEXT NOT NULL,
+  preview TEXT NOT NULL,
+  expiry_kind TEXT NOT NULL CHECK (expiry_kind IN ('expires', 'no-expiry')),
+  expiry_audit_reason TEXT,
+  expires_at INTEGER,
+  revocation_behavior TEXT NOT NULL CHECK (revocation_behavior = 'tombstone-copy'),
+  state TEXT NOT NULL CHECK (state IN ('active', 'revoked', 'expired')),
+  created_at INTEGER NOT NULL,
+  revoked_at INTEGER,
+  FOREIGN KEY (target_store_id) REFERENCES memory_stores(store_id) ON DELETE RESTRICT,
+  FOREIGN KEY (source_revision_id) REFERENCES memory_resource_revisions(revision_id) ON DELETE RESTRICT,
+  FOREIGN KEY (copy_revision_id) REFERENCES memory_resource_revisions(revision_id) ON DELETE RESTRICT,
+  CHECK ((expiry_kind = 'expires' AND expires_at IS NOT NULL AND expiry_audit_reason IS NULL)
+      OR (expiry_kind = 'no-expiry' AND expires_at IS NULL AND expiry_audit_reason IS NOT NULL))
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_memory_projections_target_live
+  ON memory_projections(agent_id, target_audience_kind, target_audience_id, state, expires_at);
+CREATE INDEX IF NOT EXISTS idx_memory_projections_source
+  ON memory_projections(agent_id, source_revision_id, state);
+
+CREATE TRIGGER IF NOT EXISTS memory_projections_immutable_identity
+BEFORE UPDATE OF projection_id, agent_id, target_store_id, target_audience_kind, target_audience_id,
+  source_revision_id, copy_revision_id, publisher_principal_id, reviewed_by_principal_id, purpose,
+  preview, expiry_kind, expiry_audit_reason, expires_at, revocation_behavior, created_at
+ON memory_projections
+BEGIN
+  SELECT RAISE(ABORT, 'memory projection identity is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_projections_terminal_state
+BEFORE UPDATE OF state ON memory_projections
+WHEN old.state IN ('revoked', 'expired') AND new.state <> old.state
+BEGIN
+  SELECT RAISE(ABORT, 'memory projection cannot be reactivated');
+END;
+
+CREATE TABLE IF NOT EXISTS memory_postbox_settings (
+  agent_id TEXT NOT NULL PRIMARY KEY,
+  mode TEXT NOT NULL CHECK (mode IN ('off', 'review-required')),
+  updated_by_principal_id TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS memory_postbox_source_handles (
+  source_handle_id TEXT NOT NULL PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  source_session_id TEXT NOT NULL,
+  source_channel_ref TEXT NOT NULL,
+  source_message_ref TEXT NOT NULL,
+  sender_evidence_ref TEXT NOT NULL,
+  target_store_id TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  used_at INTEGER,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (target_store_id) REFERENCES memory_stores(store_id) ON DELETE RESTRICT,
+  UNIQUE (agent_id, source_session_id, source_message_ref, target_store_id)
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_memory_postbox_source_handles_live
+  ON memory_postbox_source_handles(agent_id, source_handle_id, expires_at, used_at);
+
+CREATE TABLE IF NOT EXISTS memory_postbox_rate_limits (
+  agent_id TEXT NOT NULL,
+  source_channel_ref TEXT NOT NULL,
+  target_store_id TEXT NOT NULL,
+  window_started_at INTEGER NOT NULL,
+  deposit_count INTEGER NOT NULL CHECK (deposit_count >= 0),
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (agent_id, source_channel_ref, target_store_id),
+  FOREIGN KEY (target_store_id) REFERENCES memory_stores(store_id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS memory_postbox_items (
+  item_id TEXT NOT NULL PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  source_handle_id TEXT NOT NULL UNIQUE,
+  target_store_id TEXT NOT NULL,
+  source_channel_ref TEXT NOT NULL,
+  sender_evidence_ref TEXT NOT NULL,
+  content TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('postbox', 'reviewed', 'rejected', 'purged')),
+  reviewed_by_principal_id TEXT,
+  reviewed_at INTEGER,
+  created_at INTEGER NOT NULL,
+  purged_at INTEGER,
+  FOREIGN KEY (source_handle_id) REFERENCES memory_postbox_source_handles(source_handle_id) ON DELETE RESTRICT,
+  FOREIGN KEY (target_store_id) REFERENCES memory_stores(store_id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_memory_postbox_items_review
+  ON memory_postbox_items(agent_id, target_store_id, state, created_at);
+
+CREATE TRIGGER IF NOT EXISTS memory_postbox_items_immutable_provenance
+BEFORE UPDATE OF item_id, agent_id, source_handle_id, target_store_id, source_channel_ref,
+  sender_evidence_ref, content, content_hash, created_at
+ON memory_postbox_items
+BEGIN
+  SELECT RAISE(ABORT, 'memory postbox provenance is immutable');
+END;
+
 CREATE TABLE IF NOT EXISTS standing_intents (
   intent_key INTEGER PRIMARY KEY,
   id TEXT NOT NULL UNIQUE,

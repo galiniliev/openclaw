@@ -256,6 +256,81 @@ export type MemoryWriteIntentRow = {
   indexed_at: number | null;
 };
 
+export type MemoryProjectionTargetRow = {
+  agent_id: string;
+  audience_kind: "conversation" | "role" | "agent-shared";
+  audience_id: string;
+  store_id: string;
+  configured_by_principal_id: string;
+  created_at: number;
+};
+
+export type MemoryProjectionRow = {
+  projection_id: string;
+  agent_id: string;
+  target_store_id: string;
+  target_audience_kind: "conversation" | "role" | "agent-shared";
+  target_audience_id: string;
+  source_revision_id: string;
+  copy_revision_id: string;
+  publisher_principal_id: string;
+  reviewed_by_principal_id: string;
+  purpose: string;
+  preview: string;
+  expiry_kind: "expires" | "no-expiry";
+  expiry_audit_reason: string | null;
+  expires_at: number | null;
+  revocation_behavior: "tombstone-copy";
+  state: "active" | "revoked" | "expired";
+  created_at: number;
+  revoked_at: number | null;
+};
+
+export type MemoryPostboxSettingRow = {
+  agent_id: string;
+  mode: "off" | "review-required";
+  updated_by_principal_id: string;
+  updated_at: number;
+};
+
+export type MemoryPostboxSourceHandleRow = {
+  source_handle_id: string;
+  agent_id: string;
+  source_session_id: string;
+  source_channel_ref: string;
+  source_message_ref: string;
+  sender_evidence_ref: string;
+  target_store_id: string;
+  expires_at: number;
+  used_at: number | null;
+  created_at: number;
+};
+
+export type MemoryPostboxRateLimitRow = {
+  agent_id: string;
+  source_channel_ref: string;
+  target_store_id: string;
+  window_started_at: number;
+  deposit_count: number;
+  updated_at: number;
+};
+
+export type MemoryPostboxItemRow = {
+  item_id: string;
+  agent_id: string;
+  source_handle_id: string;
+  target_store_id: string;
+  source_channel_ref: string;
+  sender_evidence_ref: string;
+  content: string;
+  content_hash: string;
+  state: "postbox" | "reviewed" | "rejected" | "purged";
+  reviewed_by_principal_id: string | null;
+  reviewed_at: number | null;
+  created_at: number;
+  purged_at: number | null;
+};
+
 /** Local, idempotent audit delivery queue. Memory content is deliberately absent. */
 export type MemoryAuditOutboxRow = {
   event_id: string;
@@ -327,6 +402,12 @@ export type ScopedMemoryDatabase = {
   memory_scoped_chunks: MemoryScopedChunkRow;
   memory_scoped_chunk_vectors: MemoryScopedChunkVectorRow;
   memory_write_intents: MemoryWriteIntentRow;
+  memory_projection_targets: MemoryProjectionTargetRow;
+  memory_projections: MemoryProjectionRow;
+  memory_postbox_settings: MemoryPostboxSettingRow;
+  memory_postbox_source_handles: MemoryPostboxSourceHandleRow;
+  memory_postbox_rate_limits: MemoryPostboxRateLimitRow;
+  memory_postbox_items: MemoryPostboxItemRow;
   memory_audit_outbox: MemoryAuditOutboxRow;
   memory_migrations: MemoryMigrationRow;
 };

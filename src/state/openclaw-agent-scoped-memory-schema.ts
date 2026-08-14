@@ -33,6 +33,12 @@ export const AGENT_SCOPED_MEMORY_TABLES = [
   "memory_transcript_export_artifacts",
   "memory_transcript_export_artifact_sources",
   "memory_transcript_export_artifact_events",
+  "memory_projection_targets",
+  "memory_projections",
+  "memory_postbox_settings",
+  "memory_postbox_source_handles",
+  "memory_postbox_rate_limits",
+  "memory_postbox_items",
 ] as const;
 
 export const AGENT_SCOPED_MEMORY_FTS_TABLE = "memory_scoped_chunks_fts";
