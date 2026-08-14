@@ -88,6 +88,45 @@ describe("builtin scoped memory sharing", () => {
     });
   }
 
+  function sharedProjectionStore(params: {
+    kind: "role" | "agent-shared";
+    id: string;
+    allowPublish: boolean;
+  }) {
+    return createBuiltinScopedMemoryStore({
+      agentId,
+      scopeKind: params.kind,
+      audienceKind: params.kind,
+      audienceId: params.id,
+      authorityKind: params.kind,
+      authorityOwnerId: params.id,
+      defaultCapabilities: ["read"],
+      policyEntries: [
+        ...(params.allowPublish
+          ? [
+              {
+                kind: "publish" as const,
+                effect: "allow" as const,
+                principalId: alice,
+                operation: "publish" as const,
+                grantorPrincipalId: alice,
+                reason: "named shared publisher",
+              },
+            ]
+          : []),
+        {
+          effect: "allow",
+          principalId: alice,
+          operation: "policy-admin",
+          grantorPrincipalId: alice,
+          reason: "projection administrator",
+        },
+      ],
+      actor: { kind: "human", id: alice },
+      reason: "test shared projection target",
+    });
+  }
+
   function privateTargetStore() {
     return createBuiltinScopedMemoryStore({
       agentId,
@@ -237,6 +276,61 @@ describe("builtin scoped memory sharing", () => {
         expiry: { kind: "expires", expiresAt: Date.now() + 60_000 },
       }),
     ).toThrow("memory sharing authorization is unavailable");
+  });
+
+  it.each([
+    { kind: "role" as const, id: "support" },
+    { kind: "agent-shared" as const, id: agentId },
+  ])("requires an explicit publisher for a $kind projection target", ({ kind, id }) => {
+    const source = sourceStore();
+    const sourceRevision = createBuiltinScopedMemoryResource({
+      agentId,
+      store: source,
+      logicalLocator: `${kind}-source.md`,
+      content: "private source",
+      actor: { kind: "human", id: alice },
+    });
+    const readOnlyTarget = sharedProjectionStore({ kind, id, allowPublish: false });
+    registerBuiltinMemoryProjectionTarget({
+      agentId,
+      target: { kind, id },
+      store: readOnlyTarget,
+      operatorPrincipalId: alice,
+    });
+    expect(() =>
+      createBuiltinMemoryProjection({
+        agentId,
+        sourceRevisionId: sourceRevision.revisionId,
+        target: { kind, id },
+        publisherPrincipalId: alice,
+        reviewedByPrincipalId: alice,
+        purpose: "share",
+        preview: "preview",
+        content: "copy",
+        expiry: { kind: "expires", expiresAt: Date.now() + 60_000 },
+      }),
+    ).toThrow("memory sharing authorization is unavailable");
+
+    const publisherTarget = sharedProjectionStore({ kind, id, allowPublish: true });
+    registerBuiltinMemoryProjectionTarget({
+      agentId,
+      target: { kind, id },
+      store: publisherTarget,
+      operatorPrincipalId: alice,
+    });
+    expect(
+      createBuiltinMemoryProjection({
+        agentId,
+        sourceRevisionId: sourceRevision.revisionId,
+        target: { kind, id },
+        publisherPrincipalId: alice,
+        reviewedByPrincipalId: alice,
+        purpose: "share",
+        preview: "preview",
+        content: "copy",
+        expiry: { kind: "expires", expiresAt: Date.now() + 60_000 },
+      }),
+    ).toMatchObject({ target: { kind, id } });
   });
 
   it("revokes the copy and removes every future read", () => {
