@@ -12,7 +12,9 @@ import type { OpenClawConfig } from "../api.js";
 import { syncMemoryWikiBridgeSources } from "./bridge.js";
 import { createMemoryWikiTestHarness } from "./test-helpers.js";
 
-const isLegacyMemorySurfaceDisabledMock = vi.hoisted(() => vi.fn(() => false));
+const isLegacyMemorySurfaceDisabledMock = vi.hoisted(() =>
+  vi.fn<(agentId: string) => boolean>(() => false),
+);
 
 vi.mock("openclaw/plugin-sdk/memory-core-host-runtime-core", () => ({
   isLegacyMemorySurfaceDisabled: isLegacyMemorySurfaceDisabledMock,

@@ -69,6 +69,7 @@ describe("buildChannelSourceTurnId", () => {
     expect(readChannelSourceTurnSameThreadRequired({ ...context })).toBe(true);
     expect(JSON.stringify(context)).toBe('{"MessageSid":"7"}');
   });
+
   it("does not mint channel source-turn ids for internal-origin ingress", () => {
     // Gateway chat.send stamps the internal channel as the ingress provider and
     // keys the persisted user turn by run id; minting a channel id there would

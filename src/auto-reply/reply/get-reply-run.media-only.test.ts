@@ -8,7 +8,13 @@ import {
   clearActiveEmbeddedRun,
   setActiveEmbeddedRun,
 } from "../../agents/embedded-agent-runner/runs.js";
+import { buildChannelInboundEventContext } from "../../channels/inbound-event/context.js";
 import type { SessionEntry } from "../../config/sessions.js";
+import {
+  mintMemoryPostboxTurnCapability,
+  resetMemoryPostboxTurnCapabilitiesForTest,
+  resolveMemoryPostboxTurnCapability,
+} from "../../gateway/memory-postbox-turn-capability.js";
 import { withSystemEventOwner } from "../../infra/system-event-ownership.js";
 import {
   enqueueSystemEvent,
@@ -67,6 +73,7 @@ vi.mock("../../config/sessions/paths.js", () => ({
 
 const loadSessionEntryMock = vi.hoisted(() => vi.fn());
 const updateAmbientTranscriptWatermarkMock = vi.hoisted(() => vi.fn().mockResolvedValue(null));
+const createCurrentMemorySessionContextMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../../config/sessions/session-accessor.js", () => ({
   listSessionEntries: vi.fn().mockReturnValue([]),
@@ -77,6 +84,10 @@ vi.mock("../../config/sessions/session-accessor.js", () => ({
 
 vi.mock("../../config/sessions/ambient-transcript-watermark.js", () => ({
   updateAmbientTranscriptWatermark: updateAmbientTranscriptWatermarkMock,
+}));
+
+vi.mock("../../state/memory-session-subject.js", () => ({
+  createCurrentMemorySessionContext: createCurrentMemorySessionContextMock,
 }));
 
 vi.mock("../../globals.js", () => ({
@@ -356,11 +367,21 @@ describe("runPreparedReply media-only handling", () => {
     vi.mocked(resolveInboundUserContextPromptJoiner).mockReturnValue(undefined);
     vi.mocked(hasControlCommand).mockReturnValue(false);
     replyRunTesting.resetReplyRunRegistry();
+    resetMemoryPostboxTurnCapabilitiesForTest();
+    createCurrentMemorySessionContextMock.mockReturnValue({
+      kind: "current",
+      context: {
+        subject: { kind: "user" },
+        principalId: "principal-alice",
+        fingerprint: "alice-session-fingerprint",
+      },
+    });
   });
 
   afterEach(() => {
     vi.useRealTimers();
     resetSystemEventsForTest();
+    resetMemoryPostboxTurnCapabilitiesForTest();
     const paths = cleanupPaths.splice(0);
     return Promise.all(paths.map((entry) => rm(entry, { recursive: true, force: true })));
   });
@@ -378,6 +399,99 @@ describe("runPreparedReply media-only handling", () => {
       allowed: true,
       defaultLevel: "on",
       fullAccessAvailable: true,
+    });
+  });
+
+  it.each([
+    { name: "native external channel input", inputProvenance: undefined, expected: true },
+    {
+      name: "synthetic channel reflection",
+      inputProvenance: {
+        kind: "internal_system" as const,
+        sourceTool: "channel_feedback_reflection",
+      },
+      expected: false,
+    },
+    {
+      name: "restart continuation",
+      inputProvenance: { kind: "internal_system" as const, sourceTool: "restart-sentinel" },
+      expected: false,
+    },
+  ])("admits a postbox source only for $name", async ({ inputProvenance, expected }) => {
+    const inbound = buildChannelInboundEventContext({
+      channel: "telegram",
+      accountId: "default",
+      provider: "telegram",
+      messageId: "message-postbox-ingress",
+      from: "telegram:alice",
+      sender: { id: "alice" },
+      conversation: { kind: "direct", id: "alice" },
+      route: {
+        agentId: "main",
+        routeSessionKey: "agent:main:telegram:direct:alice",
+      },
+      reply: { to: "telegram:alice", originatingTo: "telegram:alice" },
+      message: { body: "remember this", rawBody: "remember this" },
+      ...(inputProvenance ? { inputProvenance } : {}),
+    });
+    let token: string | undefined;
+    let runIdentity: { agentId: string; sessionKey: string; sessionId: string } | undefined;
+    vi.mocked(runReplyAgent).mockImplementationOnce(async (params) => {
+      const run = params.followupRun.run;
+      const sessionKey = params.runtimePolicySessionKey ?? params.sessionKey ?? run.sessionId;
+      runIdentity = { agentId: run.agentId, sessionKey, sessionId: run.sessionId };
+      token = mintMemoryPostboxTurnCapability({
+        agentId: run.agentId,
+        runId: "postbox-ingress-composition",
+        sessionKey,
+        sessionId: run.sessionId,
+        sourceContext: params.sessionCtx,
+      });
+      return { text: "ok" };
+    });
+
+    await runPrepared({
+      ctx: inbound,
+      sessionCtx: inbound,
+      agentId: "main",
+      sessionId: "session-postbox-ingress",
+      sessionKey: "agent:main:telegram:direct:alice",
+      command: {
+        surface: "telegram",
+        channel: "telegram",
+        isAuthorizedSender: true,
+        abortKey: "agent:main:telegram:direct:alice",
+        ownerList: [],
+        senderIsOwner: false,
+        rawBodyNormalized: "remember this",
+        commandBodyNormalized: "remember this",
+      } as never,
+    });
+
+    if (!expected) {
+      expect(token).toBeUndefined();
+      return;
+    }
+    expect(token).toEqual(expect.any(String));
+    expect(runIdentity).toBeDefined();
+    expect(
+      resolveMemoryPostboxTurnCapability({
+        token,
+        agentId: runIdentity!.agentId,
+        runId: "postbox-ingress-composition",
+        sessionKey: runIdentity!.sessionKey,
+        sessionId: runIdentity!.sessionId,
+      }),
+    ).toEqual({
+      sourceTurnId: buildChannelSourceTurnId({
+        provider: "telegram",
+        accountId: "default",
+        conversationId: "telegram:alice",
+        messageId: "message-postbox-ingress",
+      }),
+      sourceChannelRef: "telegram:default:telegram:alice",
+      senderEvidenceRef: "alice",
+      targetPrincipalId: "principal-alice",
     });
   });
 

@@ -318,6 +318,9 @@ describe("dreaming gateway restart cleanup", () => {
         }),
       ),
     );
+    if (!cutOver || !legacy) {
+      throw new Error("fixture expected both configured agents");
+    }
     isLegacyMemorySurfaceDisabledMock.mockImplementation((agentId) => agentId === "main");
     const gateway = createGateway({ agentIds: ["main", "researcher"] });
 

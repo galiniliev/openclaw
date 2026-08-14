@@ -7,7 +7,10 @@ import {
   resolveAuthorizedVirtualProjectionRoot,
   resolveAuthorizedVirtualProjectionSourcePath,
 } from "./authorized-virtual-projection-mounts.js";
-import { stageAuthorizedVirtualProjectionMountPlan } from "./authorized-virtual-projection-staging.js";
+import {
+  stageAuthorizedVirtualProjectionMountPlan,
+  type AuthorizedVirtualProjectionBroker,
+} from "./authorized-virtual-projection-staging.js";
 
 const tmpDirs: string[] = [];
 
@@ -17,9 +20,10 @@ function makeTempDir(): string {
   return dir;
 }
 
-type BrokerReadFile = (virtualPath: string) => Promise<string | undefined>;
-
-function createBroker(readFile: BrokerReadFile = async (virtualPath) => `contents:${virtualPath}`) {
+function createBroker(
+  readFile: AuthorizedVirtualProjectionBroker["readFile"] = async (virtualPath) =>
+    `contents:${virtualPath}`,
+) {
   return {
     view: {
       version: 1 as const,
@@ -47,7 +51,7 @@ function createBroker(readFile: BrokerReadFile = async (virtualPath) => `content
       ],
       expiresAt: "2099-01-01T00:00:00.000Z",
     },
-    readFile: vi.fn<BrokerReadFile>(readFile),
+    readFile: vi.fn<AuthorizedVirtualProjectionBroker["readFile"]>(readFile),
   };
 }
 

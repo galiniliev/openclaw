@@ -1,6 +1,10 @@
 // Memory Core tests cover index plugin behavior.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import type { OpenClawPluginApi, OpenClawPluginCommandDefinition } from "openclaw/plugin-sdk/core";
+import type {
+  OpenClawPluginApi,
+  OpenClawPluginCommandDefinition,
+  OpenClawPluginToolContext,
+} from "openclaw/plugin-sdk/core";
 import type { MemoryPluginRuntime } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import type { MemoryPluginCapability } from "openclaw/plugin-sdk/memory-host-core";
 import {
@@ -202,7 +206,9 @@ describe("memory-core plugin runtime registration", () => {
 
   it("hides intent create, list, and cancel from non-owner turns", () => {
     let intentFactory:
-      | ((ctx: { config?: OpenClawConfig; senderIsOwner?: boolean }) => unknown)
+      | ((
+          ctx: Pick<OpenClawPluginToolContext, "config" | "senderIsOwner" | "memoryReadEnforced">,
+        ) => unknown)
       | undefined;
     plugin.register(
       createTestPluginApi({
@@ -277,7 +283,7 @@ describe("memory-core plugin runtime registration", () => {
     expect(host.remember).toHaveBeenCalledWith({ content: "durable fact" });
   });
 
-  it("exposes postbox deposit only with the memory-core-scoped host binding", () => {
+  it("exposes postbox deposit only with the memory-core-scoped host binding and no readback", async () => {
     const factories = new Map<string, (ctx: never) => unknown>();
     plugin.register(
       createTestPluginApi({
@@ -292,16 +298,26 @@ describe("memory-core plugin runtime registration", () => {
     );
     const postbox = factories.get("memory_postbox_deposit");
     expect(postbox?.({ agentId: "main", sessionKey: "session" } as never)).toBeNull();
-    expect(
-      postbox?.({
-        agentId: "main",
-        sessionKey: "session",
-        toolBindings: {
-          [MEMORY_POSTBOX_TURN_CAPABILITY_BINDING]: "opaque-turn-capability",
-          [MEMORY_POSTBOX_RUN_ID_BINDING]: "run-1",
-        },
-      } as never),
-    ).toMatchObject({ name: "memory_postbox_deposit" });
+    const tool = postbox?.({
+      agentId: "main",
+      sessionKey: "session",
+      sessionId: "session-1",
+      toolBindings: {
+        [MEMORY_POSTBOX_TURN_CAPABILITY_BINDING]: "opaque-turn-capability",
+        [MEMORY_POSTBOX_RUN_ID_BINDING]: "run-1",
+      },
+    } as never) as
+      | {
+          name: string;
+          description: string;
+          execute: (id: string, params: unknown) => Promise<{ details?: unknown }>;
+        }
+      | null
+      | undefined;
+    expect(tool).toMatchObject({ name: "memory_postbox_deposit" });
+    expect(tool?.description).toContain("cannot list, read, or identify postbox items");
+    const result = await tool?.execute("postbox-call", { content: "one-way observation" });
+    expect(result?.details).toEqual({ accepted: false });
   });
 
   it("keeps memory manager initialization demand-driven", () => {

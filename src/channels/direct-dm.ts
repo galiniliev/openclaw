@@ -205,6 +205,9 @@ export async function dispatchInboundDirectDmWithRuntime(
     OriginatingTo: params.originatingTo ?? params.recipientAddress,
     NativeDirectUserId: params.peer.id,
     ...params.extraContext,
+    // This legacy facade is still a native channel ingress boundary. Do not let an adapter-provided
+    // context relabel a user message as an internal continuation before postbox admission.
+    InputProvenance: { kind: "external_user", sourceChannel: params.channel },
   });
   const plan = buildDirectDmTurnPlan(params, route, ctxPayload);
   await params.runtime.channel.inbound.run({

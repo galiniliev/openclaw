@@ -39,6 +39,7 @@ export const AGENT_SCOPED_MEMORY_TABLES = [
   "memory_postbox_source_handles",
   "memory_postbox_rate_limits",
   "memory_postbox_items",
+  "memory_postbox_reviewed_copies",
 ] as const;
 
 export const AGENT_SCOPED_MEMORY_FTS_TABLE = "memory_scoped_chunks_fts";
@@ -101,11 +102,53 @@ function extractScopedMemorySchema(): string {
 /** Canonical additive schema for scoped resources, policy, indexes, and receipts. */
 export const AGENT_SCOPED_MEMORY_SCHEMA_SQL = extractScopedMemorySchema();
 
+const POSTBOX_PURGE_TRIGGER_MARKER = "NEW.state = 'purged'";
+const POSTBOX_PURGE_TRIGGER_SQL = `
+  CREATE TRIGGER memory_postbox_items_immutable_provenance
+  BEFORE UPDATE OF item_id, agent_id, source_handle_id, target_store_id, source_channel_ref,
+    sender_evidence_ref, content, content_hash, created_at
+  ON memory_postbox_items
+  WHEN
+    NEW.item_id <> OLD.item_id OR
+    NEW.agent_id <> OLD.agent_id OR
+    NEW.source_handle_id <> OLD.source_handle_id OR
+    NEW.target_store_id <> OLD.target_store_id OR
+    NEW.source_channel_ref <> OLD.source_channel_ref OR
+    NEW.sender_evidence_ref <> OLD.sender_evidence_ref OR
+    NEW.created_at <> OLD.created_at OR
+    (
+      (NEW.content <> OLD.content OR NEW.content_hash <> OLD.content_hash) AND
+      NOT (
+        OLD.state IN ('postbox', 'reviewed', 'rejected') AND
+        NEW.state = 'purged' AND
+        NEW.content = '' AND
+        NEW.content_hash = ''
+      )
+    )
+  BEGIN
+    SELECT RAISE(ABORT, 'memory postbox provenance is immutable');
+  END;
+`;
+
+function repairPostboxPurgeTrigger(db: DatabaseSync): void {
+  const trigger = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?")
+    .get("memory_postbox_items_immutable_provenance") as { sql?: unknown } | undefined;
+  if (typeof trigger?.sql === "string" && trigger.sql.includes(POSTBOX_PURGE_TRIGGER_MARKER)) {
+    return;
+  }
+  // Existing additive databases have the older immutable trigger. Replace only that trigger so
+  // a purge can redact the body/digest while every identity-bearing provenance field stays fixed.
+  db.exec("DROP TRIGGER IF EXISTS memory_postbox_items_immutable_provenance");
+  db.exec(POSTBOX_PURGE_TRIGGER_SQL); // sqlite-allow-raw -- canonical trigger convergence.
+}
+
 /** Lazily install the full idempotent group; do not cache transaction-local success. */
 export function ensureOpenClawAgentScopedMemorySchema(db: DatabaseSync): void {
   const ensure = () => {
     // A partially applied group is completed rather than inferred from one marker table.
     db.exec(AGENT_SCOPED_MEMORY_SCHEMA_SQL); // sqlite-allow-raw -- Canonical additive DDL only.
+    repairPostboxPurgeTrigger(db);
   };
   if (db.isTransaction) {
     ensure();

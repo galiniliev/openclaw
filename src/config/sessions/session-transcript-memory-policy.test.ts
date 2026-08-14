@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runDoctorMemoryIsolation } from "../../commands/doctor-memory-isolation.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
@@ -362,6 +363,10 @@ describe("transcript memory policy companions", () => {
     if (!source) {
       throw new Error("fixture expected an authorized compaction source");
     }
+    const sourceEventSeq = expectDefined(
+      source.eventSeqs[0],
+      "authorized compaction source event at index zero",
+    );
     const sourceCompanion = database.db
       .prepare(
         `SELECT policy.run_id, detail.source_event_seq
@@ -370,7 +375,7 @@ describe("transcript memory policy companions", () => {
              ON detail.session_id = policy.session_id AND detail.event_seq = policy.event_seq
           WHERE policy.session_id = ? AND policy.event_seq = ?`,
       )
-      .get(SESSION_ID, source.eventSeqs[0]!);
+      .get(SESSION_ID, sourceEventSeq);
     let committed: { eventSeq: number; policyId: string } | undefined;
     const commit = async () =>
       await withOwnedSessionTranscriptWrites(
@@ -423,9 +428,10 @@ describe("transcript memory policy companions", () => {
       eventSeq: expect.any(Number),
       policyId: "sealed-compaction-policy",
     });
-    if (!committed) {
-      throw new Error("fixture expected sealed compaction derived state");
-    }
+    const committedEventSeq = expectDefined(
+      committed?.eventSeq,
+      "committed sealed compaction event sequence",
+    );
     expect(
       readSessionEntryRow(database, SESSION_KEY)?.entry.compactionCheckpoints?.map(
         (checkpoint) => checkpoint.checkpointId,
@@ -459,7 +465,7 @@ describe("transcript memory policy companions", () => {
                ON detail.session_id = policy.session_id AND detail.event_seq = policy.event_seq
             WHERE policy.session_id = ? AND policy.event_seq = ?`,
         )
-        .get(SESSION_ID, committed.eventSeq),
+        .get(SESSION_ID, committedEventSeq),
     ).toEqual(sourceCompanion);
     expect(
       loadSqliteTranscriptEventsSync(scope(env)).some(

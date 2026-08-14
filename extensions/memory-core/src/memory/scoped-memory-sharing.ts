@@ -12,8 +12,8 @@ import { evaluateBuiltinScopedMemoryPolicy } from "./scoped-memory-policy.js";
 import {
   createBuiltinScopedMemoryResource,
   readBuiltinScopedMemoryRevisionSnapshot,
+  setBuiltinScopedMemoryRevisionLifecycle,
   type BuiltinScopedMemoryDerivedSource,
-  type BuiltinScopedMemoryRevision,
 } from "./scoped-memory-resources.js";
 import {
   createScopedMemorySourcePolicySetId,
@@ -37,13 +37,48 @@ export type BuiltinMemoryProjection = Readonly<{
   sourceRevisionId: string;
   target: ProjectionAudience;
   expiresAt?: number;
+  /** Present only for a refresh: the old copy's prior exposure ids under the replacement fence. */
+  replacedExposureSetIds?: readonly string[];
+}>;
+
+export type BuiltinMemoryProjectionPreview = Readonly<{
+  sourceRevisionId: string;
+  target: ProjectionAudience;
+  purpose: string;
+  preview: string;
+  expiry: "expires" | "no-expiry";
 }>;
 
 export type BuiltinMemoryPostboxDeposit = Readonly<{ accepted: boolean }>;
 
+export type BuiltinMemoryPostboxInspection = Readonly<{
+  itemId: string;
+  content: string;
+  sourceChannelRef: string;
+  createdAt: number;
+}>;
+
 export type BuiltinMemoryProjectionImpact = Readonly<{
   projectionId: string;
   exposureSetIds: readonly string[];
+}>;
+
+export type BuiltinMemorySharingStatus = Readonly<{
+  postboxMode: "off" | "review-required";
+  projections: readonly Readonly<{
+    projectionId: string;
+    target: ProjectionAudience;
+    purpose: string;
+    preview: string;
+    state: "active" | "revoked" | "expired";
+    expiresAt: number | null;
+  }>[];
+  postboxItems: readonly Readonly<{
+    itemId: string;
+    state: "postbox" | "reviewed" | "rejected" | "purged";
+    sourceChannelRef: string;
+    createdAt: number;
+  }>[];
 }>;
 
 function hash(value: string): string {
@@ -119,7 +154,7 @@ function readPostboxTargetStore(params: {
   targetPrincipalId: string;
 }) {
   const db = getNodeSqliteKysely<ScopedMemoryDatabase>(params.database);
-  return executeSqliteQueryTakeFirstSync(
+  const candidates = executeSqliteQuerySync(
     params.database,
     db
       .selectFrom("memory_stores")
@@ -128,7 +163,58 @@ function readPostboxTargetStore(params: {
       .where("audience_kind", "=", "user")
       .where("audience_id", "=", params.targetPrincipalId)
       .where("lifecycle_state", "=", "active"),
+  ).rows;
+  const eligible = candidates.filter(
+    (store) =>
+      evaluateBuiltinScopedMemoryPolicy({
+        agentId: params.agentId,
+        storeId: store.store_id,
+        principalIds: [params.targetPrincipalId],
+        deliveryAudiences: [{ kind: "user", id: params.targetPrincipalId }],
+        operation: "policy-admin",
+      }).allowed,
   );
+  // A verified principal may own more than one user store. Selecting a first
+  // row would make quarantine depend on database order; ambiguous targets fail closed.
+  return eligible.length === 1 ? eligible[0] : undefined;
+}
+
+function readPostboxTargetMemoryStore(params: {
+  database: Parameters<typeof getNodeSqliteKysely<ScopedMemoryDatabase>>[0];
+  agentId: string;
+  storeId: string;
+}): BuiltinScopedMemoryStore | undefined {
+  const db = getNodeSqliteKysely<ScopedMemoryDatabase>(params.database);
+  const store = executeSqliteQueryTakeFirstSync(
+    params.database,
+    db
+      .selectFrom("memory_stores as store")
+      .innerJoin("memory_policies as policy", "policy.policy_id", "store.policy_id")
+      .select([
+        "store.store_id",
+        "store.storage_root_id",
+        "store.policy_id",
+        "store.audience_kind",
+        "policy.current_revision_id",
+        "policy.revocation_epoch",
+      ])
+      .where("store.agent_id", "=", params.agentId)
+      .where("store.store_id", "=", params.storeId)
+      .where("store.lifecycle_state", "=", "active")
+      .where("store.audience_kind", "=", "user")
+      .where("policy.lifecycle_state", "=", "active"),
+  );
+  if (!store) {
+    return undefined;
+  }
+  return Object.freeze({
+    storageRootId: store.storage_root_id,
+    storeId: store.store_id,
+    policyId: store.policy_id,
+    policyRevisionId: store.current_revision_id,
+    policyRevocationEpoch: store.revocation_epoch,
+    sourcePolicySetId: createScopedMemorySourcePolicySetId(store.current_revision_id),
+  });
 }
 
 function readSource(params: {
@@ -192,16 +278,27 @@ export function registerBuiltinMemoryProjectionTarget(params: {
   operatorPrincipalId: string;
   nowMs?: number;
 }): void {
+  registerBuiltinMemoryProjectionTargetStore({
+    agentId: params.agentId,
+    target: params.target,
+    storeId: params.store.storeId,
+    operatorPrincipalId: params.operatorPrincipalId,
+    nowMs: params.nowMs,
+  });
+}
+
+/** Register a pre-existing non-private store as the sole reviewed-copy target for its audience. */
+export function registerBuiltinMemoryProjectionTargetStore(params: {
+  agentId: string;
+  target: ProjectionAudience;
+  storeId: string;
+  operatorPrincipalId: string;
+  nowMs?: number;
+}): void {
   const target = targetAudience(params.target);
+  const storeId = normalize(params.storeId, "projection target store id");
   const operatorPrincipalId = normalize(params.operatorPrincipalId, "operator principal id");
   const nowMs = params.nowMs ?? Date.now();
-  assertStoreOperation({
-    agentId: params.agentId,
-    storeId: params.store.storeId,
-    principalId: operatorPrincipalId,
-    audience: target,
-    operation: "policy-admin",
-  });
   withScopedMemoryDatabase(params.agentId, (database) => {
     const db = getNodeSqliteKysely<ScopedMemoryDatabase>(database);
     runSqliteImmediateTransactionSync(database, () => {
@@ -210,13 +307,20 @@ export function registerBuiltinMemoryProjectionTarget(params: {
         db
           .selectFrom("memory_stores")
           .select(["store_id", "audience_kind", "audience_id"])
-          .where("store_id", "=", params.store.storeId)
+          .where("store_id", "=", storeId)
           .where("agent_id", "=", params.agentId)
           .where("lifecycle_state", "=", "active"),
       );
       if (!store || store.audience_kind !== target.kind || store.audience_id !== target.id) {
         throw new Error("memory projection target is unavailable");
       }
+      assertStoreOperation({
+        agentId: params.agentId,
+        storeId,
+        principalId: operatorPrincipalId,
+        audience: target,
+        operation: "policy-admin",
+      });
       executeSqliteQuerySync(
         database,
         db
@@ -225,13 +329,13 @@ export function registerBuiltinMemoryProjectionTarget(params: {
             agent_id: params.agentId,
             audience_kind: target.kind,
             audience_id: target.id,
-            store_id: params.store.storeId,
+            store_id: storeId,
             configured_by_principal_id: operatorPrincipalId,
             created_at: nowMs,
           })
           .onConflict((conflict) =>
             conflict.columns(["agent_id", "audience_kind", "audience_id"]).doUpdateSet({
-              store_id: params.store.storeId,
+              store_id: storeId,
               configured_by_principal_id: operatorPrincipalId,
               created_at: nowMs,
             }),
@@ -254,12 +358,17 @@ export function createBuiltinMemoryProjection(params: {
   expiry:
     | Readonly<{ kind: "expires"; expiresAt: number }>
     | Readonly<{ kind: "no-expiry"; auditReason: string }>;
+  /** Refresh-only: atomically tombstone this still-active copy while committing the replacement. */
+  replaceActiveProjectionId?: string;
   nowMs?: number;
 }): BuiltinMemoryProjection {
   const target = targetAudience(params.target);
   const sourceRevisionId = normalize(params.sourceRevisionId, "source revision id");
   const publisherPrincipalId = normalize(params.publisherPrincipalId, "publisher principal id");
   const reviewedByPrincipalId = normalize(params.reviewedByPrincipalId, "reviewer principal id");
+  const replaceActiveProjectionId = params.replaceActiveProjectionId
+    ? normalize(params.replaceActiveProjectionId, "projection id")
+    : undefined;
   const purpose = normalize(params.purpose, "projection purpose");
   const preview = normalize(params.preview, "projection preview");
   const nowMs = params.nowMs ?? Date.now();
@@ -323,6 +432,7 @@ export function createBuiltinMemoryProjection(params: {
       policyRevocationEpoch: targetStore.revocation_epoch,
       sourcePolicySetId: createScopedMemorySourcePolicySetId(targetStore.current_revision_id),
     });
+    let replacedExposureSetIds: readonly string[] | undefined;
     const copy = createBuiltinScopedMemoryResource({
       agentId: params.agentId,
       store,
@@ -334,6 +444,33 @@ export function createBuiltinMemoryProjection(params: {
       derivedSources: [sourceEvidence],
       commitAdditionalState: ({ database: transactionDatabase, revision }) => {
         const db = getNodeSqliteKysely<ScopedMemoryDatabase>(transactionDatabase);
+        if (replaceActiveProjectionId) {
+          const replaced = executeSqliteQueryTakeFirstSync(
+            transactionDatabase,
+            db
+              .selectFrom("memory_projections")
+              .selectAll()
+              .where("agent_id", "=", params.agentId)
+              .where("projection_id", "=", replaceActiveProjectionId),
+          );
+          // Recheck the current projection under the replacement transaction. If it was revoked,
+          // retargeted, or expired after planning, do not create a second readable copy.
+          if (
+            !replaced ||
+            replaced.state !== "active" ||
+            replaced.target_store_id !== targetStore.store_id ||
+            replaced.target_audience_kind !== target.kind ||
+            replaced.target_audience_id !== target.id
+          ) {
+            throw new Error("memory projection is unavailable");
+          }
+          replacedExposureSetIds = tombstoneProjectionCopy({
+            database: transactionDatabase,
+            projection: replaced,
+            state: "revoked",
+            nowMs,
+          });
+        }
         executeSqliteQuerySync(
           transactionDatabase,
           db.insertInto("memory_projections").values({
@@ -365,7 +502,117 @@ export function createBuiltinMemoryProjection(params: {
       sourceRevisionId,
       target,
       ...(expiry.kind === "expires" ? { expiresAt: expiry.expiresAt } : {}),
+      ...(replacedExposureSetIds ? { replacedExposureSetIds } : {}),
     });
+  });
+}
+
+/** Validate a proposed reviewed copy without reading its source content or mutating sharing state. */
+export function previewBuiltinMemoryProjection(params: {
+  agentId: string;
+  sourceRevisionId: string;
+  target: ProjectionAudience;
+  publisherPrincipalId: string;
+  purpose: string;
+  preview: string;
+  expiry:
+    | Readonly<{ kind: "expires"; expiresAt: number }>
+    | Readonly<{ kind: "no-expiry"; auditReason: string }>;
+  nowMs?: number;
+}): BuiltinMemoryProjectionPreview {
+  const target = targetAudience(params.target);
+  const sourceRevisionId = normalize(params.sourceRevisionId, "source revision id");
+  const publisherPrincipalId = normalize(params.publisherPrincipalId, "publisher principal id");
+  const purpose = normalize(params.purpose, "projection purpose");
+  const preview = normalize(params.preview, "projection preview");
+  const nowMs = params.nowMs ?? Date.now();
+  if (
+    (params.expiry.kind === "expires" &&
+      (!Number.isSafeInteger(params.expiry.expiresAt) || params.expiry.expiresAt <= nowMs)) ||
+    (params.expiry.kind === "no-expiry" && !params.expiry.auditReason.trim())
+  ) {
+    throw new Error("memory projection expiry is unavailable");
+  }
+  return withScopedMemoryDatabase(params.agentId, (database) => {
+    const source = readSource({ database, agentId: params.agentId, revisionId: sourceRevisionId });
+    assertStoreOperation({
+      agentId: params.agentId,
+      storeId: source.store_id,
+      principalId: publisherPrincipalId,
+      audience: { kind: source.audience_kind, id: source.audience_id },
+      operation: "project",
+    });
+    const targetStore = readTargetStore({ database, agentId: params.agentId, target });
+    if (!targetStore) {
+      throw new Error("memory projection target is unavailable");
+    }
+    assertStoreOperation({
+      agentId: params.agentId,
+      storeId: targetStore.store_id,
+      principalId: publisherPrincipalId,
+      audience: target,
+      operation: "publish",
+    });
+    return Object.freeze({
+      sourceRevisionId,
+      target,
+      purpose,
+      preview,
+      expiry: params.expiry.kind,
+    });
+  });
+}
+
+/** Return only redacted prior-exposure ids after checking publisher or target policy administration. */
+export function inspectBuiltinMemoryProjectionImpact(params: {
+  agentId: string;
+  projectionId: string;
+  operatorPrincipalId: string;
+}): BuiltinMemoryProjectionImpact {
+  const projectionId = normalize(params.projectionId, "projection id");
+  const operatorPrincipalId = normalize(params.operatorPrincipalId, "operator principal id");
+  return withScopedMemoryDatabase(params.agentId, (database) => {
+    const db = getNodeSqliteKysely<ScopedMemoryDatabase>(database);
+    const projection = executeSqliteQueryTakeFirstSync(
+      database,
+      db
+        .selectFrom("memory_projections")
+        .select([
+          "projection_id",
+          "copy_revision_id",
+          "publisher_principal_id",
+          "target_store_id",
+          "target_audience_kind",
+          "target_audience_id",
+        ])
+        .where("agent_id", "=", params.agentId)
+        .where("projection_id", "=", projectionId),
+    );
+    if (!projection) {
+      throw new Error("memory projection is unavailable");
+    }
+    const target = targetAudience({
+      kind: projection.target_audience_kind,
+      id: projection.target_audience_id,
+    });
+    if (projection.publisher_principal_id !== operatorPrincipalId) {
+      assertStoreOperation({
+        agentId: params.agentId,
+        storeId: projection.target_store_id,
+        principalId: operatorPrincipalId,
+        audience: target,
+        operation: "policy-admin",
+      });
+    }
+    const exposureSetIds = executeSqliteQuerySync(
+      database,
+      db
+        .selectFrom("memory_run_exposure_resources")
+        .select("exposure_set_id")
+        .where("resource_revision_id", "=", projection.copy_revision_id)
+        .orderBy("exposure_set_id"),
+    ).rows.map((row) => row.exposure_set_id);
+    return Object.freeze({ projectionId, exposureSetIds: Object.freeze(exposureSetIds) });
   });
 }
 
@@ -507,7 +754,7 @@ export function expireBuiltinMemoryProjections(params: {
   });
 }
 
-/** Refresh explicitly creates a new reviewed copy, then revokes the previous copy and reports its impact. */
+/** Refresh commits the new reviewed copy and old-copy tombstone under one revision transaction. */
 export function refreshBuiltinMemoryProjection(params: {
   agentId: string;
   projectionId: string;
@@ -562,15 +809,13 @@ export function refreshBuiltinMemoryProjection(params: {
     preview: params.preview,
     content: params.content,
     expiry: params.expiry,
+    replaceActiveProjectionId: projectionId,
     nowMs: params.nowMs,
   });
-  const replacedExposureSetIds = revokeBuiltinMemoryProjection({
-    agentId: params.agentId,
-    projectionId,
-    operatorPrincipalId: publisherPrincipalId,
-    nowMs: params.nowMs,
+  return Object.freeze({
+    projection,
+    replacedExposureSetIds: projection.replacedExposureSetIds ?? [],
   });
-  return Object.freeze({ projection, replacedExposureSetIds });
 }
 
 /** Postbox stays off until an authenticated owner/admin explicitly enables review-required deposits. */
@@ -621,6 +866,121 @@ export function setBuiltinMemoryPostboxMode(params: {
           }),
         ),
     );
+  });
+}
+
+/** The target quarantine is derived from the authenticated owner's principal, never RPC input. */
+export function setBuiltinMemoryPostboxModeForPrincipal(params: {
+  agentId: string;
+  principalId: string;
+  mode: "off" | "review-required";
+  nowMs?: number;
+}): void {
+  const targetStoreId = withScopedMemoryDatabase(
+    params.agentId,
+    (database) =>
+      readPostboxTargetStore({
+        database,
+        agentId: params.agentId,
+        targetPrincipalId: normalize(params.principalId, "operator principal id"),
+      })?.store_id,
+  );
+  if (!targetStoreId) {
+    throw new Error("memory postbox target is unavailable");
+  }
+  setBuiltinMemoryPostboxMode({
+    agentId: params.agentId,
+    targetStoreId,
+    operatorPrincipalId: params.principalId,
+    mode: params.mode,
+    nowMs: params.nowMs,
+  });
+}
+
+/** Redacted owner inspection: no source revision, private copy, or postbox body leaves this path. */
+export function inspectBuiltinMemorySharingStatus(params: {
+  agentId: string;
+  operatorPrincipalId: string;
+}): BuiltinMemorySharingStatus {
+  const operatorPrincipalId = normalize(params.operatorPrincipalId, "operator principal id");
+  return withScopedMemoryDatabase(params.agentId, (database) => {
+    const db = getNodeSqliteKysely<ScopedMemoryDatabase>(database);
+    const target = readPostboxTargetStore({
+      database,
+      agentId: params.agentId,
+      targetPrincipalId: operatorPrincipalId,
+    });
+    if (!target) {
+      throw new Error("memory sharing is unavailable");
+    }
+    assertStoreOperation({
+      agentId: params.agentId,
+      storeId: target.store_id,
+      principalId: operatorPrincipalId,
+      audience: { kind: "user", id: operatorPrincipalId },
+      operation: "policy-admin",
+    });
+    const settings = executeSqliteQueryTakeFirstSync(
+      database,
+      db
+        .selectFrom("memory_postbox_settings")
+        .select("mode")
+        .where("agent_id", "=", params.agentId)
+        .where("target_store_id", "=", target.store_id),
+    );
+    const projections = executeSqliteQuerySync(
+      database,
+      db
+        .selectFrom("memory_projections")
+        .select([
+          "projection_id",
+          "target_audience_kind",
+          "target_audience_id",
+          "purpose",
+          "preview",
+          "state",
+          "expires_at",
+        ])
+        .where("agent_id", "=", params.agentId)
+        .where("publisher_principal_id", "=", operatorPrincipalId)
+        .orderBy("created_at", "desc"),
+    ).rows.map((projection) =>
+      Object.freeze({
+        projectionId: projection.projection_id,
+        target: Object.freeze({
+          kind: targetAudience({
+            kind: projection.target_audience_kind,
+            id: projection.target_audience_id,
+          }).kind,
+          id: projection.target_audience_id,
+        }),
+        purpose: projection.purpose,
+        preview: projection.preview,
+        state: projection.state,
+        expiresAt: projection.expires_at,
+      }),
+    );
+    const postboxItems = executeSqliteQuerySync(
+      database,
+      db
+        .selectFrom("memory_postbox_items")
+        .select(["item_id", "state", "source_channel_ref", "created_at"])
+        .where("agent_id", "=", params.agentId)
+        .where("target_store_id", "=", target.store_id)
+        .orderBy("created_at", "desc"),
+    ).rows.map((item) =>
+      Object.freeze({
+        itemId: item.item_id,
+        state: item.state,
+        sourceChannelRef: item.source_channel_ref,
+        createdAt: item.created_at,
+      }),
+    );
+    return Object.freeze({
+      postboxMode: settings?.mode ?? "off",
+      projections: Object.freeze(projections),
+      postboxItems: Object.freeze(postboxItems),
+    });
   });
 }
 
@@ -677,7 +1037,7 @@ export function depositBuiltinMemoryPostboxFromTurnCapability(params: {
   agentId: string;
   runId: string;
   sessionKey: string;
-  sessionId?: string;
+  sessionId: string;
   turnCapability: string;
   content: string;
   nowMs?: number;
@@ -707,9 +1067,11 @@ export function depositBuiltinMemoryPostboxFromTurnCapability(params: {
     }
     const sourceHandleId = issueBuiltinMemoryPostboxSourceHandle({
       agentId: params.agentId,
-      sourceSessionId: params.sessionId ?? params.sessionKey,
+      sourceSessionId: params.sessionId,
+      // These facts are carried by the private ingress marker; never reconstruct route or sender
+      // identity from model-visible or reply-context strings.
       sourceChannelRef: source.sourceChannelRef,
-      sourceMessageRef: source.sourceMessageRef,
+      sourceMessageRef: source.sourceTurnId,
       senderEvidenceRef: source.senderEvidenceRef,
       targetStoreId,
       nowMs: params.nowMs,
@@ -834,16 +1196,259 @@ export function depositBuiltinMemoryPostbox(params: {
   });
 }
 
-/** Owner/admin review changes quarantine state only; it never promotes postbox content into recall. */
+/**
+ * Approval is the one explicit promotion boundary: it writes an immutable owner-reviewed copy,
+ * while the original channel deposit remains quarantined and immutable. Reject never promotes.
+ */
 export function reviewBuiltinMemoryPostboxItem(params: {
   agentId: string;
   itemId: string;
   operatorPrincipalId: string;
   decision: "approve" | "reject" | "purge";
+  reviewedContent?: string;
   nowMs?: number;
 }): void {
+  const operatorPrincipalId = normalize(params.operatorPrincipalId, "operator principal id");
   const nowMs = params.nowMs ?? Date.now();
+  const itemId = normalize(params.itemId, "postbox item id");
+  if (params.decision === "reject" && params.reviewedContent !== undefined) {
+    throw new Error("memory postbox review is unavailable");
+  }
+  if (params.decision === "approve") {
+    const approval = withScopedMemoryDatabase(params.agentId, (database) => {
+      const db = getNodeSqliteKysely<ScopedMemoryDatabase>(database);
+      const item = executeSqliteQueryTakeFirstSync(
+        database,
+        db
+          .selectFrom("memory_postbox_items as item")
+          .innerJoin("memory_stores as store", "store.store_id", "item.target_store_id")
+          .select([
+            "item.item_id",
+            "item.content",
+            "item.state",
+            "item.target_store_id",
+            "store.audience_kind",
+            "store.audience_id",
+          ])
+          .where("item.item_id", "=", itemId)
+          .where("item.agent_id", "=", params.agentId),
+      );
+      if (!item || item.state !== "postbox" || item.audience_kind !== "user") {
+        throw new Error("memory postbox item is unavailable");
+      }
+      assertStoreOperation({
+        agentId: params.agentId,
+        storeId: item.target_store_id,
+        principalId: operatorPrincipalId,
+        audience: { kind: "user", id: item.audience_id },
+        operation: "policy-admin",
+      });
+      const store = readPostboxTargetMemoryStore({
+        database,
+        agentId: params.agentId,
+        storeId: item.target_store_id,
+      });
+      if (!store) {
+        throw new Error("memory postbox item is unavailable");
+      }
+      const content =
+        params.reviewedContent === undefined
+          ? item.content
+          : normalize(params.reviewedContent, "reviewed postbox content");
+      if (Buffer.byteLength(content) > POSTBOX_MAX_CONTENT_BYTES) {
+        throw new Error("memory postbox review is unavailable");
+      }
+      return Object.freeze({ item, store, content });
+    });
+    const copy = createBuiltinScopedMemoryResource({
+      agentId: params.agentId,
+      store: approval.store,
+      logicalLocator: `postbox-reviewed/${approval.item.item_id}.md`,
+      content: approval.content,
+      lifecycleState: "pending",
+      actor: { kind: "human", id: operatorPrincipalId },
+      nowMs,
+    });
+    try {
+      withScopedMemoryDatabase(params.agentId, (database) => {
+        const db = getNodeSqliteKysely<ScopedMemoryDatabase>(database);
+        runSqliteImmediateTransactionSync(database, () => {
+          const item = executeSqliteQueryTakeFirstSync(
+            database,
+            db
+              .selectFrom("memory_postbox_items as item")
+              .innerJoin("memory_stores as store", "store.store_id", "item.target_store_id")
+              .select([
+                "item.item_id",
+                "item.state",
+                "item.target_store_id",
+                "store.audience_kind",
+                "store.audience_id",
+              ])
+              .where("item.item_id", "=", itemId)
+              .where("item.agent_id", "=", params.agentId),
+          );
+          if (
+            !item ||
+            item.state !== "postbox" ||
+            item.target_store_id !== approval.item.target_store_id ||
+            item.audience_kind !== "user"
+          ) {
+            throw new Error("memory postbox item is unavailable");
+          }
+          assertStoreOperation({
+            agentId: params.agentId,
+            storeId: item.target_store_id,
+            principalId: operatorPrincipalId,
+            audience: { kind: "user", id: item.audience_id },
+            operation: "policy-admin",
+          });
+          const activated = executeSqliteQuerySync(
+            database,
+            db
+              .updateTable("memory_resource_revisions")
+              .set({ lifecycle_state: "active", activated_at: nowMs })
+              .where("revision_id", "=", copy.revisionId)
+              .where("lifecycle_state", "=", "pending"),
+          );
+          if (activated.numAffectedRows !== 1n) {
+            throw new Error("memory postbox item is unavailable");
+          }
+          executeSqliteQuerySync(
+            database,
+            db.insertInto("memory_postbox_reviewed_copies").values({
+              item_id: item.item_id,
+              agent_id: params.agentId,
+              resource_id: copy.resourceId,
+              revision_id: copy.revisionId,
+              reviewed_content_hash: hash(approval.content),
+              created_at: nowMs,
+            }),
+          );
+          const reviewed = executeSqliteQuerySync(
+            database,
+            db
+              .updateTable("memory_postbox_items")
+              .set({
+                state: "reviewed",
+                reviewed_by_principal_id: operatorPrincipalId,
+                reviewed_at: nowMs,
+              })
+              .where("item_id", "=", item.item_id)
+              .where("state", "=", "postbox"),
+          );
+          if (reviewed.numAffectedRows !== 1n) {
+            throw new Error("memory postbox item is unavailable");
+          }
+        });
+      });
+    } catch (error) {
+      setBuiltinScopedMemoryRevisionLifecycle({
+        agentId: params.agentId,
+        revisionId: copy.revisionId,
+        lifecycleState: "tombstoned",
+        nowMs,
+      });
+      throw error;
+    }
+    return;
+  }
   withScopedMemoryDatabase(params.agentId, (database) => {
+    const db = getNodeSqliteKysely<ScopedMemoryDatabase>(database);
+    runSqliteImmediateTransactionSync(database, () => {
+      const item = executeSqliteQueryTakeFirstSync(
+        database,
+        db
+          .selectFrom("memory_postbox_items as item")
+          .innerJoin("memory_stores as store", "store.store_id", "item.target_store_id")
+          .select([
+            "item.item_id",
+            "item.state",
+            "item.target_store_id",
+            "store.audience_kind",
+            "store.audience_id",
+          ])
+          .where("item.item_id", "=", itemId)
+          .where("item.agent_id", "=", params.agentId),
+      );
+      if (!item || item.audience_kind !== "user") {
+        throw new Error("memory postbox item is unavailable");
+      }
+      assertStoreOperation({
+        agentId: params.agentId,
+        storeId: item.target_store_id,
+        principalId: operatorPrincipalId,
+        audience: { kind: item.audience_kind, id: item.audience_id },
+        operation: "policy-admin",
+      });
+      if (params.decision === "purge") {
+        const approvedCopy = executeSqliteQueryTakeFirstSync(
+          database,
+          db
+            .selectFrom("memory_postbox_reviewed_copies")
+            .select("revision_id")
+            .where("item_id", "=", item.item_id)
+            .where("agent_id", "=", params.agentId),
+        );
+        if (approvedCopy) {
+          executeSqliteQuerySync(
+            database,
+            db
+              .updateTable("memory_resource_revisions")
+              .set({ lifecycle_state: "tombstoned", retired_at: nowMs })
+              .where("revision_id", "=", approvedCopy.revision_id)
+              .where("lifecycle_state", "=", "active"),
+          );
+          executeSqliteQuerySync(
+            database,
+            db
+              .deleteFrom("memory_scoped_chunks")
+              .where("revision_id", "=", approvedCopy.revision_id),
+          );
+        }
+        const purged = executeSqliteQuerySync(
+          database,
+          db
+            .updateTable("memory_postbox_items")
+            // A purge is one irreversible transition: never tombstone its reviewed copy unless
+            // this provenance row is redacted in the same transaction.
+            .set({ state: "purged", content: "", content_hash: "", purged_at: nowMs })
+            .where("item_id", "=", item.item_id)
+            .where("state", "in", ["postbox", "reviewed", "rejected"]),
+        );
+        if (purged.numAffectedRows !== 1n) {
+          throw new Error("memory postbox item is unavailable");
+        }
+        return;
+      }
+      const updated = executeSqliteQuerySync(
+        database,
+        db
+          .updateTable("memory_postbox_items")
+          .set({
+            state: "rejected",
+            reviewed_by_principal_id: operatorPrincipalId,
+            reviewed_at: nowMs,
+          })
+          .where("item_id", "=", item.item_id)
+          .where("state", "in", ["postbox"]),
+      );
+      if (updated.numAffectedRows !== 1n) {
+        throw new Error("memory postbox item is unavailable");
+      }
+    });
+  });
+}
+
+/** Only the authorized target owner/admin can read one pending quarantine body for review. */
+export function inspectBuiltinMemoryPostboxItem(params: {
+  agentId: string;
+  itemId: string;
+  operatorPrincipalId: string;
+}): BuiltinMemoryPostboxInspection {
+  const itemId = normalize(params.itemId, "postbox item id");
+  const operatorPrincipalId = normalize(params.operatorPrincipalId, "operator principal id");
+  return withScopedMemoryDatabase(params.agentId, (database) => {
     const db = getNodeSqliteKysely<ScopedMemoryDatabase>(database);
     const item = executeSqliteQueryTakeFirstSync(
       database,
@@ -852,42 +1457,32 @@ export function reviewBuiltinMemoryPostboxItem(params: {
         .innerJoin("memory_stores as store", "store.store_id", "item.target_store_id")
         .select([
           "item.item_id",
+          "item.content",
+          "item.source_channel_ref",
+          "item.created_at",
           "item.state",
           "item.target_store_id",
           "store.audience_kind",
           "store.audience_id",
         ])
-        .where("item.item_id", "=", params.itemId)
+        .where("item.item_id", "=", itemId)
         .where("item.agent_id", "=", params.agentId),
     );
-    if (!item || item.audience_kind !== "user") {
+    if (!item || item.state !== "postbox" || item.audience_kind !== "user") {
       throw new Error("memory postbox item is unavailable");
     }
     assertStoreOperation({
       agentId: params.agentId,
       storeId: item.target_store_id,
-      principalId: normalize(params.operatorPrincipalId, "operator principal id"),
-      audience: { kind: item.audience_kind, id: item.audience_id },
+      principalId: operatorPrincipalId,
+      audience: { kind: "user", id: item.audience_id },
       operation: "policy-admin",
     });
-    const state =
-      params.decision === "approve"
-        ? "reviewed"
-        : params.decision === "reject"
-          ? "rejected"
-          : "purged";
-    executeSqliteQuerySync(
-      database,
-      db
-        .updateTable("memory_postbox_items")
-        .set({
-          state,
-          reviewed_by_principal_id: normalize(params.operatorPrincipalId, "operator principal id"),
-          reviewed_at: nowMs,
-          ...(state === "purged" ? { purged_at: nowMs } : {}),
-        })
-        .where("item_id", "=", item.item_id)
-        .where("state", "=", "postbox"),
-    );
+    return Object.freeze({
+      itemId: item.item_id,
+      content: item.content,
+      sourceChannelRef: item.source_channel_ref,
+      createdAt: item.created_at,
+    });
   });
 }

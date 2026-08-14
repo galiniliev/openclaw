@@ -57,6 +57,7 @@ function createProps(overrides: Partial<MemoryViewProps> = {}): MemoryViewProps 
     dreams: html`<div class="test-dreams"></div>`,
     editor: html`<div class="test-editor"></div>`,
     dreamingSettings: html`<div class="test-dreaming-settings"></div>`,
+    sharing: html`<div class="test-sharing"></div>`,
     agentId: "main",
     agents: [
       { value: "main", label: "Main" },

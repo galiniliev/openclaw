@@ -23,6 +23,7 @@ import type { ContextVisibilityMode } from "../../config/types.base.js";
 import type { GroupToolPolicyConfig } from "../../config/types.tools.js";
 import type { PluginHookChannelContext } from "../../plugins/hook-channel-context.types.js";
 import { shouldIncludeSupplementalContext } from "../../security/context-visibility.js";
+import type { InputProvenance } from "../../sessions/input-provenance.js";
 import type { InboundImplicitMentionKind } from "../mention-gating.js";
 import type { ChannelIngressCommandAccess } from "../message-access/runtime-types.js";
 import type {
@@ -98,6 +99,8 @@ export type BuildChannelInboundEventContextParams = {
   supplemental?: ChannelInboundSupplementalFacts;
   channelContext?: PluginHookChannelContext;
   contextVisibility?: ContextVisibilityMode;
+  /** Trusted source classification for synthetic channel events; native channel messages default external. */
+  inputProvenance?: InputProvenance;
   finalize?: FinalizeInboundContextFn;
   finalizeOptions?: FinalizeInboundContextOptions;
   extra?: Record<string, unknown>;
@@ -548,10 +551,14 @@ export function buildChannelInboundEventContext(
     OriginatingChannel: params.channel,
     OriginatingTo: params.reply.originatingTo ?? params.reply.to,
     ThreadParentId: params.reply.threadParentId ?? params.conversation.parentId,
-    // This builder is the post-admission boundary for channel events. Preserve
-    // that fact so interceptors cannot bypass sender, route, or pairing gates.
+    // This builder is the post-admission boundary for channel events. Native messages are
+    // external-user input; synthetic owners must classify themselves before dispatch.
     InboundAccessAuthorized: true,
     ...params.extra,
+    InputProvenance: params.inputProvenance ?? {
+      kind: "external_user" as const,
+      sourceChannel: params.channel,
+    },
   };
   const finalizeParams = {
     finalize: params.finalize,

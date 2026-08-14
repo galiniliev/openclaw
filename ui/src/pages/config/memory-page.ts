@@ -47,6 +47,7 @@ import {
   type MemoryEngineSelection,
   type MemoryTab,
 } from "./memory-schema.ts";
+import { renderMemorySharingHost } from "./memory-sharing-host.ts";
 import {
   buildMemoryAddonRows,
   buildMemoryEngineOptions,
@@ -697,6 +698,10 @@ class MemorySettingsPage extends OpenClawLightDomElement {
       editor:
         activeTab === "settings" ? this.buildEditor(memorySchemaKeysForTab("settings")) : html``,
       dreamingSettings: activeTab === "settings" ? this.renderDreamingControls() : html``,
+      sharing:
+        activeTab === "settings"
+          ? renderMemorySharingHost(this.context.gateway.snapshot, agentId)
+          : html``,
     });
   }
 }

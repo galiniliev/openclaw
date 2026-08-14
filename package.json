@@ -107,6 +107,7 @@
     "!dist/plugin-sdk/markdown-table-runtime.d.ts",
     "!dist/plugin-sdk/media-generation-runtime.d.ts",
     "!dist/plugin-sdk/memory-postbox-runtime.d.ts",
+    "!dist/plugin-sdk/memory-sharing-control-runtime.d.ts",
     "!dist/plugin-sdk/memory-core-host-embedding-registry.d.ts",
     "!dist/plugin-sdk/memory-core-host-engine-curated.d.ts",
     "!dist/plugin-sdk/memory-core-host-engine-embeddings.d.ts",
@@ -1239,6 +1240,9 @@
     },
     "./plugin-sdk/memory-postbox-runtime": {
       "default": "./dist/plugin-sdk/memory-postbox-runtime.js"
+    },
+    "./plugin-sdk/memory-sharing-control-runtime": {
+      "default": "./dist/plugin-sdk/memory-sharing-control-runtime.js"
     },
     "./plugin-sdk/memory-core-host-embedding-registry": {
       "default": "./dist/plugin-sdk/memory-core-host-embedding-registry.js"

@@ -1562,7 +1562,9 @@ CREATE TABLE IF NOT EXISTS memory_postbox_source_handles (
   used_at INTEGER,
   created_at INTEGER NOT NULL,
   FOREIGN KEY (target_store_id) REFERENCES memory_stores(store_id) ON DELETE RESTRICT,
-  UNIQUE (agent_id, source_session_id, source_message_ref, target_store_id)
+  -- source_message_ref is the opaque route-scoped source-turn id, so a reset session
+  -- cannot deposit the same inbound message a second time.
+  UNIQUE (agent_id, source_message_ref, target_store_id)
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_memory_postbox_source_handles_live
@@ -1600,10 +1602,42 @@ CREATE TABLE IF NOT EXISTS memory_postbox_items (
 CREATE INDEX IF NOT EXISTS idx_memory_postbox_items_review
   ON memory_postbox_items(agent_id, target_store_id, state, created_at);
 
+CREATE TABLE IF NOT EXISTS memory_postbox_reviewed_copies (
+  item_id TEXT NOT NULL PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  reviewed_content_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (item_id) REFERENCES memory_postbox_items(item_id) ON DELETE CASCADE,
+  FOREIGN KEY (resource_id) REFERENCES memory_resources(resource_id) ON DELETE RESTRICT,
+  FOREIGN KEY (revision_id) REFERENCES memory_resource_revisions(revision_id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_memory_postbox_reviewed_copies_revision
+  ON memory_postbox_reviewed_copies(agent_id, revision_id);
+
 CREATE TRIGGER IF NOT EXISTS memory_postbox_items_immutable_provenance
 BEFORE UPDATE OF item_id, agent_id, source_handle_id, target_store_id, source_channel_ref,
   sender_evidence_ref, content, content_hash, created_at
 ON memory_postbox_items
+WHEN
+  NEW.item_id <> OLD.item_id OR
+  NEW.agent_id <> OLD.agent_id OR
+  NEW.source_handle_id <> OLD.source_handle_id OR
+  NEW.target_store_id <> OLD.target_store_id OR
+  NEW.source_channel_ref <> OLD.source_channel_ref OR
+  NEW.sender_evidence_ref <> OLD.sender_evidence_ref OR
+  NEW.created_at <> OLD.created_at OR
+  (
+    (NEW.content <> OLD.content OR NEW.content_hash <> OLD.content_hash) AND
+    NOT (
+      OLD.state IN ('postbox', 'reviewed', 'rejected') AND
+      NEW.state = 'purged' AND
+      NEW.content = '' AND
+      NEW.content_hash = ''
+    )
+  )
 BEGIN
   SELECT RAISE(ABORT, 'memory postbox provenance is immutable');
 END;

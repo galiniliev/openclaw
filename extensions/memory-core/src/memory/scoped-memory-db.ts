@@ -332,6 +332,16 @@ export type MemoryPostboxItemRow = {
   purged_at: number | null;
 };
 
+/** Immutable link between a reviewed postbox item and the revision it admitted. */
+export type MemoryPostboxReviewedCopyRow = {
+  item_id: string;
+  agent_id: string;
+  resource_id: string;
+  revision_id: string;
+  reviewed_content_hash: string;
+  created_at: number;
+};
+
 /** Local, idempotent audit delivery queue. Memory content is deliberately absent. */
 export type MemoryAuditOutboxRow = {
   event_id: string;
@@ -409,6 +419,7 @@ export type ScopedMemoryDatabase = {
   memory_postbox_source_handles: MemoryPostboxSourceHandleRow;
   memory_postbox_rate_limits: MemoryPostboxRateLimitRow;
   memory_postbox_items: MemoryPostboxItemRow;
+  memory_postbox_reviewed_copies: MemoryPostboxReviewedCopyRow;
   memory_audit_outbox: MemoryAuditOutboxRow;
   memory_migrations: MemoryMigrationRow;
 };

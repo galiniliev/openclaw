@@ -64,6 +64,7 @@ import {
 } from "../../../../src/state/openclaw-state-db.js";
 import { ensureProfileForEmail } from "../../../../src/state/user-profiles.js";
 import { MEMORY_CORE_AUTHORIZATION_CAPABILITIES } from "../authorization.js";
+import { createMemoryRuntime } from "../runtime-provider.js";
 import { resolveScopedMemoryArtifactBase, withScopedMemoryDatabase } from "./scoped-memory-db.js";
 import { builtinScopedMemoryConformanceAdapter } from "./scoped-memory-policy.js";
 import {
@@ -71,12 +72,16 @@ import {
   readBuiltinScopedMemoryRevisionSnapshot,
   setBuiltinScopedMemoryRevisionLifecycle,
 } from "./scoped-memory-resources.js";
-import { registerBuiltinMemoryProjectionTarget } from "./scoped-memory-sharing.js";
 import {
   builtinScopedMemoryAuthorizedRuntime,
   builtinScopedMemoryVirtualView,
   resetBuiltinScopedMemoryAuthorizedRuntimeForTest,
 } from "./scoped-memory-runtime.js";
+import {
+  createBuiltinMemoryProjection,
+  inspectBuiltinMemoryProjectionImpact,
+  registerBuiltinMemoryProjectionTarget,
+} from "./scoped-memory-sharing.js";
 import { createBuiltinScopedMemoryStore } from "./scoped-memory-store.js";
 
 const dispatchReplyFromConfig = vi.hoisted(() => vi.fn());
@@ -129,7 +134,7 @@ describe("builtin scoped authorized runtime", () => {
         authorization: MEMORY_CORE_AUTHORIZATION_CAPABILITIES,
         authorizationConformance: builtinScopedMemoryConformanceAdapter,
         virtualView: builtinScopedMemoryVirtualView,
-        runtime: builtinScopedMemoryAuthorizedRuntime,
+        runtime: { ...createMemoryRuntime(), ...builtinScopedMemoryAuthorizedRuntime },
       },
     });
     setActivePluginRegistry(registry);
@@ -140,6 +145,7 @@ describe("builtin scoped authorized runtime", () => {
     sessionId: string;
     chatType: "direct" | "group" | "channel";
     primaryConversationId?: string;
+    primaryConversationTarget?: string;
   }) {
     const database = openOpenClawAgentDatabase({ agentId: "main" });
     database.db
@@ -157,8 +163,8 @@ describe("builtin scoped authorized runtime", () => {
         .run(
           params.primaryConversationId,
           params.chatType,
-          `${params.chatType}-peer`,
-          `${params.chatType}-target`,
+          `${params.primaryConversationId}-peer`,
+          params.primaryConversationTarget ?? `${params.primaryConversationId}-target`,
         );
     }
     database.db
@@ -228,12 +234,14 @@ describe("builtin scoped authorized runtime", () => {
     sessionKey: string;
     sessionId: string;
     conversationId: string;
+    conversationTarget?: string;
   }) {
     createSession({
       sessionKey: params.sessionKey,
       sessionId: params.sessionId,
       chatType: "group",
       primaryConversationId: params.conversationId,
+      primaryConversationTarget: params.conversationTarget,
     });
     const admitted = admitInboundMemorySessionContext({
       context: {
@@ -665,6 +673,28 @@ describe("builtin scoped authorized runtime", () => {
         },
       }),
     ).rejects.toThrow("projection is unavailable");
+    await expect(
+      builtinScopedMemoryAuthorizedRuntime.writeAuthorized({
+        context: projectContext,
+        plan: projectPlan,
+        mutation: {
+          version: 1,
+          kind: "project",
+          mutationId: "project-private-target",
+          idempotencyKey: "project-private-target-request",
+          content: "PRIVATE_TARGET_MUST_NOT_CREATE_A_COPY",
+          contentType: "markdown",
+          sourceHandles: [sourceHandle],
+          target: {
+            // A JS caller can bypass the SDK union. The runtime remains the final boundary.
+            audience: { kind: "user", id: "principal-other" },
+            purpose: "forged private share",
+            preview: "forged private share",
+            expiry: { kind: "no-expiry", auditReason: "forged" },
+          },
+        } as never,
+      }),
+    ).rejects.toThrow("memory projection target is unavailable");
   });
 
   it("authorizes compaction sources with derive rather than downgrading them to read", async () => {
@@ -1729,16 +1759,19 @@ describe("builtin scoped authorized runtime", () => {
       expect(activeDispatcher.sendFinalReply({ text: read.results[0]!.snippet })).toBe(true);
       return { queuedFinal: true, counts: { tool: 0, block: 0, final: 1 } };
     });
-    await dispatchInboundMessage({
-      ctx: buildTestCtx({
+    const directReplyContext = Object.assign(
+      buildTestCtx({
         AgentId: "main",
-        SessionId: session.sessionId,
         SessionKey: session.sessionKey,
         Surface: "telegram",
         OriginatingChannel: "telegram",
         OriginatingTo: "alice",
         AccountId: "default",
       }),
+      { SessionId: session.sessionId },
+    );
+    await dispatchInboundMessage({
+      ctx: directReplyContext,
       cfg: {} as never,
       dispatcher,
       replyOptions: { runId },
@@ -1757,16 +1790,19 @@ describe("builtin scoped authorized runtime", () => {
       ctx.OriginatingTo = "mallory";
       return { queuedFinal: true, counts: { tool: 0, block: 0, final: 1 } };
     });
-    await dispatchInboundMessage({
-      ctx: buildTestCtx({
+    const reboundReplyContext = Object.assign(
+      buildTestCtx({
         AgentId: "main",
-        SessionId: session.sessionId,
         SessionKey: session.sessionKey,
         Surface: "telegram",
         OriginatingChannel: "telegram",
         OriginatingTo: "alice",
         AccountId: "default",
       }),
+      { SessionId: session.sessionId },
+    );
+    await dispatchInboundMessage({
+      ctx: reboundReplyContext,
       cfg: {} as never,
       dispatcher: reboundDispatcher,
       replyOptions: { runId },
@@ -1782,6 +1818,7 @@ describe("builtin scoped authorized runtime", () => {
     const conversationPrincipalId = createConversationSession({
       ...session,
       conversationId: "telegram-group-1",
+      conversationTarget: "group-target",
     });
     const channelStore = createBuiltinScopedMemoryStore({
       agentId: "main",
@@ -1802,23 +1839,35 @@ describe("builtin scoped authorized runtime", () => {
       authorityKind: "conversation",
       authorityOwnerId: conversationPrincipalId,
       defaultCapabilities: ["retrieve", "read"],
+      policyEntries: [
+        {
+          kind: "publish",
+          effect: "allow",
+          principalId: "projection-publisher",
+          operation: "publish",
+          grantorPrincipalId: "projection-publisher",
+          reason: "named projection publisher",
+        },
+        {
+          effect: "allow",
+          principalId: "projection-publisher",
+          operation: "policy-admin",
+          grantorPrincipalId: "projection-publisher",
+          reason: "named projection administrator",
+        },
+      ],
       actor: { kind: "unattributed" },
       reason: "explicitly addressed projection placement",
-    });
-    const alicePrincipal = ensureMemoryOperationalPrincipal({
-      kind: "service",
-      stableRef: "alice-role-shaped-sender",
-      options: { agentId: "main" },
     });
     const alicePrivate = createBuiltinScopedMemoryStore({
       agentId: "main",
       scopeKind: "user",
       audienceKind: "user",
-      audienceId: alicePrincipal.principalId,
+      audienceId: "projection-publisher",
       authorityKind: "user",
-      authorityOwnerId: alicePrincipal.principalId,
-      defaultCapabilities: ["retrieve", "read"],
-      actor: { kind: "human", id: alicePrincipal.principalId },
+      authorityOwnerId: "projection-publisher",
+      defaultCapabilities: ["retrieve", "read", "project"],
+      actor: { kind: "human", id: "projection-publisher" },
       reason: "private placement",
     });
     const ownerRole = createBuiltinScopedMemoryStore({
@@ -1835,16 +1884,10 @@ describe("builtin scoped authorized runtime", () => {
     for (const [store, logicalLocator, content, actor] of [
       [channelStore, "channel.md", "GROUP_CHANNEL_ONLY", { kind: "unattributed" }],
       [
-        projectionStore,
-        "projection.md",
-        "GROUP_EXPLICITLY_ADDRESSED_PROJECTION",
-        { kind: "unattributed" },
-      ],
-      [
         alicePrivate,
         "alice-private.md",
         "GROUP_DENIED_ALICE_PRIVATE_PATH_TITLE_SNIPPET_SCORE_COUNT_CITATION_CURSOR",
-        { kind: "human", id: alicePrincipal.principalId },
+        { kind: "human", id: "projection-publisher" },
       ],
       [ownerRole, "owner-role.md", "GROUP_DENIED_OWNER_ROLE_FROM_LATEST_ACTOR", { kind: "system" }],
     ] as const) {
@@ -1856,6 +1899,30 @@ describe("builtin scoped authorized runtime", () => {
         actor,
       });
     }
+    const privateRevision = createBuiltinScopedMemoryResource({
+      agentId: "main",
+      store: alicePrivate,
+      logicalLocator: "projection-private.md",
+      content: "GROUP_DENIED_PRIVATE_PROJECTION_SOURCE",
+      actor: { kind: "human", id: "projection-publisher" },
+    });
+    registerBuiltinMemoryProjectionTarget({
+      agentId: "main",
+      target: { kind: "conversation", id: conversationPrincipalId },
+      store: projectionStore,
+      operatorPrincipalId: "projection-publisher",
+    });
+    const projection = createBuiltinMemoryProjection({
+      agentId: "main",
+      sourceRevisionId: privateRevision.revisionId,
+      target: { kind: "conversation", id: conversationPrincipalId },
+      publisherPrincipalId: "projection-publisher",
+      reviewedByPrincipalId: "projection-publisher",
+      purpose: "approved group reference",
+      preview: "approved group reference",
+      content: "GROUP_EXPLICITLY_ADDRESSED_PROJECTION",
+      expiry: { kind: "no-expiry", auditReason: "fixture owner approval" },
+    });
     markCutOver();
     installBuiltinSelectedRuntime();
 
@@ -1878,12 +1945,203 @@ describe("builtin scoped authorized runtime", () => {
     expect(serialized).not.toContain(
       "GROUP_DENIED_ALICE_PRIVATE_PATH_TITLE_SNIPPET_SCORE_COUNT_CITATION_CURSOR",
     );
+    expect(serialized).not.toContain("GROUP_DENIED_PRIVATE_PROJECTION_SOURCE");
     expect(serialized).not.toContain("GROUP_DENIED_OWNER_ROLE_FROM_LATEST_ACTOR");
+
+    const unrelatedSession = {
+      sessionKey: "agent:main:telegram:group:unrelated",
+      sessionId: "unrelated-group-session",
+    };
+    createConversationSession({
+      ...unrelatedSession,
+      conversationId: "telegram-group-unrelated",
+      conversationTarget: "unrelated-group-target",
+    });
+    const unrelatedHost = createAuthorizedMemoryReadHost({
+      agentId: "main",
+      ...unrelatedSession,
+      deliveryContext: { channel: "telegram", accountId: "default", to: "unrelated-group-target" },
+    });
+    if (!unrelatedHost) {
+      throw new Error("fixture failed to build an unrelated group memory host");
+    }
+    const unrelatedResult = await unrelatedHost.search({
+      query: "GROUP_EXPLICITLY_ADDRESSED_PROJECTION",
+      limit: 10,
+    });
+    expect(JSON.stringify(unrelatedResult)).not.toContain("GROUP_EXPLICITLY_ADDRESSED_PROJECTION");
+
+    const writeHost = createAuthorizedMemoryWriteHost({
+      agentId: "main",
+      ...session,
+      deliveryContext: { channel: "telegram", accountId: "default", to: "group-target" },
+    });
+    if (!writeHost) {
+      throw new Error("fixture failed to build a group memory write host");
+    }
+    await expect(writeHost.remember({ content: "GROUP_FORGED_TARGET_MUTATION" })).resolves.toEqual({
+      disabled: true,
+      unavailable: true,
+      error: "memory unavailable",
+    });
+    expect(
+      readBuiltinScopedMemoryRevisionSnapshot({
+        agentId: "main",
+        storeIds: [alicePrivate.storeId],
+        revisionId: privateRevision.revisionId,
+      })?.content,
+    ).toBe("GROUP_DENIED_PRIVATE_PROJECTION_SOURCE");
+    expect(
+      readBuiltinScopedMemoryRevisionSnapshot({
+        agentId: "main",
+        storeIds: [projectionStore.storeId],
+        revisionId: projection.copyRevisionId,
+      })?.content,
+    ).toBe("GROUP_EXPLICITLY_ADDRESSED_PROJECTION");
+  });
+
+  it("durably expires a due projection before a fresh authorized group read", async () => {
+    vi.useFakeTimers();
+    try {
+      const nowMs = Date.now();
+      const session = {
+        sessionKey: "agent:main:telegram:group:expiring-projection",
+        sessionId: "expiring-projection-session",
+      };
+      const conversationPrincipalId = createConversationSession({
+        ...session,
+        conversationId: "telegram-group-expiring-projection",
+        conversationTarget: "group-target",
+      });
+      const target = createBuiltinScopedMemoryStore({
+        agentId: "main",
+        scopeKind: "conversation",
+        audienceKind: "conversation",
+        audienceId: conversationPrincipalId,
+        authorityKind: "conversation",
+        authorityOwnerId: conversationPrincipalId,
+        defaultCapabilities: ["retrieve", "read"],
+        policyEntries: [
+          {
+            kind: "publish",
+            effect: "allow",
+            principalId: "projection-publisher",
+            operation: "publish",
+            grantorPrincipalId: "projection-publisher",
+            reason: "named projection publisher",
+          },
+          {
+            effect: "allow",
+            principalId: "projection-publisher",
+            operation: "policy-admin",
+            grantorPrincipalId: "projection-publisher",
+            reason: "projection administrator",
+          },
+        ],
+        actor: { kind: "unattributed" },
+        reason: "expiring projection target",
+      });
+      const source = createBuiltinScopedMemoryStore({
+        agentId: "main",
+        scopeKind: "user",
+        audienceKind: "user",
+        audienceId: "projection-publisher",
+        authorityKind: "user",
+        authorityOwnerId: "projection-publisher",
+        defaultCapabilities: ["retrieve", "read", "project"],
+        actor: { kind: "human", id: "projection-publisher" },
+        reason: "private projection source",
+      });
+      const sourceRevision = createBuiltinScopedMemoryResource({
+        agentId: "main",
+        store: source,
+        logicalLocator: "private-expiring-projection.md",
+        content: "PRIVATE_EXPIRING_PROJECTION_SOURCE",
+        actor: { kind: "human", id: "projection-publisher" },
+        nowMs,
+      });
+      registerBuiltinMemoryProjectionTarget({
+        agentId: "main",
+        target: { kind: "conversation", id: conversationPrincipalId },
+        store: target,
+        operatorPrincipalId: "projection-publisher",
+        nowMs,
+      });
+      const projection = createBuiltinMemoryProjection({
+        agentId: "main",
+        sourceRevisionId: sourceRevision.revisionId,
+        target: { kind: "conversation", id: conversationPrincipalId },
+        publisherPrincipalId: "projection-publisher",
+        reviewedByPrincipalId: "projection-publisher",
+        purpose: "short-lived group reference",
+        preview: "short-lived group reference",
+        content: "EXPIRED_PROJECTION_MUST_NOT_READ",
+        expiry: { kind: "expires", expiresAt: nowMs + 1 },
+        nowMs,
+      });
+      const database = openOpenClawAgentDatabase({ agentId: "main" });
+      database.db
+        .prepare(
+          `INSERT INTO memory_policy_sets
+            (policy_set_id, agent_id, memory_policy_revision, member_policy_set_ids_json, created_at)
+           VALUES ('runtime-expiry-policy-set', 'main', 'policy-revision', '[]', ?)`,
+        )
+        .run(nowMs);
+      database.db
+        .prepare(
+          `INSERT INTO memory_run_exposures
+            (exposure_set_id, agent_id, run_id, context_fingerprint, plan_id, revision_number,
+             previous_exposure_set_id, source_policy_set_ids_json, effective_source_policy_set_id,
+             exposed_resource_revisions_json, exposure_receipt_ids_json, egress_receipt_ids_json,
+             delivery_audiences_json, delivery_revision, egress_registry_revision, created_at)
+           VALUES ('runtime-expiry-exposure', 'main', 'run-expiry', 'context', 'plan', 1, NULL,
+             '[]', 'runtime-expiry-policy-set', '[]', '[]', '[]', '[]', 'delivery', 'egress', ?)`,
+        )
+        .run(nowMs);
+      database.db
+        .prepare(
+          `INSERT INTO memory_run_exposure_resources
+            (exposure_set_id, resource_revision_id, policy_set_id, created_at)
+           VALUES ('runtime-expiry-exposure', ?, 'runtime-expiry-policy-set', ?)`,
+        )
+        .run(projection.copyRevisionId, nowMs);
+      markCutOver();
+      installBuiltinSelectedRuntime();
+
+      vi.advanceTimersByTime(1);
+      const host = createAuthorizedMemoryReadHost({
+        agentId: "main",
+        ...session,
+        deliveryContext: { channel: "telegram", accountId: "default", to: "group-target" },
+      });
+      if (!host) {
+        throw new Error("fixture failed to build an expiring group memory host");
+      }
+      const result = await host.search({ query: "EXPIRED_PROJECTION_MUST_NOT_READ", limit: 10 });
+      expect(JSON.stringify(result)).not.toContain("EXPIRED_PROJECTION_MUST_NOT_READ");
+      expect(
+        database.db
+          .prepare("SELECT state FROM memory_projections WHERE projection_id = ?")
+          .get(projection.projectionId),
+      ).toEqual({ state: "expired" });
+      expect(
+        inspectBuiltinMemoryProjectionImpact({
+          agentId: "main",
+          projectionId: projection.projectionId,
+          operatorPrincipalId: "projection-publisher",
+        }),
+      ).toEqual({
+        projectionId: projection.projectionId,
+        exposureSetIds: ["runtime-expiry-exposure"],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("selects the subject store itself and commits remember/delete through one durable lifecycle", async () => {
     const principalId = "writer";
-    createBuiltinScopedMemoryStore({
+    const subjectStore = createBuiltinScopedMemoryStore({
       agentId: "main",
       scopeKind: "user",
       audienceKind: "user",
@@ -1893,6 +2151,28 @@ describe("builtin scoped authorized runtime", () => {
       defaultCapabilities: ["append", "replace", "delete"],
       actor: { kind: "human", id: principalId },
       reason: "authorized write fixture",
+    });
+    const roleStore = createBuiltinScopedMemoryStore({
+      agentId: "main",
+      scopeKind: "role",
+      audienceKind: "role",
+      audienceId: "writers",
+      authorityKind: "role",
+      authorityOwnerId: "writers",
+      defaultCapabilities: ["append"],
+      actor: { kind: "system" },
+      reason: "ordinary capture must not select a role store",
+    });
+    const agentSharedStore = createBuiltinScopedMemoryStore({
+      agentId: "main",
+      scopeKind: "agent-shared",
+      audienceKind: "agent-shared",
+      audienceId: "main",
+      authorityKind: "agent-shared",
+      authorityOwnerId: "main",
+      defaultCapabilities: ["append"],
+      actor: { kind: "system" },
+      reason: "ordinary capture must not select an agent-shared store",
     });
     const appendContext = {
       ...createContext(principalId),
@@ -1941,6 +2221,16 @@ describe("builtin scoped authorized runtime", () => {
           .prepare("SELECT text FROM memory_scoped_chunks WHERE revision_id = ?")
           .all(handle.resourceRevision),
       ).toEqual([{ text: "durable write sentinel" }]);
+      expect(
+        database
+          .prepare("SELECT count(*) AS count FROM memory_resources WHERE store_id IN (?, ?)")
+          .get(roleStore.storeId, agentSharedStore.storeId),
+      ).toEqual({ count: 0 });
+      expect(
+        database
+          .prepare("SELECT count(*) AS count FROM memory_resources WHERE store_id = ?")
+          .get(subjectStore.storeId),
+      ).toEqual({ count: 1 });
     });
     const audit = openOpenClawStateDatabase({ env: { OPENCLAW_STATE_DIR: stateDir } });
     expect(
@@ -2121,7 +2411,8 @@ describe("builtin scoped authorized runtime", () => {
         contentType: "markdown",
       },
     });
-    if (!written.resourceHandle) {
+    const writtenHandle = written.resourceHandle;
+    if (!writtenHandle) {
       throw new Error("fixture expected an authorized write handle");
     }
     const unlinkError = Object.assign(new Error("unlink denied"), { code: "EACCES" });
@@ -2143,7 +2434,7 @@ describe("builtin scoped authorized runtime", () => {
             kind: "delete",
             mutationId: "tombstone-delete",
             idempotencyKey: "tombstone-delete-request",
-            target: written.resourceHandle,
+            target: writtenHandle,
           },
         }),
       ).resolves.toMatchObject({ status: "committed" });
@@ -2154,12 +2445,12 @@ describe("builtin scoped authorized runtime", () => {
       expect(
         database
           .prepare("SELECT lifecycle_state FROM memory_resource_revisions WHERE revision_id = ?")
-          .get(written.resourceHandle.resourceRevision),
+          .get(writtenHandle.resourceRevision),
       ).toEqual({ lifecycle_state: "tombstoned" });
       expect(
         database
           .prepare("SELECT * FROM memory_scoped_chunks WHERE revision_id = ?")
-          .all(written.resourceHandle.resourceRevision),
+          .all(writtenHandle.resourceRevision),
       ).toEqual([]);
       expect(
         database

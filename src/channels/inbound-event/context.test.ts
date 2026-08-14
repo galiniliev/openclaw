@@ -108,6 +108,18 @@ describe("resolveInboundSupplementalSenderAllowed", () => {
 });
 
 describe("buildChannelInboundEventContext", () => {
+  it("records native channel messages as external-user ingress and preserves synthetic provenance", () => {
+    expect(buildTestInboundEventContext().InputProvenance).toEqual({
+      kind: "external_user",
+      sourceChannel: "test",
+    });
+    expect(
+      buildTestInboundEventContext({
+        inputProvenance: { kind: "internal_system", sourceTool: "channel_feedback_reflection" },
+      }).InputProvenance,
+    ).toEqual({ kind: "internal_system", sourceTool: "channel_feedback_reflection" });
+  });
+
   it("maps normalized inbound facts into a finalized message context", async () => {
     const ctx = buildChannelInboundEventContext({
       channel: "test",

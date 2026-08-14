@@ -15,16 +15,15 @@ import {
 import { resolveGroupSessionKey } from "../../config/sessions.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
+  mintMemoryPostboxTurnCapability,
+  revokeMemoryPostboxTurnCapability,
+} from "../../gateway/memory-postbox-turn-capability.js";
+import {
   isTrustedMessageActionTurnIngress,
   mintMessageActionTurnCapability,
   resolveMessageActionTurnCapabilityLifetime,
   revokeMessageActionTurnCapability,
 } from "../../gateway/message-action-turn-capability.js";
-import {
-  mintMemoryPostboxTurnCapability,
-  resolveMemoryPostboxTargetPrincipal,
-  revokeMemoryPostboxTurnCapability,
-} from "../../gateway/memory-postbox-turn-capability.js";
 import { logVerbose } from "../../globals.js";
 import {
   isMarkdownCapableMessageChannel,
@@ -176,34 +175,19 @@ export async function runEmbeddedFallbackCandidate(params: {
           ...resolveMessageActionTurnCapabilityLifetime(runBaseParams.timeoutMs),
         })
       : undefined;
-  const memoryPostboxTargetPrincipal =
-    embeddedContext.agentId && messageActionCapabilitySessionKey && embeddedContext.sessionId
-      ? resolveMemoryPostboxTargetPrincipal({
-          agentId: embeddedContext.agentId,
-          sessionKey: messageActionCapabilitySessionKey,
-          sessionId: embeddedContext.sessionId,
-        })
-      : undefined;
   const memoryPostboxTurnCapability =
     isTrustedMessageActionTurnIngress(turn.sessionCtx.Provider) &&
     !turn.isHeartbeat &&
     embeddedContext.agentId &&
     messageActionCapabilitySessionKey &&
     embeddedContext.sessionId &&
-    embeddedContext.messageProvider &&
-    embeddedContext.currentChannelId &&
-    embeddedContext.currentMessageId !== undefined &&
-    senderContext.senderId &&
-    memoryPostboxTargetPrincipal
+    embeddedContext.currentSourceTurnId
       ? mintMemoryPostboxTurnCapability({
           agentId: embeddedContext.agentId,
           runId: params.runId,
           sessionKey: messageActionCapabilitySessionKey,
           sessionId: embeddedContext.sessionId,
-          sourceChannelRef: `${embeddedContext.messageProvider}:${embeddedContext.currentChannelId}`,
-          sourceMessageRef: String(embeddedContext.currentMessageId),
-          senderEvidenceRef: `${embeddedContext.messageProvider}:${senderContext.senderId}`,
-          targetPrincipalId: memoryPostboxTargetPrincipal,
+          sourceContext: turn.sessionCtx,
           ...resolveMessageActionTurnCapabilityLifetime(runBaseParams.timeoutMs),
         })
       : undefined;

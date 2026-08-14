@@ -148,6 +148,7 @@ export async function runChannelFeedbackReflection(params: {
     },
     reply: { to: target, originatingTo: target },
     message: { body, bodyForAgent: prompt, rawBody: prompt, commandBody: prompt },
+    inputProvenance: { kind: "internal_system", sourceTool: "channel_feedback_reflection" },
     access: { commands: { authorized: false } },
   });
   const responses: string[] = [];

@@ -2016,8 +2016,12 @@ describe("resolvePluginTools optional tools", () => {
   });
 
   it("delivers a host binding only to its selected plugin factory", () => {
-    const memoryFactory = vi.fn(() => makeTool("memory_postbox_deposit"));
-    const otherFactory = vi.fn(() => makeTool("other_tool"));
+    const memoryFactory = vi.fn<MockRegistryToolEntry["factory"]>((_context) =>
+      makeTool("memory_postbox_deposit"),
+    );
+    const otherFactory = vi.fn<MockRegistryToolEntry["factory"]>((_context) =>
+      makeTool("other_tool"),
+    );
     setRegistry([
       {
         pluginId: "memory-core",

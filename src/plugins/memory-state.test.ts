@@ -1,7 +1,9 @@
 // Covers plugin-backed memory state registration and reset behavior.
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const isMemoryIsolationCutoverAgentMock = vi.hoisted(() => vi.fn<(agentId: string) => boolean>(() => false));
+const isMemoryIsolationCutoverAgentMock = vi.hoisted(() =>
+  vi.fn<(agentId: string) => boolean>(() => false),
+);
 
 vi.mock("./memory-cutover.js", () => ({
   isMemoryIsolationCutoverAgent: isMemoryIsolationCutoverAgentMock,

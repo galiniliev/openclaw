@@ -4,12 +4,14 @@ import path from "node:path";
 import { closeOpenClawAgentDatabasesForTest } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  admitMemoryPostboxTurnIngress,
   mintMemoryPostboxTurnCapability,
   resetMemoryPostboxTurnCapabilitiesForTest,
 } from "../../../../src/gateway/memory-postbox-turn-capability.js";
 import { openOpenClawAgentDatabase } from "../../../../src/state/openclaw-agent-db.js";
 import {
   createBuiltinScopedMemoryResource,
+  createBuiltinScopedMemoryResourceRevision,
   readBuiltinScopedMemoryRevisionSnapshot,
 } from "./scoped-memory-resources.js";
 import {
@@ -17,13 +19,24 @@ import {
   depositBuiltinMemoryPostbox,
   depositBuiltinMemoryPostboxFromTurnCapability,
   expireBuiltinMemoryProjections,
+  inspectBuiltinMemoryProjectionImpact,
+  inspectBuiltinMemorySharingStatus,
+  inspectBuiltinMemoryPostboxItem,
+  previewBuiltinMemoryProjection,
   refreshBuiltinMemoryProjection,
   registerBuiltinMemoryProjectionTarget,
   revokeBuiltinMemoryProjection,
   reviewBuiltinMemoryPostboxItem,
   setBuiltinMemoryPostboxMode,
+  setBuiltinMemoryPostboxModeForPrincipal,
 } from "./scoped-memory-sharing.js";
 import { createBuiltinScopedMemoryStore } from "./scoped-memory-store.js";
+
+const createCurrentMemorySessionContext = vi.hoisted(() => vi.fn());
+
+vi.mock("../../../../src/state/memory-session-subject.js", () => ({
+  createCurrentMemorySessionContext,
+}));
 
 describe("builtin scoped memory sharing", () => {
   let stateDir = "";
@@ -34,11 +47,20 @@ describe("builtin scoped memory sharing", () => {
   beforeEach(() => {
     stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-memory-sharing-"));
     vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
+    createCurrentMemorySessionContext.mockReturnValue({
+      kind: "current",
+      context: {
+        subject: { kind: "user" },
+        principalId: alice,
+        fingerprint: "alice-current-session",
+      },
+    });
   });
 
   afterEach(() => {
     closeOpenClawAgentDatabasesForTest();
     resetMemoryPostboxTurnCapabilitiesForTest();
+    createCurrentMemorySessionContext.mockReset();
     vi.unstubAllEnvs();
     fs.rmSync(stateDir, { recursive: true, force: true });
   });
@@ -153,16 +175,29 @@ describe("builtin scoped memory sharing", () => {
   function depositFromVerifiedTurn(params: { content: string; sourceMessageRef: string }) {
     const runId = `run-${params.sourceMessageRef}`;
     const sessionKey = "agent:main:direct:alice";
+    const sourceContext = {};
+    const sourceTurnId = `channel-user:v1:${params.sourceMessageRef}`;
+    admitMemoryPostboxTurnIngress({
+      context: sourceContext,
+      agentId,
+      sessionKey,
+      sessionId: "session-alice",
+      provider: "telegram",
+      inputProvenance: { kind: "external_user" },
+      sourceTurnId,
+      sourceChannelRef: "telegram:account:direct-alice",
+      senderEvidenceRef: "telegram:sender-alice",
+    });
     const token = mintMemoryPostboxTurnCapability({
       agentId,
       runId,
       sessionKey,
       sessionId: "session-alice",
-      sourceChannelRef: "telegram:alice",
-      sourceMessageRef: params.sourceMessageRef,
-      senderEvidenceRef: "telegram:sender-alice",
-      targetPrincipalId: alice,
+      sourceContext,
     });
+    if (!token) {
+      throw new Error("expected verified turn capability");
+    }
     return depositBuiltinMemoryPostboxFromTurnCapability({
       agentId,
       runId,
@@ -220,13 +255,24 @@ describe("builtin scoped memory sharing", () => {
     expect(
       database.db
         .prepare(
-          "SELECT source_revision_id, reviewed_by_principal_id, expiry_kind FROM memory_projections",
+          `SELECT target_audience_kind, target_audience_id, source_revision_id, publisher_principal_id,
+                  reviewed_by_principal_id, purpose, preview, expiry_kind, expiry_audit_reason,
+                  revocation_behavior, state
+             FROM memory_projections`,
         )
         .get(),
     ).toEqual({
+      target_audience_kind: "conversation",
+      target_audience_id: channel,
       source_revision_id: privateRevision.revisionId,
+      publisher_principal_id: alice,
       reviewed_by_principal_id: alice,
+      purpose: "share approved contact detail",
+      preview: "one approved detail",
       expiry_kind: "no-expiry",
+      expiry_audit_reason: "owner approved durable reference",
+      revocation_behavior: "tombstone-copy",
+      state: "active",
     });
     expect(
       database.db
@@ -235,6 +281,59 @@ describe("builtin scoped memory sharing", () => {
         )
         .get(projection.copyRevisionId),
     ).toEqual({ parent_id: privateRevision.revisionId });
+  });
+
+  it("previews the authorized projection metadata without reading or changing the private source", () => {
+    const source = sourceStore();
+    const target = projectionStore();
+    const privateRevision = createBuiltinScopedMemoryResource({
+      agentId,
+      store: source,
+      logicalLocator: "private.md",
+      content: "private source that must not appear in preview",
+      actor: { kind: "human", id: alice },
+    });
+    registerBuiltinMemoryProjectionTarget({
+      agentId,
+      target: { kind: "conversation", id: channel },
+      store: target,
+      operatorPrincipalId: alice,
+    });
+
+    expect(
+      previewBuiltinMemoryProjection({
+        agentId,
+        sourceRevisionId: privateRevision.revisionId,
+        target: { kind: "conversation", id: channel },
+        publisherPrincipalId: alice,
+        purpose: "share approved contact detail",
+        preview: "one approved detail",
+        expiry: { kind: "no-expiry", auditReason: "owner approved durable reference" },
+      }),
+    ).toEqual({
+      sourceRevisionId: privateRevision.revisionId,
+      target: { kind: "conversation", id: channel },
+      purpose: "share approved contact detail",
+      preview: "one approved detail",
+      expiry: "no-expiry",
+    });
+    expect(
+      openOpenClawAgentDatabase({ agentId })
+        .db.prepare("SELECT COUNT(*) AS count FROM memory_projections")
+        .get(),
+    ).toEqual({ count: 0 });
+  });
+
+  it("refuses raw private-user projection targets before a helper can create a direct grant", () => {
+    const privateTarget = privateTargetStore();
+    expect(() =>
+      registerBuiltinMemoryProjectionTarget({
+        agentId,
+        target: { kind: "user", id: "principal-bob" } as never,
+        store: privateTarget,
+        operatorPrincipalId: alice,
+      }),
+    ).toThrow("memory projection target is unavailable");
   });
 
   it("requires independent source project and target publisher authority", () => {
@@ -396,6 +495,24 @@ describe("builtin scoped memory sharing", () => {
       }),
     ).toEqual(["projection-impact-exposure"]);
     expect(
+      inspectBuiltinMemoryProjectionImpact({
+        agentId,
+        projectionId: projection.projectionId,
+        operatorPrincipalId: alice,
+      }),
+    ).toEqual({
+      projectionId: projection.projectionId,
+      exposureSetIds: ["projection-impact-exposure"],
+    });
+    expect(
+      readBuiltinScopedMemoryRevisionSnapshot({
+        agentId,
+        storeIds: [target.storeId],
+        revisionId: projection.copyRevisionId,
+      }),
+    ).toBeUndefined();
+    closeOpenClawAgentDatabasesForTest();
+    expect(
       readBuiltinScopedMemoryRevisionSnapshot({
         agentId,
         storeIds: [target.storeId],
@@ -515,6 +632,30 @@ describe("builtin scoped memory sharing", () => {
       expiry: { kind: "no-expiry", auditReason: "initial review" },
     });
 
+    const editedSource = createBuiltinScopedMemoryResourceRevision({
+      agentId,
+      resourceId: firstSource.resourceId,
+      content: "private v1 edited",
+      actor: { kind: "human", id: alice },
+    });
+    expect(
+      readBuiltinScopedMemoryRevisionSnapshot({
+        agentId,
+        storeIds: [target.storeId],
+        revisionId: original.copyRevisionId,
+      }),
+    ).toBeUndefined();
+    expect(
+      openOpenClawAgentDatabase({ agentId })
+        .db.prepare("SELECT count(*) AS count FROM memory_projections")
+        .get(),
+    ).toEqual({ count: 1 });
+    expect(
+      openOpenClawAgentDatabase({ agentId })
+        .db.prepare("SELECT count(*) AS count FROM memory_projections WHERE source_revision_id = ?")
+        .get(editedSource.revisionId),
+    ).toEqual({ count: 0 });
+
     const refreshed = refreshBuiltinMemoryProjection({
       agentId,
       projectionId: original.projectionId,
@@ -546,7 +687,98 @@ describe("builtin scoped memory sharing", () => {
     ).toBe("approved v2");
   });
 
-  it("keeps postbox off by default and makes review-required deposits one-way", () => {
+  it("rolls back a replacement when the old projection no longer has the same audience", () => {
+    const source = sourceStore();
+    const target = projectionStore();
+    const otherChannel = "conversation-other";
+    const otherTarget = createBuiltinScopedMemoryStore({
+      agentId,
+      scopeKind: "conversation",
+      audienceKind: "conversation",
+      audienceId: otherChannel,
+      authorityKind: "conversation",
+      authorityOwnerId: otherChannel,
+      defaultCapabilities: ["read"],
+      policyEntries: [
+        {
+          kind: "publish",
+          effect: "allow",
+          principalId: alice,
+          operation: "publish",
+          grantorPrincipalId: alice,
+          reason: "named publisher",
+        },
+        {
+          effect: "allow",
+          principalId: alice,
+          operation: "policy-admin",
+          grantorPrincipalId: alice,
+          reason: "projection administrator",
+        },
+      ],
+      actor: { kind: "human", id: alice },
+      reason: "different projection target",
+    });
+    const sourceRevision = createBuiltinScopedMemoryResource({
+      agentId,
+      store: source,
+      logicalLocator: "private.md",
+      content: "private source",
+      actor: { kind: "human", id: alice },
+    });
+    registerBuiltinMemoryProjectionTarget({
+      agentId,
+      target: { kind: "conversation", id: channel },
+      store: target,
+      operatorPrincipalId: alice,
+    });
+    registerBuiltinMemoryProjectionTarget({
+      agentId,
+      target: { kind: "conversation", id: otherChannel },
+      store: otherTarget,
+      operatorPrincipalId: alice,
+    });
+    const original = createBuiltinMemoryProjection({
+      agentId,
+      sourceRevisionId: sourceRevision.revisionId,
+      target: { kind: "conversation", id: channel },
+      publisherPrincipalId: alice,
+      reviewedByPrincipalId: alice,
+      purpose: "share",
+      preview: "original",
+      content: "original approved copy",
+      expiry: { kind: "no-expiry", auditReason: "approved" },
+    });
+
+    expect(() =>
+      createBuiltinMemoryProjection({
+        agentId,
+        sourceRevisionId: sourceRevision.revisionId,
+        target: { kind: "conversation", id: otherChannel },
+        publisherPrincipalId: alice,
+        reviewedByPrincipalId: alice,
+        purpose: "share",
+        preview: "replacement",
+        content: "must never become readable",
+        expiry: { kind: "no-expiry", auditReason: "approved" },
+        replaceActiveProjectionId: original.projectionId,
+      }),
+    ).toThrow("memory projection is unavailable");
+    expect(
+      openOpenClawAgentDatabase({ agentId })
+        .db.prepare("SELECT COUNT(*) AS count FROM memory_projections")
+        .get(),
+    ).toEqual({ count: 1 });
+    expect(
+      readBuiltinScopedMemoryRevisionSnapshot({
+        agentId,
+        storeIds: [target.storeId],
+        revisionId: original.copyRevisionId,
+      })?.content,
+    ).toBe("original approved copy");
+  });
+
+  it("keeps postbox off by default and promotes only an explicitly approved reviewed copy", () => {
     const target = privateTargetStore();
     expect(
       depositFromVerifiedTurn({ content: "observation", sourceMessageRef: "message-ref-off" }),
@@ -558,6 +790,7 @@ describe("builtin scoped memory sharing", () => {
       operatorPrincipalId: alice,
       mode: "review-required",
     });
+    closeOpenClawAgentDatabasesForTest();
     expect(
       depositBuiltinMemoryPostbox({ agentId, sourceHandleId: "forged", content: "observation" }),
     ).toEqual({ accepted: false });
@@ -579,12 +812,260 @@ describe("builtin scoped memory sharing", () => {
       itemId: item.item_id,
       operatorPrincipalId: alice,
       decision: "approve",
+      reviewedContent: "owner-edited review copy",
     });
     expect(database.db.prepare("SELECT state FROM memory_postbox_items").get()).toEqual({
       state: "reviewed",
     });
-    expect(database.db.prepare("SELECT COUNT(*) AS count FROM memory_resources").get()).toEqual({
-      count: 0,
+    const reviewedCopy = database.db
+      .prepare(`SELECT revision_id FROM memory_postbox_reviewed_copies WHERE item_id = ?`)
+      .get(item.item_id) as { revision_id: string };
+    expect(
+      readBuiltinScopedMemoryRevisionSnapshot({
+        agentId,
+        storeIds: [target.storeId],
+        revisionId: reviewedCopy.revision_id,
+      })?.content,
+    ).toBe("owner-edited review copy");
+    closeOpenClawAgentDatabasesForTest();
+    expect(() =>
+      inspectBuiltinMemoryPostboxItem({
+        agentId,
+        itemId: item.item_id,
+        operatorPrincipalId: alice,
+      }),
+    ).toThrow("memory postbox item is unavailable");
+    expect(
+      openOpenClawAgentDatabase({ agentId })
+        .db.prepare("SELECT state FROM memory_postbox_items WHERE item_id = ?")
+        .get(item.item_id),
+    ).toEqual({ state: "reviewed" });
+    reviewBuiltinMemoryPostboxItem({
+      agentId,
+      itemId: item.item_id,
+      operatorPrincipalId: alice,
+      decision: "purge",
+    });
+    expect(
+      readBuiltinScopedMemoryRevisionSnapshot({
+        agentId,
+        storeIds: [target.storeId],
+        revisionId: reviewedCopy.revision_id,
+      }),
+    ).toBeUndefined();
+    expect(
+      openOpenClawAgentDatabase({ agentId })
+        .db.prepare("SELECT item_id FROM memory_postbox_reviewed_copies WHERE item_id = ?")
+        .get(item.item_id),
+    ).toEqual({ item_id: item.item_id });
+    expect(
+      openOpenClawAgentDatabase({ agentId })
+        .db.prepare("SELECT state, content, purged_at FROM memory_postbox_items WHERE item_id = ?")
+        .get(item.item_id),
+    ).toMatchObject({ state: "purged", content: "", purged_at: expect.any(Number) });
+  });
+
+  it("rolls back a purge when the durable postbox redaction cannot commit", () => {
+    const target = privateTargetStore();
+    setBuiltinMemoryPostboxMode({
+      agentId,
+      targetStoreId: target.storeId,
+      operatorPrincipalId: alice,
+      mode: "review-required",
+    });
+    expect(
+      depositFromVerifiedTurn({
+        content: "review body",
+        sourceMessageRef: "message-purge-rollback",
+      }),
+    ).toEqual({ accepted: true });
+
+    const database = openOpenClawAgentDatabase({ agentId });
+    const item = database.db.prepare("SELECT item_id FROM memory_postbox_items").get() as {
+      item_id: string;
+    };
+    reviewBuiltinMemoryPostboxItem({
+      agentId,
+      itemId: item.item_id,
+      operatorPrincipalId: alice,
+      decision: "approve",
+      reviewedContent: "owner-reviewed body",
+    });
+    const reviewedCopy = database.db
+      .prepare("SELECT revision_id FROM memory_postbox_reviewed_copies WHERE item_id = ?")
+      .get(item.item_id) as { revision_id: string };
+    database.db.exec(`
+      CREATE TRIGGER fail_postbox_purge_redaction
+      BEFORE UPDATE OF state ON memory_postbox_items
+      WHEN NEW.state = 'purged'
+      BEGIN
+        SELECT RAISE(ABORT, 'forced postbox purge redaction failure');
+      END;
+    `);
+
+    try {
+      expect(() =>
+        reviewBuiltinMemoryPostboxItem({
+          agentId,
+          itemId: item.item_id,
+          operatorPrincipalId: alice,
+          decision: "purge",
+        }),
+      ).toThrow("forced postbox purge redaction failure");
+    } finally {
+      database.db.exec("DROP TRIGGER fail_postbox_purge_redaction");
+    }
+
+    expect(
+      readBuiltinScopedMemoryRevisionSnapshot({
+        agentId,
+        storeIds: [target.storeId],
+        revisionId: reviewedCopy.revision_id,
+      })?.content,
+    ).toBe("owner-reviewed body");
+    expect(
+      database.db
+        .prepare(
+          "SELECT state, content, content_hash, purged_at FROM memory_postbox_items WHERE item_id = ?",
+        )
+        .get(item.item_id),
+    ).toMatchObject({
+      state: "reviewed",
+      content: "review body",
+      content_hash: expect.any(String),
+      purged_at: null,
+    });
+    expect(
+      database.db
+        .prepare(
+          "SELECT lifecycle_state, retired_at FROM memory_resource_revisions WHERE revision_id = ?",
+        )
+        .get(reviewedCopy.revision_id),
+    ).toEqual({ lifecycle_state: "active", retired_at: null });
+    expect(
+      database.db
+        .prepare("SELECT revision_id FROM memory_postbox_reviewed_copies WHERE item_id = ?")
+        .get(item.item_id),
+    ).toEqual({ revision_id: reviewedCopy.revision_id });
+    const remainingChunks = database.db
+      .prepare("SELECT COUNT(*) AS count FROM memory_scoped_chunks WHERE revision_id = ?")
+      .get(reviewedCopy.revision_id) as { count: number };
+    expect(remainingChunks.count).toBeGreaterThan(0);
+  });
+
+  it("denies forged, stale, cross-run, cross-session, and replayed postbox capabilities", () => {
+    const target = privateTargetStore();
+    setBuiltinMemoryPostboxMode({
+      agentId,
+      targetStoreId: target.storeId,
+      operatorPrincipalId: alice,
+      mode: "review-required",
+    });
+    const sourceContext = {};
+    const sourceTurnId = "channel-user:v1:message-capability";
+    admitMemoryPostboxTurnIngress({
+      context: sourceContext,
+      agentId,
+      sessionKey: "agent:main:direct:alice",
+      sessionId: "session-alice",
+      provider: "telegram",
+      inputProvenance: { kind: "external_user" },
+      sourceTurnId,
+      sourceChannelRef: "telegram:account:direct-alice",
+      senderEvidenceRef: "telegram:sender-alice",
+    });
+    const token = mintMemoryPostboxTurnCapability({
+      agentId,
+      runId: "run-capability",
+      sessionKey: "agent:main:direct:alice",
+      sessionId: "session-alice",
+      sourceContext,
+    });
+    if (!token) {
+      throw new Error("expected verified turn capability");
+    }
+    const deposit = (
+      overrides: Partial<{
+        runId: string;
+        sessionKey: string;
+        sessionId: string;
+        turnCapability: string;
+      }> = {},
+    ) =>
+      depositBuiltinMemoryPostboxFromTurnCapability({
+        agentId,
+        runId: "run-capability",
+        sessionKey: "agent:main:direct:alice",
+        sessionId: "session-alice",
+        turnCapability: token,
+        content: "one-way observation",
+        ...overrides,
+      });
+
+    expect(deposit({ turnCapability: "forged" })).toEqual({ accepted: false });
+    expect(deposit({ runId: "other-run" })).toEqual({ accepted: false });
+    expect(deposit({ sessionId: "other-session" })).toEqual({ accepted: false });
+    createCurrentMemorySessionContext.mockReturnValueOnce({
+      kind: "current",
+      context: {
+        subject: { kind: "user" },
+        principalId: alice,
+        fingerprint: "rebound-session",
+      },
+    });
+    expect(deposit()).toEqual({ accepted: false });
+    expect(deposit()).toEqual({ accepted: true });
+    expect(deposit()).toEqual({ accepted: false });
+  });
+
+  it("derives the owner quarantine internally and returns only redacted sharing status", () => {
+    const source = sourceStore();
+    const target = projectionStore();
+    privateTargetStore();
+    const sourceRevision = createBuiltinScopedMemoryResource({
+      agentId,
+      store: source,
+      logicalLocator: "private.md",
+      content: "private source",
+      actor: { kind: "human", id: alice },
+    });
+    registerBuiltinMemoryProjectionTarget({
+      agentId,
+      target: { kind: "conversation", id: channel },
+      store: target,
+      operatorPrincipalId: alice,
+    });
+    const projection = createBuiltinMemoryProjection({
+      agentId,
+      sourceRevisionId: sourceRevision.revisionId,
+      target: { kind: "conversation", id: channel },
+      publisherPrincipalId: alice,
+      reviewedByPrincipalId: alice,
+      purpose: "share approved detail",
+      preview: "approved detail",
+      content: "reviewed copy only",
+      expiry: { kind: "no-expiry", auditReason: "durable approved reference" },
+    });
+
+    setBuiltinMemoryPostboxModeForPrincipal({
+      agentId,
+      principalId: alice,
+      mode: "review-required",
+    });
+
+    expect(inspectBuiltinMemorySharingStatus({ agentId, operatorPrincipalId: alice })).toEqual({
+      postboxMode: "review-required",
+      projections: [
+        {
+          projectionId: projection.projectionId,
+          target: { kind: "conversation", id: channel },
+          purpose: "share approved detail",
+          preview: "approved detail",
+          state: "active",
+          expiresAt: null,
+        },
+      ],
+      postboxItems: [],
     });
   });
 
@@ -615,5 +1096,78 @@ describe("builtin scoped memory sharing", () => {
         count: 12,
       },
     );
+    closeOpenClawAgentDatabasesForTest();
+    expect(
+      depositFromVerifiedTurn({
+        content: "observation-after-reopen",
+        sourceMessageRef: "message-after-reopen",
+      }),
+    ).toEqual({ accepted: false });
+    expect(
+      openOpenClawAgentDatabase({ agentId })
+        .db.prepare("SELECT deposit_count FROM memory_postbox_rate_limits")
+        .get(),
+    ).toEqual({ deposit_count: 12 });
+  });
+
+  it("limits postbox body inspection to the target owner and persists a purged audit record", () => {
+    const target = privateTargetStore();
+    setBuiltinMemoryPostboxMode({
+      agentId,
+      targetStoreId: target.storeId,
+      operatorPrincipalId: alice,
+      mode: "review-required",
+    });
+    expect(
+      depositFromVerifiedTurn({
+        content: "private review body",
+        sourceMessageRef: "message-inspect",
+      }),
+    ).toEqual({ accepted: true });
+    const database = openOpenClawAgentDatabase({ agentId });
+    const item = database.db.prepare("SELECT item_id FROM memory_postbox_items").get() as {
+      item_id: string;
+    };
+
+    expect(
+      inspectBuiltinMemoryPostboxItem({
+        agentId,
+        itemId: item.item_id,
+        operatorPrincipalId: alice,
+      }),
+    ).toMatchObject({
+      itemId: item.item_id,
+      content: "private review body",
+      sourceChannelRef: "telegram:account:direct-alice",
+    });
+    expect(() =>
+      inspectBuiltinMemoryPostboxItem({
+        agentId,
+        itemId: item.item_id,
+        operatorPrincipalId: "principal-mallory",
+      }),
+    ).toThrow("memory sharing authorization is unavailable");
+
+    reviewBuiltinMemoryPostboxItem({
+      agentId,
+      itemId: item.item_id,
+      operatorPrincipalId: alice,
+      decision: "purge",
+      nowMs: 1_700_000_000_000,
+    });
+    expect(
+      database.db.prepare("SELECT state, content, purged_at FROM memory_postbox_items").get(),
+    ).toEqual({
+      state: "purged",
+      content: "",
+      purged_at: 1_700_000_000_000,
+    });
+    expect(() =>
+      inspectBuiltinMemoryPostboxItem({
+        agentId,
+        itemId: item.item_id,
+        operatorPrincipalId: alice,
+      }),
+    ).toThrow("memory postbox item is unavailable");
   });
 });

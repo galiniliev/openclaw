@@ -180,6 +180,8 @@ type MemoryViewProps = {
   editor: TemplateResult;
   /** Global dreaming controls, sharing runtimeConfig with the editor above. */
   dreamingSettings: TemplateResult;
+  /** Authenticated, profile-derived projection and postbox controls. */
+  sharing: TemplateResult;
   agentId: string | null;
   agents: readonly AgentSelectOption[];
   onAgentChange: (agentId: string | null) => void;
@@ -378,7 +380,7 @@ function renderSettingsTab(props: MemoryViewProps) {
     </div>
     ${props.editor}
     <div class="settings-page">
-      ${props.dreamingSettings}
+      ${props.dreamingSettings} ${props.sharing}
       ${renderSettingsSection(
         { title: t("memoryPage.import.title"), description: t("memoryPage.import.description") },
         renderSettingsRow({

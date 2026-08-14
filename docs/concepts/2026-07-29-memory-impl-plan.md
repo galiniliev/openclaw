@@ -1654,26 +1654,26 @@ Do not add direct user-to-user private-store grant APIs.
 
 Phase 3 is complete only when all of the following are demonstrated:
 
-- [ ] Agent-shared and role writes require explicit publisher authority
+- [x] Agent-shared and role writes require explicit publisher authority
       independent of read authority.
-- [ ] Every projection names one audience, purpose, source revision, publisher,
+- [x] Every projection names one audience, purpose, source revision, publisher,
       expiry/no-expiry decision, and revocation behavior.
-- [ ] A projection exposes only its reviewed copy; the target cannot read or
+- [x] A projection exposes only its reviewed copy; the target cannot read or
       mutate the private source.
-- [ ] Projection refresh creates a new reviewed revision, while expiry or
+- [x] Projection refresh creates a new reviewed revision, while expiry or
       revocation removes all new reads and enumerates affected prior exposures.
-- [ ] Postbox remains `off` by default and supports review-required mode before
+- [x] Postbox remains `off` by default and supports review-required mode before
       any labeled automatic-use mode.
-- [ ] A source session can deposit only through a current server-issued source
+- [x] A source session can deposit only through a current server-issued source
       message handle and receives no list/read/exact-get capability over the
       result.
-- [ ] Postbox rate limits, provenance, review, purge, and no-auto-promotion
+- [x] Postbox rate limits, provenance, review, purge, and no-auto-promotion
       behavior are persisted and tested.
-- [ ] Owner/admin CLI, API, and UI operations authenticate and use authorized
+- [x] Owner/admin CLI, API, and UI operations authenticate and use authorized
       plans.
-- [ ] No tool, SDK, API, CLI, UI, plugin, or raw argument can create direct
+- [x] No tool, SDK, API, CLI, UI, plugin, or raw argument can create direct
       private user-to-user store access.
-- [ ] Projection, publisher, postbox, expiry, revocation, forged-handle, and
+- [x] Projection, publisher, postbox, expiry, revocation, forged-handle, and
       prior-exposure tests pass.
 
 ### Phase 3 rollback

@@ -203,7 +203,9 @@ describe("SQLite transcript archive worker", () => {
     const legacyArchive = materializeSqliteTranscriptArchiveInWorker(
       planArchiveWorker(database, path.dirname(storePath), legacySessionId),
     );
-    expect(readArchiveLines(legacyArchive.archivedPath)).toEqual([JSON.stringify(legacyEvent)]);
+    const legacyArchivePath = legacyArchive.archivedPath;
+    expect(legacyArchivePath).not.toBeNull();
+    expect(readArchiveLines(legacyArchivePath ?? undefined)).toEqual([JSON.stringify(legacyEvent)]);
 
     const sessionId = "enforced-policy-archive-session";
     const sessionKey = "agent:main:enforced-policy-archive";
@@ -215,7 +217,9 @@ describe("SQLite transcript archive worker", () => {
     const archive = materializeSqliteTranscriptArchiveInWorker(
       planArchiveWorker(database, path.dirname(storePath), sessionId),
     );
-    const lines = readArchiveLines(archive.archivedPath);
+    const archivePath = archive.archivedPath;
+    expect(archivePath).not.toBeNull();
+    const lines = readArchiveLines(archivePath ?? undefined);
     expect(lines).toHaveLength(2);
     expect(lines[0]).toBe(JSON.stringify(event));
     expect(JSON.parse(lines[1] ?? "")).toMatchObject({
@@ -272,7 +276,7 @@ describe("SQLite transcript archive worker", () => {
       { agentId: database.agentId, path: database.path },
     );
     expect(readAuthorizedTranscriptEventSeqs(database.db, sessionId)).toEqual(new Set([eventSeq]));
-    expect(readArchiveLines(archive.archivedPath)).toHaveLength(2);
+    expect(readArchiveLines(archivePath ?? undefined)).toHaveLength(2);
   });
 
   it("restores a confirmed archive only through its original immutable session subject", async () => {

@@ -19,6 +19,7 @@ import type {
   MemorySearchCommandOptions,
 } from "./cli.types.js";
 import { configureMemoryCoreDreamingState } from "./dreaming-state.js";
+import { registerMemorySharingCli } from "./memory-sharing-cli.js";
 import type { MemoryCoreRuntimeHost } from "./memory/runtime-host.js";
 import type { MemorySessionBackfillOptions } from "./session-backfill.js";
 import {
@@ -321,6 +322,8 @@ export function registerMemoryCli(program: Command, hostOptions?: MemoryCoreRunt
     .action(async (opts: MemorySessionBackfillOptions) => {
       await runMemorySessionBackfill(opts, hostOptions);
     });
+
+  registerMemorySharingCli(memory);
 
   memory.action(() => {
     memory.outputHelp();

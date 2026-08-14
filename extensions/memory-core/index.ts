@@ -30,6 +30,7 @@ import {
   builtinScopedMemoryAuthorizedRuntime,
   builtinScopedMemoryVirtualView,
 } from "./src/memory/scoped-memory-runtime.js";
+import { registerScopedMemorySharingGatewayMethods } from "./src/memory/scoped-memory-sharing-gateway.js";
 import { buildPromptSection } from "./src/prompt-section.js";
 import { registerSessionBackfillGatewayMethods } from "./src/session-backfill-gateway.js";
 
@@ -224,7 +225,14 @@ function createMemoryPostboxDepositTool(ctx: OpenClawPluginToolContext): AnyAgen
   const runId = ctx.toolBindings?.[MEMORY_POSTBOX_RUN_ID_BINDING];
   const agentId = ctx.agentId?.trim();
   const sessionKey = ctx.sessionKey?.trim();
-  if (typeof turnCapability !== "string" || typeof runId !== "string" || !agentId || !sessionKey) {
+  const sessionId = ctx.sessionId?.trim();
+  if (
+    typeof turnCapability !== "string" ||
+    typeof runId !== "string" ||
+    !agentId ||
+    !sessionKey ||
+    !sessionId
+  ) {
     return null;
   }
   return {
@@ -248,7 +256,7 @@ function createMemoryPostboxDepositTool(ctx: OpenClawPluginToolContext): AnyAgen
           agentId,
           runId,
           sessionKey,
-          ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
+          sessionId,
           turnCapability,
           content,
         }),
@@ -399,6 +407,7 @@ export default definePluginEntry({
     const memoryRuntime = createLazyMemoryRuntime(host);
     registerShortTermPromotionDreaming(api);
     registerSessionBackfillGatewayMethods(api);
+    registerScopedMemorySharingGatewayMethods(api);
     api.registerMemoryCapability({
       authorization: MEMORY_CORE_AUTHORIZATION_CAPABILITIES,
       // Phase 1B publishes the tested policy adapter; Phase 1C owns admitting it for reads.

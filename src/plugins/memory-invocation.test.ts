@@ -4,10 +4,12 @@ import {
   type AuthorizedMemoryPlan,
   type AuthorizedMemoryResultEnvelope,
   type AuthorizedMemorySearchResult,
+  type AuthorizedMemoryVirtualView,
   type MemoryAccessContext,
 } from "../plugin-sdk/memory-authorization.js";
 import type {
   AuthorizedMemoryReadInvocation,
+  AuthorizedMemoryWriteInvocation,
   MemoryInvocationUnavailable,
 } from "./memory-invocation.js";
 
@@ -126,10 +128,18 @@ function createWritePlan(): AuthorizedMemoryPlan & Readonly<{ operation: "append
   return { ...createPlan(), operation: "append" };
 }
 
+function createDeriveContext(): MemoryAccessContext & Readonly<{ operation: "derive" }> {
+  return { ...createContext(), operation: "derive" };
+}
+
+function createDerivePlan(): AuthorizedMemoryPlan & Readonly<{ operation: "derive" }> {
+  return { ...createPlan(), operation: "derive" };
+}
+
 let receiptSequence = 0;
 
 function createEnvelope<T>(
-  value: T,
+  value: AuthorizedMemoryResultEnvelope<T>["value"],
   overrides?: Readonly<{
     exposureReceipt?: Partial<AuthorizedMemoryResultEnvelope<T>["exposureReceipt"]>;
     egressReceipt?: Partial<AuthorizedMemoryResultEnvelope<T>["egressReceipt"]>;
@@ -172,6 +182,32 @@ function createEnvelope<T>(
 
 function isMemoryInvocationUnavailable(value: unknown): value is MemoryInvocationUnavailable {
   return value === MEMORY_INVOCATION_UNAVAILABLE;
+}
+
+function assertMemoryInvocationAvailable(
+  value: AuthorizedMemoryReadInvocation | MemoryInvocationUnavailable,
+  message?: string,
+): asserts value is AuthorizedMemoryReadInvocation;
+function assertMemoryInvocationAvailable(
+  value: AuthorizedMemoryWriteInvocation | MemoryInvocationUnavailable,
+  message?: string,
+): asserts value is AuthorizedMemoryWriteInvocation;
+function assertMemoryInvocationAvailable(
+  value: AuthorizedMemoryVirtualView | MemoryInvocationUnavailable,
+  message?: string,
+): asserts value is AuthorizedMemoryVirtualView;
+function assertMemoryInvocationAvailable(
+  value:
+    | AuthorizedMemoryReadInvocation
+    | AuthorizedMemoryWriteInvocation
+    | AuthorizedMemoryVirtualView
+    | MemoryInvocationUnavailable,
+  message = "fixture failed to create an authorized memory value",
+): void {
+  expect(value).not.toBe(MEMORY_INVOCATION_UNAVAILABLE);
+  if ("unavailable" in value) {
+    throw new Error(message);
+  }
 }
 
 describe("authorized memory read invocation", () => {
@@ -257,10 +293,7 @@ describe("authorized memory read invocation", () => {
         authorization: COMPLETE_MEMORY_AUTHORIZATION_CAPABILITIES,
       },
     });
-    expect(invocation).not.toBe(MEMORY_INVOCATION_UNAVAILABLE);
-    if (isMemoryInvocationUnavailable(invocation)) {
-      return;
-    }
+    assertMemoryInvocationAvailable(invocation);
     await expect(
       searchAuthorizedMemoryForInvocation({ invocation, query: "allowed" }),
     ).resolves.toEqual({
@@ -325,10 +358,7 @@ describe("authorized memory read invocation", () => {
       context: {} as never,
       capability: { authorization: COMPLETE_MEMORY_AUTHORIZATION_CAPABILITIES },
     });
-    expect(invocation).not.toBe(MEMORY_INVOCATION_UNAVAILABLE);
-    if (isMemoryInvocationUnavailable(invocation)) {
-      return;
-    }
+    assertMemoryInvocationAvailable(invocation);
 
     const response = await searchAuthorizedMemoryForInvocation({ invocation, query: "private" });
 
@@ -379,10 +409,7 @@ describe("authorized memory read invocation", () => {
       context: {} as never,
       capability: { authorization: COMPLETE_MEMORY_AUTHORIZATION_CAPABILITIES },
     });
-    expect(invocation).not.toBe(MEMORY_INVOCATION_UNAVAILABLE);
-    if (isMemoryInvocationUnavailable(invocation)) {
-      return;
-    }
+    assertMemoryInvocationAvailable(invocation);
     await expect(
       searchAuthorizedMemoryForInvocation({ invocation, query: "private" }),
     ).resolves.toEqual(
@@ -440,10 +467,7 @@ describe("authorized memory read invocation", () => {
       context: {} as never,
       capability: { authorization: COMPLETE_MEMORY_AUTHORIZATION_CAPABILITIES },
     });
-    expect(invocation).not.toBe(MEMORY_INVOCATION_UNAVAILABLE);
-    if (isMemoryInvocationUnavailable(invocation)) {
-      return;
-    }
+    assertMemoryInvocationAvailable(invocation);
     await expect(
       searchAuthorizedMemoryForInvocation({ invocation, query: "private" }),
     ).resolves.toEqual(
@@ -499,10 +523,7 @@ describe("authorized memory read invocation", () => {
       context: {} as never,
       capability: { authorization: COMPLETE_MEMORY_AUTHORIZATION_CAPABILITIES },
     });
-    expect(invocation).not.toBe(MEMORY_INVOCATION_UNAVAILABLE);
-    if (isMemoryInvocationUnavailable(invocation)) {
-      return;
-    }
+    assertMemoryInvocationAvailable(invocation);
     await expect(searchAuthorizedMemoryForInvocation({ invocation, query: "first" })).resolves.toBe(
       MEMORY_INVOCATION_UNAVAILABLE,
     );
@@ -548,10 +569,7 @@ describe("authorized memory read invocation", () => {
       context: {} as never,
       capability: { authorization: COMPLETE_MEMORY_AUTHORIZATION_CAPABILITIES },
     });
-    expect(invocation).not.toBe(MEMORY_INVOCATION_UNAVAILABLE);
-    if (isMemoryInvocationUnavailable(invocation)) {
-      return;
-    }
+    assertMemoryInvocationAvailable(invocation);
     await expect(
       searchAuthorizedMemoryForInvocation({ invocation, query: "private" }),
     ).resolves.toBe(MEMORY_INVOCATION_UNAVAILABLE);
@@ -573,10 +591,7 @@ describe("authorized memory read invocation", () => {
       context: {} as never,
       capability: { authorization: COMPLETE_MEMORY_AUTHORIZATION_CAPABILITIES },
     });
-    expect(invocation).not.toBe(MEMORY_INVOCATION_UNAVAILABLE);
-    if (isMemoryInvocationUnavailable(invocation)) {
-      return;
-    }
+    assertMemoryInvocationAvailable(invocation);
 
     await expect(
       searchAuthorizedMemoryForInvocation({ invocation, query: "private" }),
@@ -625,10 +640,7 @@ describe("authorized memory read invocation", () => {
       context: {} as never,
       capability: { authorization: COMPLETE_MEMORY_AUTHORIZATION_CAPABILITIES },
     });
-    expect(invocation).not.toBe(MEMORY_INVOCATION_UNAVAILABLE);
-    if (isMemoryInvocationUnavailable(invocation)) {
-      return;
-    }
+    assertMemoryInvocationAvailable(invocation);
     await expect(
       searchAuthorizedMemoryForInvocation({ invocation, query: "allowed" }),
     ).resolves.toEqual({
@@ -703,10 +715,7 @@ describe("authorized memory read invocation", () => {
       context: {} as never,
       capability: { authorization: COMPLETE_MEMORY_AUTHORIZATION_CAPABILITIES },
     });
-    expect(invocation).not.toBe(MEMORY_INVOCATION_UNAVAILABLE);
-    if (isMemoryInvocationUnavailable(invocation)) {
-      return;
-    }
+    assertMemoryInvocationAvailable(invocation);
     await expect(
       searchAuthorizedMemoryForInvocation({ invocation, query: "allowed" }),
     ).resolves.toMatchObject({
@@ -736,7 +745,7 @@ describe("authorized memory read invocation", () => {
         files: [{ version: 1 as const, mountHandle: "mount-1", virtualPath: "private/1.md" }],
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
       })),
-      readAuthorizedVirtualFile: vi.fn(async () =>
+      readAuthorizedVirtualFile: vi.fn(async (_params) =>
         createEnvelope({ text: "allowed", path: "memory/private/1.md" }),
       ),
     };
@@ -762,13 +771,9 @@ describe("authorized memory read invocation", () => {
     mocks.admit.mockResolvedValue({ ok: true, runtime });
 
     const invocation = await createAuthorizedMemoryReadInvocation({ context: {} as never });
-    if (isMemoryInvocationUnavailable(invocation)) {
-      throw new Error("fixture failed to admit virtual provider");
-    }
+    assertMemoryInvocationAvailable(invocation, "fixture failed to admit virtual provider");
     const view = await materializeAuthorizedMemoryVirtualView({ invocation });
-    if (isMemoryInvocationUnavailable(view)) {
-      throw new Error("fixture failed to materialize virtual view");
-    }
+    assertMemoryInvocationAvailable(view, "fixture failed to materialize virtual view");
     await expect(
       readAuthorizedMemoryVirtualFile({ invocation, view, virtualPath: "private/2.md" }),
     ).resolves.toBe(MEMORY_INVOCATION_UNAVAILABLE);
@@ -897,7 +902,7 @@ describe("authorized memory read invocation", () => {
     };
     const admittedVirtualView = {
       materializeAuthorizedVirtualView: vi.fn(async () => issuedView),
-      readAuthorizedVirtualFile: vi.fn(async () =>
+      readAuthorizedVirtualFile: vi.fn(async (_params) =>
         createEnvelope({ text: "allowed", path: "memory/private/1.md" }),
       ),
     };
@@ -922,13 +927,9 @@ describe("authorized memory read invocation", () => {
     mocks.admit.mockResolvedValue({ ok: true, runtime });
 
     const invocation = await createAuthorizedMemoryReadInvocation({ context: {} as never });
-    if (isMemoryInvocationUnavailable(invocation)) {
-      throw new Error("fixture failed to admit virtual provider");
-    }
+    assertMemoryInvocationAvailable(invocation, "fixture failed to admit virtual provider");
     const view = await materializeAuthorizedMemoryVirtualView({ invocation });
-    if (isMemoryInvocationUnavailable(view)) {
-      throw new Error("fixture failed to materialize virtual view");
-    }
+    assertMemoryInvocationAvailable(view, "fixture failed to materialize virtual view");
     issuedView.revision = "replacement-revision";
     issuedView.files[0]!.virtualPath = "private/replacement.md";
 
@@ -1273,10 +1274,7 @@ describe("authorized memory write invocation", () => {
     mocks.materialize.mockReturnValue(createWriteContext());
     mocks.admit.mockResolvedValue({ ok: true, runtime });
     const invocation = await createAuthorizedMemoryWriteInvocation({ context: {} as never });
-    expect(invocation).not.toBe(MEMORY_INVOCATION_UNAVAILABLE);
-    if (isMemoryInvocationUnavailable(invocation)) {
-      return;
-    }
+    assertMemoryInvocationAvailable(invocation);
     await expect(
       writeAuthorizedMemoryForInvocation({
         invocation,
@@ -1387,5 +1385,58 @@ describe("authorized memory write invocation", () => {
       }),
     ).resolves.toBe(MEMORY_INVOCATION_UNAVAILABLE);
     expect(runtime.writeAuthorized).not.toHaveBeenCalled();
+  });
+
+  it("stages sealed compaction only for a revalidated derive invocation", async () => {
+    const artifact = {
+      resourceRevisionId: "revision-derive-1",
+      commitInTransaction: vi.fn(),
+    };
+    const deriveRuntime = {
+      authorize: vi.fn().mockResolvedValue(createDerivePlan()),
+      stageSealedCompaction: vi.fn().mockResolvedValue(artifact),
+    };
+    mocks.materialize.mockReturnValue(createDeriveContext());
+    mocks.admit.mockResolvedValue({ ok: true, runtime: deriveRuntime });
+    const deriveInvocation = await createAuthorizedMemoryWriteInvocation({ context: {} as never });
+    assertMemoryInvocationAvailable(deriveInvocation, "fixture failed to create a derive invocation");
+    const transcriptSource = {
+      kind: "transcript" as const,
+      sessionId: "session-1",
+      eventSeqs: [1],
+      sourcePolicySetId: "policy-set-1",
+      deliveryAudiencesJson: '[{"kind":"user","id":"alice"}]',
+    };
+    await expect(
+      stageAuthorizedMemorySealedCompactionForInvocation({
+        invocation: deriveInvocation,
+        content: "sealed summary",
+        transcriptSource,
+      }),
+    ).resolves.toBe(artifact);
+    expect(deriveRuntime.stageSealedCompaction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        context: expect.objectContaining({ operation: "derive" }),
+        plan: expect.objectContaining({ operation: "derive" }),
+        transcriptSource,
+      }),
+    );
+
+    const appendRuntime = {
+      authorize: vi.fn().mockResolvedValue(createWritePlan()),
+      stageSealedCompaction: vi.fn(),
+    };
+    mocks.materialize.mockReturnValue(createWriteContext());
+    mocks.admit.mockResolvedValue({ ok: true, runtime: appendRuntime });
+    const appendInvocation = await createAuthorizedMemoryWriteInvocation({ context: {} as never });
+    assertMemoryInvocationAvailable(appendInvocation, "fixture failed to create an append invocation");
+    await expect(
+      stageAuthorizedMemorySealedCompactionForInvocation({
+        invocation: appendInvocation,
+        content: "must not stage",
+        transcriptSource,
+      }),
+    ).resolves.toBe(MEMORY_INVOCATION_UNAVAILABLE);
+    expect(appendRuntime.stageSealedCompaction).not.toHaveBeenCalled();
   });
 });

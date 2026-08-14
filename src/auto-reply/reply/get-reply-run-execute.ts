@@ -8,6 +8,7 @@ import { runAgentHarnessBeforeMessageWriteHook } from "../../agents/harness/hook
 import { resolveOwnerPromptNumbers } from "../../agents/owner-display.js";
 import { conversationIdentityFromMsgContext } from "../../config/sessions/conversation-identity.js";
 import { resolveGroupSessionKey } from "../../config/sessions/group.js";
+import { admitMemoryPostboxTurnIngress } from "../../gateway/memory-postbox-turn-capability.js";
 import { normalizeMediaFacts } from "../../media/media-facts.js";
 import { MEDIA_ONLY_USER_TEXT } from "../../sessions/user-turn-media.js";
 import {
@@ -178,6 +179,7 @@ export async function executePreparedReplyRun(state: PreparedReplyRunAdmission) 
   const sourceMessageId =
     normalizeOptionalString(sessionCtx.MessageSidFull) ??
     normalizeOptionalString(sessionCtx.MessageSid);
+  const inputProvenance = ctx.InputProvenance ?? sessionCtx.InputProvenance;
   const sourceTurnId =
     readChannelSourceTurnId(sessionCtx) ??
     (shouldMintChannelSourceTurnId(ctx.Provider ?? ctx.Surface ?? promptSessionCtx.Provider)
@@ -189,6 +191,24 @@ export async function executePreparedReplyRun(state: PreparedReplyRunAdmission) 
         })
       : undefined);
   setChannelSourceTurnId(sessionCtx, sourceTurnId);
+  const senderEvidenceRef = normalizeOptionalString(ctx.SenderId);
+  const sourceChannelRef =
+    sourceTurnId && messageProvider && replyRoute.accountId && replyRoute.to
+      ? `${messageProvider}:${replyRoute.accountId}:${replyRoute.to}`
+      : undefined;
+  admitMemoryPostboxTurnIngress({
+    context: sessionCtx,
+    agentId,
+    // The embedded runner redeems against the runtime-policy key when one is present.
+    // Bind admission to that same key so an alias cannot transplant this ingress record.
+    sessionKey: runtimePolicySessionKey ?? sessionKey ?? preparedSessionState.sessionId,
+    sessionId: preparedSessionState.sessionId,
+    provider: ctx.Provider ?? ctx.Surface ?? promptSessionCtx.Provider,
+    inputProvenance,
+    sourceTurnId,
+    sourceChannelRef,
+    senderEvidenceRef,
+  });
   const persistGroupSender = replyRoute.chatType === "group" || replyRoute.chatType === "channel";
   const ctxMediaForPersistence = normalizeMediaFacts(ctx.media);
   const userTurnMediaForPersistence = [...ctxMediaForPersistence, ...(opts?.media ?? [])];
@@ -199,7 +219,6 @@ export async function executePreparedReplyRun(state: PreparedReplyRunAdmission) 
     imageOrder: currentTurnImages.imageOrder,
     imageSourceIndexes: currentTurnImages.imageSourceIndexes,
   });
-  const inputProvenance = ctx.InputProvenance ?? sessionCtx.InputProvenance;
   const userTurnTimestamp = normalizeMessageTimestampMs(ctx.Timestamp);
   // prompt-prelude substitutes MEDIA_ONLY_USER_TEXT as transcriptBody for
   // bodyless turns; storage stays bare (the LLM boundary re-injects it), while

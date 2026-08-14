@@ -2,7 +2,9 @@ import { randomBytes } from "node:crypto";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { pruneMapToMaxSize } from "../infra/map-size.js";
 import { normalizeAgentId } from "../routing/session-key.js";
+import type { InputProvenance } from "../sessions/input-provenance.js";
 import { createCurrentMemorySessionContext } from "../state/memory-session-subject.js";
+import { isTrustedMessageActionTurnIngress } from "./message-action-turn-capability.js";
 
 const DEFAULT_TTL_MS = 15 * 60_000;
 const MAX_TTL_MS = 24 * 60 * 60_000;
@@ -13,23 +15,35 @@ type MemoryPostboxTurnCapability = Readonly<{
   agentId: string;
   runId: string;
   sessionKey: string;
-  sessionId?: string;
+  sessionId: string;
+  sourceTurnId: string;
   sourceChannelRef: string;
-  sourceMessageRef: string;
   senderEvidenceRef: string;
   targetPrincipalId: string;
+  sessionContextFingerprint: string;
   expiresAtMs: number;
 }>;
 
 export type ResolvedMemoryPostboxSource = Readonly<{
+  /** Opaque, account-and-conversation-scoped identity minted at trusted channel ingress. */
+  sourceTurnId: string;
   sourceChannelRef: string;
-  sourceMessageRef: string;
   senderEvidenceRef: string;
   /** The core-selected private subject whose quarantine receives this source. */
   targetPrincipalId: string;
 }>;
 
 const capabilitiesByToken = new Map<string, MemoryPostboxTurnCapability>();
+const admittedIngressByContext = new WeakMap<object, AdmittedMemoryPostboxIngress>();
+
+type AdmittedMemoryPostboxIngress = Readonly<
+  ResolvedMemoryPostboxSource & {
+    agentId: string;
+    sessionKey: string;
+    sessionId: string;
+    sessionContextFingerprint: string;
+  }
+>;
 
 function resolveTtlMs(value: number | undefined): number {
   if (!Number.isFinite(value) || value === undefined || value <= 0) {
@@ -46,6 +60,75 @@ function required(value: string | undefined, label: string): string {
   return normalized;
 }
 
+function readCurrentUserSubject(params: {
+  agentId: string;
+  sessionKey: string;
+  sessionId: string;
+}) {
+  const session = createCurrentMemorySessionContext({
+    sessionKey: params.sessionKey,
+    sessionId: params.sessionId,
+    options: { agentId: params.agentId },
+  });
+  return session.kind === "current" && session.context.subject.kind === "user"
+    ? Object.freeze({
+        principalId: session.context.principalId,
+        fingerprint: session.context.fingerprint,
+      })
+    : undefined;
+}
+
+/**
+ * Stamps one exact inbound context after channel routing has selected both the source message and
+ * the current user subject. A copied symbol field or caller-supplied session tuple cannot recover
+ * this record, and non-user/system continuations intentionally receive no postbox authority.
+ */
+export function admitMemoryPostboxTurnIngress(params: {
+  context: object;
+  agentId: string;
+  sessionKey: string;
+  sessionId: string;
+  provider: string | undefined;
+  inputProvenance: InputProvenance | undefined;
+  sourceTurnId: string | undefined;
+  sourceChannelRef: string | undefined;
+  senderEvidenceRef: string | undefined;
+}): void {
+  admittedIngressByContext.delete(params.context);
+  if (
+    !isTrustedMessageActionTurnIngress(params.provider) ||
+    params.inputProvenance?.kind !== "external_user"
+  ) {
+    return;
+  }
+  const sourceTurnId = normalizeOptionalString(params.sourceTurnId);
+  const sourceChannelRef = normalizeOptionalString(params.sourceChannelRef);
+  const senderEvidenceRef = normalizeOptionalString(params.senderEvidenceRef);
+  if (!sourceTurnId || !sourceChannelRef || !senderEvidenceRef) {
+    return;
+  }
+  const agentId = normalizeAgentId(params.agentId);
+  const sessionKey = required(params.sessionKey, "session identity");
+  const sessionId = required(params.sessionId, "session generation");
+  const subject = readCurrentUserSubject({ agentId, sessionKey, sessionId });
+  if (!subject) {
+    return;
+  }
+  admittedIngressByContext.set(
+    params.context,
+    Object.freeze({
+      agentId,
+      sessionKey,
+      sessionId,
+      sourceTurnId,
+      sourceChannelRef,
+      senderEvidenceRef,
+      targetPrincipalId: subject.principalId,
+      sessionContextFingerprint: subject.fingerprint,
+    }),
+  );
+}
+
 function sweepExpiredMemoryPostboxTurnCapabilities(nowMs: number = Date.now()): void {
   for (const [token, capability] of capabilitiesByToken) {
     if (nowMs >= capability.expiresAtMs) {
@@ -55,26 +138,41 @@ function sweepExpiredMemoryPostboxTurnCapabilities(nowMs: number = Date.now()): 
 }
 
 /**
- * Minted only from an admitted inbound user turn. The opaque token is later scoped to the selected
- * memory plugin, which redeems current channel/sender evidence without accepting it from tool args.
+ * Minted only from the exact context admitted at trusted external-user ingress. Neither callers nor
+ * models may select the source, sender evidence, target principal, or the session it belongs to.
  */
 export function mintMemoryPostboxTurnCapability(params: {
   agentId: string;
   runId: string;
   sessionKey: string;
-  sessionId?: string;
-  sourceChannelRef: string;
-  sourceMessageRef: string;
-  senderEvidenceRef: string;
-  /** Resolved only by core from the current verified user session subject. */
-  targetPrincipalId: string;
+  sessionId: string;
+  /** The inbound context whose private marker is written only by trusted channel ingress. */
+  sourceContext: object;
   expiresWithRun?: boolean;
   ttlMs?: number;
   nowMs?: number;
-}): string {
+}): string | undefined {
   const agentId = normalizeAgentId(params.agentId);
   const runId = required(params.runId, "run identity");
   const sessionKey = required(params.sessionKey, "session identity");
+  const sessionId = required(params.sessionId, "session generation");
+  const source = admittedIngressByContext.get(params.sourceContext);
+  if (
+    !source ||
+    source.agentId !== agentId ||
+    source.sessionKey !== sessionKey ||
+    source.sessionId !== sessionId
+  ) {
+    return undefined;
+  }
+  const subject = readCurrentUserSubject({ agentId, sessionKey, sessionId });
+  if (
+    !subject ||
+    subject.principalId !== source.targetPrincipalId ||
+    subject.fingerprint !== source.sessionContextFingerprint
+  ) {
+    return undefined;
+  }
   const nowMs = params.nowMs ?? Date.now();
   sweepExpiredMemoryPostboxTurnCapabilities(nowMs);
   pruneMapToMaxSize(capabilitiesByToken, MAX_ACTIVE_CAPABILITIES - 1);
@@ -85,11 +183,12 @@ export function mintMemoryPostboxTurnCapability(params: {
       agentId,
       runId,
       sessionKey,
-      sessionId: normalizeOptionalString(params.sessionId),
-      sourceChannelRef: required(params.sourceChannelRef, "source channel evidence"),
-      sourceMessageRef: required(params.sourceMessageRef, "source message evidence"),
-      senderEvidenceRef: required(params.senderEvidenceRef, "sender evidence"),
-      targetPrincipalId: required(params.targetPrincipalId, "target principal"),
+      sessionId,
+      sourceTurnId: source.sourceTurnId,
+      sourceChannelRef: source.sourceChannelRef,
+      senderEvidenceRef: source.senderEvidenceRef,
+      targetPrincipalId: source.targetPrincipalId,
+      sessionContextFingerprint: source.sessionContextFingerprint,
       expiresAtMs: params.expiresWithRun
         ? RUN_LIFETIME_EXPIRES_AT_MS
         : nowMs + resolveTtlMs(params.ttlMs),
@@ -98,7 +197,7 @@ export function mintMemoryPostboxTurnCapability(params: {
   return token;
 }
 
-/** Rejects forged, stale, cross-agent, cross-run, and cross-session tokens without disclosure. */
+/** Rejects forged, stale, rebound, cross-agent, cross-run, and cross-session tokens without disclosure. */
 export function resolveMemoryPostboxTurnCapability(params: {
   token?: string;
   agentId: string;
@@ -121,16 +220,28 @@ export function resolveMemoryPostboxTurnCapability(params: {
     capability.agentId !== normalizeAgentId(params.agentId) ||
     capability.runId !== normalizeOptionalString(params.runId) ||
     capability.sessionKey !== normalizeOptionalString(params.sessionKey) ||
-    (capability.sessionId && capability.sessionId !== normalizeOptionalString(params.sessionId))
+    capability.sessionId !== normalizeOptionalString(params.sessionId)
   ) {
     if (nowMs >= capability.expiresAtMs) {
       capabilitiesByToken.delete(token);
     }
     return undefined;
   }
+  const subject = readCurrentUserSubject({
+    agentId: capability.agentId,
+    sessionKey: capability.sessionKey,
+    sessionId: capability.sessionId,
+  });
+  if (
+    !subject ||
+    subject.principalId !== capability.targetPrincipalId ||
+    subject.fingerprint !== capability.sessionContextFingerprint
+  ) {
+    return undefined;
+  }
   return Object.freeze({
+    sourceTurnId: capability.sourceTurnId,
     sourceChannelRef: capability.sourceChannelRef,
-    sourceMessageRef: capability.sourceMessageRef,
     senderEvidenceRef: capability.senderEvidenceRef,
     targetPrincipalId: capability.targetPrincipalId,
   });
@@ -145,14 +256,7 @@ export function resolveMemoryPostboxTargetPrincipal(params: {
   sessionKey: string;
   sessionId: string;
 }): string | undefined {
-  const session = createCurrentMemorySessionContext({
-    sessionKey: params.sessionKey,
-    sessionId: params.sessionId,
-    options: { agentId: params.agentId },
-  });
-  return session.kind === "current" && session.context.subject.kind === "user"
-    ? session.context.principalId
-    : undefined;
+  return readCurrentUserSubject(params)?.principalId;
 }
 
 export function revokeMemoryPostboxTurnCapability(token: string | undefined): boolean {

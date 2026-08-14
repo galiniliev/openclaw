@@ -378,6 +378,7 @@ Use `isLoopbackHost(host)` when a plugin must accept only the local machine. It 
     | `plugin-sdk/memory-authorization` | Versioned serializable memory-authorization contracts and selected-capability declarations. This contract alone does not enable isolation, capability admission, or an authorization mode. |
     | `plugin-sdk/memory-authorization-conformance` | Pure backend conformance helpers for the memory-authorization contract. |
     | `plugin-sdk/memory-postbox-runtime` | Private-local runtime resolver and scoped binding keys for core-issued, turn-bound memory postbox source capabilities. |
+    | `plugin-sdk/memory-sharing-control-runtime` | Private-local Gateway-profile resolver for selected memory-plugin sharing controls. |
     | `plugin-sdk/memory-core-host-embedding-registry` | Private-local after July 2026; Lightweight memory embedding provider registry helpers |
     | `plugin-sdk/memory-core-host-engine-curated` | Private-local focused curated-memory annotation parsing for doctor and promotion paths |
     | `plugin-sdk/memory-core-host-engine-foundation` | Memory host foundation engine exports |
