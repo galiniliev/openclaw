@@ -11,6 +11,8 @@ import {
 import {
   createBuiltinMemoryProjection,
   depositBuiltinMemoryPostbox,
+  expireBuiltinMemoryProjections,
+  refreshBuiltinMemoryProjection,
   issueBuiltinMemoryPostboxSourceHandle,
   registerBuiltinMemoryProjectionTarget,
   revokeBuiltinMemoryProjection,
@@ -278,6 +280,146 @@ describe("builtin scoped memory sharing", () => {
     ).toBeUndefined();
   });
 
+  it("persists expiry and reports every already-recorded target exposure", () => {
+    const nowMs = Date.now();
+    const source = sourceStore();
+    const target = projectionStore();
+    const sourceRevision = createBuiltinScopedMemoryResource({
+      agentId,
+      store: source,
+      logicalLocator: "private.md",
+      content: "private source",
+      actor: { kind: "human", id: alice },
+      nowMs,
+    });
+    registerBuiltinMemoryProjectionTarget({
+      agentId,
+      target: { kind: "conversation", id: channel },
+      store: target,
+      operatorPrincipalId: alice,
+      nowMs,
+    });
+    const projection = createBuiltinMemoryProjection({
+      agentId,
+      sourceRevisionId: sourceRevision.revisionId,
+      target: { kind: "conversation", id: channel },
+      publisherPrincipalId: alice,
+      reviewedByPrincipalId: alice,
+      purpose: "short lived",
+      preview: "short lived copy",
+      content: "approved copy",
+      expiry: { kind: "expires", expiresAt: nowMs + 1 },
+      nowMs,
+    });
+    const database = openOpenClawAgentDatabase({ agentId });
+    database.db
+      .prepare(
+        `INSERT INTO memory_policy_sets
+          (policy_set_id, agent_id, memory_policy_revision, member_policy_set_ids_json, created_at)
+         VALUES ('expiry-impact-policy-set', ?, 'policy-revision', '[]', 1)`,
+      )
+      .run(agentId);
+    database.db
+      .prepare(
+        `INSERT INTO memory_run_exposures
+          (exposure_set_id, agent_id, run_id, context_fingerprint, plan_id, revision_number,
+           previous_exposure_set_id, source_policy_set_ids_json, effective_source_policy_set_id,
+           exposed_resource_revisions_json, exposure_receipt_ids_json, egress_receipt_ids_json,
+           delivery_audiences_json, delivery_revision, egress_registry_revision, created_at)
+         VALUES ('expiry-impact-exposure', ?, 'run-impact', 'context', 'plan', 1, NULL, '[]',
+           'expiry-impact-policy-set', '[]', '[]', '[]', '[]', 'delivery', 'egress', 1)`,
+      )
+      .run(agentId);
+    database.db
+      .prepare(
+        `INSERT INTO memory_run_exposure_resources
+          (exposure_set_id, resource_revision_id, policy_set_id, created_at)
+         VALUES ('expiry-impact-exposure', ?, 'expiry-impact-policy-set', 1)`,
+      )
+      .run(projection.copyRevisionId);
+
+    expect(expireBuiltinMemoryProjections({ agentId, nowMs: nowMs + 1 })).toEqual([
+      { projectionId: projection.projectionId, exposureSetIds: ["expiry-impact-exposure"] },
+    ]);
+    expect(
+      readBuiltinScopedMemoryRevisionSnapshot({
+        agentId,
+        storeIds: [target.storeId],
+        revisionId: projection.copyRevisionId,
+        nowMs: nowMs + 1,
+      }),
+    ).toBeUndefined();
+    expect(
+      database.db.prepare("SELECT state FROM memory_projections WHERE projection_id = ?").get(projection.projectionId),
+    ).toEqual({ state: "expired" });
+  });
+
+  it("refreshes only by creating a new reviewed copy and revoking the old one", () => {
+    const source = sourceStore();
+    const target = projectionStore();
+    const firstSource = createBuiltinScopedMemoryResource({
+      agentId,
+      store: source,
+      logicalLocator: "private-v1.md",
+      content: "private v1",
+      actor: { kind: "human", id: alice },
+    });
+    const secondSource = createBuiltinScopedMemoryResource({
+      agentId,
+      store: source,
+      logicalLocator: "private-v2.md",
+      content: "private v2",
+      actor: { kind: "human", id: alice },
+    });
+    registerBuiltinMemoryProjectionTarget({
+      agentId,
+      target: { kind: "conversation", id: channel },
+      store: target,
+      operatorPrincipalId: alice,
+    });
+    const original = createBuiltinMemoryProjection({
+      agentId,
+      sourceRevisionId: firstSource.revisionId,
+      target: { kind: "conversation", id: channel },
+      publisherPrincipalId: alice,
+      reviewedByPrincipalId: alice,
+      purpose: "share v1",
+      preview: "v1",
+      content: "approved v1",
+      expiry: { kind: "no-expiry", auditReason: "initial review" },
+    });
+
+    const refreshed = refreshBuiltinMemoryProjection({
+      agentId,
+      projectionId: original.projectionId,
+      sourceRevisionId: secondSource.revisionId,
+      publisherPrincipalId: alice,
+      reviewedByPrincipalId: alice,
+      purpose: "share v2",
+      preview: "v2",
+      content: "approved v2",
+      expiry: { kind: "no-expiry", auditReason: "new review" },
+    });
+
+    expect(refreshed.projection.projectionId).not.toBe(original.projectionId);
+    expect(refreshed.projection.copyRevisionId).not.toBe(original.copyRevisionId);
+    expect(refreshed.projection.sourceRevisionId).toBe(secondSource.revisionId);
+    expect(
+      readBuiltinScopedMemoryRevisionSnapshot({
+        agentId,
+        storeIds: [target.storeId],
+        revisionId: original.copyRevisionId,
+      }),
+    ).toBeUndefined();
+    expect(
+      readBuiltinScopedMemoryRevisionSnapshot({
+        agentId,
+        storeIds: [target.storeId],
+        revisionId: refreshed.projection.copyRevisionId,
+      })?.content,
+    ).toBe("approved v2");
+  });
+
   it("keeps postbox off by default and makes review-required deposits one-way", () => {
     const target = privateTargetStore();
     const offHandle = issueBuiltinMemoryPostboxSourceHandle({
@@ -320,5 +462,35 @@ describe("builtin scoped memory sharing", () => {
     });
     expect(database.db.prepare("SELECT state FROM memory_postbox_items").get()).toEqual({ state: "reviewed" });
     expect(database.db.prepare("SELECT COUNT(*) AS count FROM memory_resources").get()).toEqual({ count: 0 });
+  });
+
+  it("enforces the persisted per-channel target cap without exposing deposited content", () => {
+    const target = privateTargetStore();
+    setBuiltinMemoryPostboxMode({
+      agentId,
+      targetStoreId: target.storeId,
+      operatorPrincipalId: alice,
+      mode: "review-required",
+    });
+    for (let index = 0; index < 13; index += 1) {
+      const handle = issueBuiltinMemoryPostboxSourceHandle({
+        agentId,
+        sourceSessionId: `source-session-${index}`,
+        sourceChannelRef: "channel-ref",
+        sourceMessageRef: `message-${index}`,
+        senderEvidenceRef: "sender-proof",
+        targetStoreId: target.storeId,
+      });
+      expect(
+        depositBuiltinMemoryPostbox({ agentId, sourceHandleId: handle, content: `observation-${index}` }),
+      ).toEqual({ accepted: index < 12 });
+    }
+    const database = openOpenClawAgentDatabase({ agentId });
+    expect(database.db.prepare("SELECT deposit_count FROM memory_postbox_rate_limits").get()).toEqual({
+      deposit_count: 12,
+    });
+    expect(database.db.prepare("SELECT COUNT(*) AS count FROM memory_postbox_items").get()).toEqual({
+      count: 12,
+    });
   });
 });

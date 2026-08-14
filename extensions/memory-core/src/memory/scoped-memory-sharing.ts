@@ -43,6 +43,11 @@ export type BuiltinMemoryProjection = Readonly<{
 
 export type BuiltinMemoryPostboxDeposit = Readonly<{ accepted: boolean }>;
 
+export type BuiltinMemoryProjectionImpact = Readonly<{
+  projectionId: string;
+  exposureSetIds: readonly string[];
+}>;
+
 function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -347,6 +352,54 @@ export function createBuiltinMemoryProjection(params: {
   });
 }
 
+/** Tombstones one copy and reads its recorded impact under the caller's write fence. */
+function tombstoneProjectionCopy(params: {
+  database: Parameters<typeof getNodeSqliteKysely<ScopedMemoryDatabase>>[0];
+  projection: {
+    projection_id: string;
+    copy_revision_id: string;
+    state: string;
+  };
+  state: "revoked" | "expired";
+  nowMs: number;
+}): readonly string[] {
+  const db = getNodeSqliteKysely<ScopedMemoryDatabase>(params.database);
+  if (params.projection.state === "active") {
+    executeSqliteQuerySync(
+      params.database,
+      db
+        .updateTable("memory_resource_revisions")
+        .set({ lifecycle_state: "tombstoned", retired_at: params.nowMs })
+        .where("revision_id", "=", params.projection.copy_revision_id)
+        .where("lifecycle_state", "=", "active"),
+    );
+    executeSqliteQuerySync(
+      params.database,
+      db.deleteFrom("memory_scoped_chunks").where("revision_id", "=", params.projection.copy_revision_id),
+    );
+    executeSqliteQuerySync(
+      params.database,
+      db
+        .updateTable("memory_projections")
+        .set({ state: params.state, revoked_at: params.nowMs })
+        .where("projection_id", "=", params.projection.projection_id)
+        .where("state", "=", "active"),
+    );
+  }
+  // The tombstone and impact read share one write fence. A pre-output exposure either commits
+  // before this point and is reported, or sees the tombstone and cannot expose the copy.
+  return Object.freeze(
+    executeSqliteQuerySync(
+      params.database,
+      db
+        .selectFrom("memory_run_exposure_resources")
+        .select("exposure_set_id")
+        .where("resource_revision_id", "=", params.projection.copy_revision_id)
+        .orderBy("exposure_set_id"),
+    ).rows.map((row) => row.exposure_set_id),
+  );
+}
+
 /** Tombstoning the reviewed copy removes future reads and returns every prior recorded exposure. */
 export function revokeBuiltinMemoryProjection(params: {
   agentId: string;
@@ -385,43 +438,118 @@ export function revokeBuiltinMemoryProjection(params: {
     }
     let exposures: readonly string[] = [];
     runSqliteImmediateTransactionSync(database, () => {
-      if (projection.state === "active") {
-        executeSqliteQuerySync(
-          database,
-          db
-            .updateTable("memory_resource_revisions")
-            .set({ lifecycle_state: "tombstoned", retired_at: nowMs })
-            .where("revision_id", "=", projection.copy_revision_id)
-            .where("lifecycle_state", "=", "active"),
-        );
-        executeSqliteQuerySync(
-          database,
-          db.deleteFrom("memory_scoped_chunks").where("revision_id", "=", projection.copy_revision_id),
-        );
-        executeSqliteQuerySync(
-          database,
-          db
-            .updateTable("memory_projections")
-            .set({ state: "revoked", revoked_at: nowMs })
-            .where("projection_id", "=", projectionId)
-            .where("state", "=", "active"),
-        );
-      }
-      // The tombstone and impact read share one write fence. A pre-output exposure either commits
-      // before this point and is reported, or sees the tombstone and cannot expose the copy.
-      exposures = Object.freeze(
-        executeSqliteQuerySync(
-          database,
-          db
-            .selectFrom("memory_run_exposure_resources")
-            .select("exposure_set_id")
-            .where("resource_revision_id", "=", projection.copy_revision_id)
-            .orderBy("exposure_set_id"),
-        ).rows.map((row) => row.exposure_set_id),
-      );
+      exposures = tombstoneProjectionCopy({
+        database,
+        projection,
+        state: "revoked",
+        nowMs,
+      });
     });
     return exposures;
   });
+}
+
+/** Expiry is a durable transition, so later inspection and impact queries do not infer it from a clock. */
+export function expireBuiltinMemoryProjections(params: {
+  agentId: string;
+  nowMs?: number;
+}): readonly BuiltinMemoryProjectionImpact[] {
+  const nowMs = params.nowMs ?? Date.now();
+  return withScopedMemoryDatabase(params.agentId, (database) => {
+    const db = getNodeSqliteKysely<ScopedMemoryDatabase>(database);
+    let impacts: readonly BuiltinMemoryProjectionImpact[] = [];
+    runSqliteImmediateTransactionSync(database, () => {
+      const expiring = executeSqliteQuerySync(
+        database,
+        db
+          .selectFrom("memory_projections")
+          .select(["projection_id", "copy_revision_id", "state"])
+          .where("agent_id", "=", params.agentId)
+          .where("state", "=", "active")
+          .where("expiry_kind", "=", "expires")
+          .where("expires_at", "<=", nowMs)
+          .orderBy("projection_id"),
+      ).rows;
+      impacts = Object.freeze(
+        expiring.map((projection) =>
+          Object.freeze({
+            projectionId: projection.projection_id,
+            exposureSetIds: tombstoneProjectionCopy({
+              database,
+              projection,
+              state: "expired",
+              nowMs,
+            }),
+          }),
+        ),
+      );
+    });
+    return impacts;
+  });
+}
+
+/** Refresh explicitly creates a new reviewed copy, then revokes the previous copy and reports its impact. */
+export function refreshBuiltinMemoryProjection(params: {
+  agentId: string;
+  projectionId: string;
+  sourceRevisionId: string;
+  publisherPrincipalId: string;
+  reviewedByPrincipalId: string;
+  purpose: string;
+  preview: string;
+  content: string;
+  expiry: Readonly<{ kind: "expires"; expiresAt: number }> | Readonly<{ kind: "no-expiry"; auditReason: string }>;
+  nowMs?: number;
+}): Readonly<{ projection: BuiltinMemoryProjection; replacedExposureSetIds: readonly string[] }> {
+  const projectionId = normalize(params.projectionId, "projection id");
+  const publisherPrincipalId = normalize(params.publisherPrincipalId, "publisher principal id");
+  const existing = withScopedMemoryDatabase(params.agentId, (database) => {
+    const db = getNodeSqliteKysely<ScopedMemoryDatabase>(database);
+    const projection = executeSqliteQueryTakeFirstSync(
+      database,
+      db
+        .selectFrom("memory_projections")
+        .selectAll()
+        .where("agent_id", "=", params.agentId)
+        .where("projection_id", "=", projectionId),
+    );
+    if (!projection || projection.state !== "active") {
+      throw new Error("memory projection is unavailable");
+    }
+    const target = targetAudience({
+      kind: projection.target_audience_kind,
+      id: projection.target_audience_id,
+    });
+    if (projection.publisher_principal_id !== publisherPrincipalId) {
+      assertStoreOperation({
+        agentId: params.agentId,
+        storeId: projection.target_store_id,
+        principalId: publisherPrincipalId,
+        audience: target,
+        operation: "policy-admin",
+      });
+    }
+    return Object.freeze({ target, projection });
+  });
+  const projection = createBuiltinMemoryProjection({
+    agentId: params.agentId,
+    sourceRevisionId: params.sourceRevisionId,
+    target: existing.target,
+    publisherPrincipalId,
+    reviewedByPrincipalId: params.reviewedByPrincipalId,
+    purpose: params.purpose,
+    preview: params.preview,
+    content: params.content,
+    expiry: params.expiry,
+    nowMs: params.nowMs,
+  });
+  const replacedExposureSetIds = revokeBuiltinMemoryProjection({
+    agentId: params.agentId,
+    projectionId,
+    operatorPrincipalId: publisherPrincipalId,
+    nowMs: params.nowMs,
+  });
+  return Object.freeze({ projection, replacedExposureSetIds });
 }
 
 /** Postbox stays off until an authenticated owner/admin explicitly enables review-required deposits. */
@@ -532,36 +660,45 @@ export function depositBuiltinMemoryPostbox(params: {
   }
   return withScopedMemoryDatabase(params.agentId, (database) => {
     const db = getNodeSqliteKysely<ScopedMemoryDatabase>(database);
-    const handle = executeSqliteQueryTakeFirstSync(
-      database,
-      db
-        .selectFrom("memory_postbox_source_handles")
-        .selectAll()
-        .where("source_handle_id", "=", params.sourceHandleId)
-        .where("agent_id", "=", params.agentId),
-    );
-    const settings = executeSqliteQueryTakeFirstSync(
-      database,
-      db.selectFrom("memory_postbox_settings").select("mode").where("agent_id", "=", params.agentId),
-    );
-    if (!handle || handle.used_at !== null || handle.expires_at <= nowMs || settings?.mode !== "review-required") {
-      return Object.freeze({ accepted: false });
-    }
-    const rate = executeSqliteQueryTakeFirstSync(
-      database,
-      db
-        .selectFrom("memory_postbox_rate_limits")
-        .selectAll()
-        .where("agent_id", "=", params.agentId)
-        .where("source_channel_ref", "=", handle.source_channel_ref)
-        .where("target_store_id", "=", handle.target_store_id),
-    );
-    const withinWindow = rate && rate.window_started_at + POSTBOX_RATE_WINDOW_MS > nowMs;
-    const count = withinWindow ? rate.deposit_count : 0;
-    if (count >= POSTBOX_MAX_DEPOSITS_PER_WINDOW) {
-      return Object.freeze({ accepted: false });
-    }
+    let accepted = false;
     runSqliteImmediateTransactionSync(database, () => {
+      const handle = executeSqliteQueryTakeFirstSync(
+        database,
+        db
+          .selectFrom("memory_postbox_source_handles")
+          .selectAll()
+          .where("source_handle_id", "=", params.sourceHandleId)
+          .where("agent_id", "=", params.agentId),
+      );
+      const settings = executeSqliteQueryTakeFirstSync(
+        database,
+        db
+          .selectFrom("memory_postbox_settings")
+          .select("mode")
+          .where("agent_id", "=", params.agentId),
+      );
+      if (
+        !handle ||
+        handle.used_at !== null ||
+        handle.expires_at <= nowMs ||
+        settings?.mode !== "review-required"
+      ) {
+        return;
+      }
+      const rate = executeSqliteQueryTakeFirstSync(
+        database,
+        db
+          .selectFrom("memory_postbox_rate_limits")
+          .selectAll()
+          .where("agent_id", "=", params.agentId)
+          .where("source_channel_ref", "=", handle.source_channel_ref)
+          .where("target_store_id", "=", handle.target_store_id),
+      );
+      const withinWindow = rate && rate.window_started_at + POSTBOX_RATE_WINDOW_MS > nowMs;
+      const count = withinWindow ? rate.deposit_count : 0;
+      if (count >= POSTBOX_MAX_DEPOSITS_PER_WINDOW) {
+        return;
+      }
       const used = executeSqliteQuerySync(
         database,
         db
@@ -612,8 +749,9 @@ export function depositBuiltinMemoryPostbox(params: {
           purged_at: null,
         }),
       );
+      accepted = true;
     });
-    return Object.freeze({ accepted: true });
+    return Object.freeze({ accepted });
   });
 }
 
