@@ -418,6 +418,18 @@ export interface MemoryPreoutputExposureAuthorizationFacts {
   host_facts_revision: string;
 }
 
+export interface MemoryPreoutputExposureEnterpriseMembershipSets {
+  created_at: number;
+  exposure_set_id: string;
+  snapshot_count: number;
+}
+
+export interface MemoryPreoutputExposureEnterpriseMemberships {
+  created_at: number;
+  exposure_set_id: string;
+  snapshot_id: string;
+}
+
 export interface MemoryPreoutputExposureLedger {
   agent_id: string;
   context_fingerprint: string;
@@ -1048,6 +1060,8 @@ export interface DB {
   memory_postbox_settings: MemoryPostboxSettings;
   memory_postbox_source_handles: MemoryPostboxSourceHandles;
   memory_preoutput_exposure_authorization_facts: MemoryPreoutputExposureAuthorizationFacts;
+  memory_preoutput_exposure_enterprise_membership_sets: MemoryPreoutputExposureEnterpriseMembershipSets;
+  memory_preoutput_exposure_enterprise_memberships: MemoryPreoutputExposureEnterpriseMemberships;
   memory_preoutput_exposure_ledger: MemoryPreoutputExposureLedger;
   memory_projection_targets: MemoryProjectionTargets;
   memory_projection_write_intents: MemoryProjectionWriteIntents;

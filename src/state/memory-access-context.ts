@@ -33,6 +33,8 @@ type StoredFacts = Readonly<{
   /** Parent subject is usable only while the core-owned durable grant rechecks. */
   delegationSubject?: SessionMemorySubject;
   delegationRecheck?: () => boolean;
+  /** Core-owned current-state check for facts whose owner is outside the session database. */
+  recheck?: () => boolean;
   operation: MemoryOperation;
   hostFactsRevision: string;
 }>;
@@ -193,10 +195,16 @@ function normalizeMemberships(
   const unique = new Map<string, MemoryVerifiedMembership>();
   for (const value of values) {
     const membership = Object.freeze({
+      snapshotId: requireText(value.snapshotId, "membership.snapshotId"),
       principalId: requireText(value.principalId, "membership.principalId"),
+      sourcePrincipalId: requireText(value.sourcePrincipalId, "membership.sourcePrincipalId"),
       groupId: requireText(value.groupId, "membership.groupId"),
       provider: requireText(value.provider, "membership.provider"),
       evidenceRevision: requireText(value.evidenceRevision, "membership.evidenceRevision"),
+      profileLinkRevision: requireText(
+        value.profileLinkRevision,
+        "membership.profileLinkRevision",
+      ),
       observedAt: requireText(value.observedAt, "membership.observedAt"),
       expiresAt: requireText(value.expiresAt, "membership.expiresAt"),
     }) satisfies MemoryVerifiedMembership;
@@ -207,14 +215,14 @@ function normalizeMemberships(
       throw new TypeError("membership timestamps must be ISO dates");
     }
     unique.set(
-      `${membership.principalId}\u0000${membership.groupId}\u0000${membership.provider}`,
+      `${membership.snapshotId}\u0000${membership.principalId}\u0000${membership.sourcePrincipalId}\u0000${membership.groupId}\u0000${membership.provider}`,
       membership,
     );
   }
   return Object.freeze(
     [...unique.values()].toSorted((left, right) =>
-      `${left.principalId}\u0000${left.groupId}\u0000${left.provider}`.localeCompare(
-        `${right.principalId}\u0000${right.groupId}\u0000${right.provider}`,
+      `${left.snapshotId}\u0000${left.principalId}\u0000${left.sourcePrincipalId}\u0000${left.groupId}\u0000${left.provider}`.localeCompare(
+        `${right.snapshotId}\u0000${right.principalId}\u0000${right.sourcePrincipalId}\u0000${right.groupId}\u0000${right.provider}`,
       ),
     ),
   );
@@ -409,6 +417,8 @@ export function captureTrustedMemoryAccessFacts(params: {
   /** Internal-only parent subject and durable recheck for a spawned child grant. */
   delegationSubject?: SessionMemorySubject;
   delegationRecheck?: () => boolean;
+  /** Core-owned current-state check for facts whose owner is outside the session database. */
+  recheck?: () => boolean;
   operation: MemoryOperation;
   hostFactsRevision: string;
 }): TrustedMemoryAccessFacts {
@@ -450,6 +460,7 @@ export function captureTrustedMemoryAccessFacts(params: {
           delegationRecheck: params.delegationRecheck,
         }
       : {}),
+    ...(params.recheck ? { recheck: params.recheck } : {}),
     operation: params.operation,
     hostFactsRevision: requireText(params.hostFactsRevision, "hostFactsRevision"),
   });
@@ -547,6 +558,13 @@ export function materializeTrustedMemoryAccessContext(
   const source = sourceContexts.get(context);
   const session = readTrustedMemoryAccessSessionContext(context);
   if (!facts || !source || !session) {
+    return undefined;
+  }
+  try {
+    if (facts.recheck && !facts.recheck()) {
+      return undefined;
+    }
+  } catch {
     return undefined;
   }
   const subject = readSessionMemorySubject({ session, facts, options: source.options });

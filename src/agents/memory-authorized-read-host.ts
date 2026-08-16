@@ -48,6 +48,7 @@ import {
   materializeTrustedMemoryAccessContext,
   type TrustedMemoryAccessContext,
 } from "../state/memory-access-context.js";
+import { readCurrentEnterpriseMemoryFactsForUser } from "../state/memory-enterprise-admission.js";
 import {
   activateMemoryChildDelegation,
   readMemoryChildTaskCapabilitySnapshot,
@@ -215,6 +216,37 @@ function deliveryFacts(params: {
       egressCapabilityIds: ["reply.final"],
       egressRegistryRevision: facts.egressRegistryRevision,
     }
+  );
+}
+
+function hasCurrentEnterpriseMemoryFacts(params: {
+  userPrincipalId: string;
+  verifiedPrincipals: ReadonlyArray<MemoryAccessContext["verifiedPrincipals"][number]>;
+  verifiedMemberships: ReadonlyArray<MemoryAccessContext["verifiedMemberships"][number]>;
+}): boolean {
+  const current = readCurrentEnterpriseMemoryFactsForUser({
+    userPrincipalId: params.userPrincipalId,
+  });
+  const currentPrincipals = new Set(
+    current.verifiedPrincipals.map(
+      (principal) => `${principal.principalId}\u0000${principal.evidenceRevision}`,
+    ),
+  );
+  const currentMemberships = new Set(
+    current.verifiedMemberships.map(
+      (membership) =>
+        `${membership.snapshotId}\u0000${membership.principalId}\u0000${membership.sourcePrincipalId}\u0000${membership.groupId}\u0000${membership.provider}\u0000${membership.evidenceRevision}\u0000${membership.profileLinkRevision}`,
+    ),
+  );
+  return (
+    params.verifiedPrincipals.every((principal) =>
+      currentPrincipals.has(`${principal.principalId}\u0000${principal.evidenceRevision}`),
+    ) &&
+    params.verifiedMemberships.every((membership) =>
+      currentMemberships.has(
+        `${membership.snapshotId}\u0000${membership.principalId}\u0000${membership.sourcePrincipalId}\u0000${membership.groupId}\u0000${membership.provider}\u0000${membership.evidenceRevision}\u0000${membership.profileLinkRevision}`,
+      ),
+    )
   );
 }
 
@@ -491,6 +523,8 @@ function createTrustedMemoryHostContext(
   }
   let actor: MemoryActorEvidence;
   let verifiedPrincipals: Array<MemoryAccessContext["verifiedPrincipals"][number]> = [];
+  let verifiedMemberships: Array<MemoryAccessContext["verifiedMemberships"][number]> = [];
+  let recheck: (() => boolean) | undefined;
   if (childDelegation) {
     actor = childDelegation.facts.actor;
     verifiedPrincipals = [...childDelegation.facts.verifiedPrincipals];
@@ -519,6 +553,17 @@ function createTrustedMemoryHostContext(
         ...(expiresAt ? { expiresAt } : {}),
       },
     ];
+    const enterprise = readCurrentEnterpriseMemoryFactsForUser({
+      userPrincipalId: context.principalId,
+    });
+    verifiedPrincipals.push(...enterprise.verifiedPrincipals);
+    verifiedMemberships = [...enterprise.verifiedMemberships];
+    recheck = () =>
+      hasCurrentEnterpriseMemoryFacts({
+        userPrincipalId: context.principalId,
+        verifiedPrincipals: enterprise.verifiedPrincipals,
+        verifiedMemberships,
+      });
   } else if (context.subject.kind === "conversation") {
     actor = {
       kind: "unattributed" as const,
@@ -553,9 +598,9 @@ function createTrustedMemoryHostContext(
     actor,
     verifiedPrincipals,
     collaboration: childDelegation?.facts.collaboration ?? { kind: "not-applicable" },
-    // Role membership is intentionally absent until a trusted membership resolver exists. This
-    // keeps a group actor from selecting a role store merely because they sent the latest message.
-    verifiedMemberships: [],
+    // Only Gateway-user contexts receive independently rechecked enterprise memberships.
+    // Group actors cannot select a role store merely because they sent the latest message.
+    verifiedMemberships,
     delivery,
     ...(childDelegation
       ? {
@@ -569,11 +614,18 @@ function createTrustedMemoryHostContext(
             }) !== undefined,
         }
       : {}),
+    ...(recheck ? { recheck } : {}),
     operation: params.operation,
     hostFactsRevision: `mhf1_${hash({
       session: context.fingerprint,
       delivery: delivery.routeRevision,
       egress: delivery.egressRegistryRevision,
+      memberships: verifiedMemberships.map((membership) => [
+        membership.snapshotId,
+        membership.sourcePrincipalId,
+        membership.evidenceRevision,
+        membership.profileLinkRevision,
+      ]),
     })}`,
   });
   const trusted = createTrustedMemoryAccessContext({

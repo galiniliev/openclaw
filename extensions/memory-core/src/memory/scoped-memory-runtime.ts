@@ -28,6 +28,7 @@ import type {
   MemoryReadResult,
   MemorySource,
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
+import type { MemoryEnterpriseAccessAuditReporter } from "openclaw/plugin-sdk/memory-enterprise-audit-runtime";
 import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
@@ -69,6 +70,17 @@ type AuthorizedStore = Readonly<{
   storeId: string;
   policyRevisionId: string;
   audienceRevision: string;
+}>;
+
+type AuthorizedStoreSelection = Readonly<{
+  stores: readonly AuthorizedStore[];
+  enterpriseRoleDecisions: readonly {
+    groupId: string;
+    policyId: string;
+    decision: "allowed" | "denied";
+    reasonCode: string;
+    policyRevision: string;
+  }[];
 }>;
 
 type PlanState = Readonly<{
@@ -206,10 +218,40 @@ function hasAudience(context: MemoryAccessContext, kind: AudienceRef["kind"], id
   );
 }
 
+function hasCurrentRoleMembership(params: {
+  context: MemoryAccessContext;
+  groupId: string;
+  nowMs: number;
+}): boolean {
+  if (params.context.subject.kind !== "user") {
+    return false;
+  }
+  return params.context.verifiedMemberships.some((membership) => {
+    if (
+      membership.principalId !== params.context.subject.principalId ||
+      membership.groupId !== params.groupId ||
+      Date.parse(membership.observedAt) > params.nowMs ||
+      Date.parse(membership.expiresAt) <= params.nowMs
+    ) {
+      return false;
+    }
+    // The user remains the memory subject. The group proof must instead name a
+    // current enterprise principal: without this two-principal binding, a caller
+    // could replay another user's enterprise snapshot into a valid user context.
+    return params.context.verifiedPrincipals.some(
+      (principal) =>
+        principal.principalId === membership.sourcePrincipalId &&
+        principal.evidenceRevision === membership.evidenceRevision &&
+        (principal.expiresAt === undefined || Date.parse(principal.expiresAt) > params.nowMs),
+    );
+  });
+}
+
 function canViewStoreAudience(params: {
   context: MemoryAccessContext;
   audienceKind: AudienceRef["kind"];
   audienceId: string;
+  nowMs: number;
 }): boolean {
   const { context } = params;
   if (!hasAudience(context, params.audienceKind, params.audienceId)) {
@@ -226,10 +268,11 @@ function canViewStoreAudience(params: {
     case "role":
       // A group sender is never its owner. Role stores require a user-scoped context and an
       // explicit role audience prepared by the host, never a latest-actor field.
-      return (
-        context.subject.kind === "user" &&
-        context.verifiedMemberships.some((membership) => membership.groupId === params.audienceId)
-      );
+      return hasCurrentRoleMembership({
+        context,
+        groupId: params.audienceId,
+        nowMs: params.nowMs,
+      });
     case "agent-shared":
       return params.audienceId === context.agentId;
     case "agent":
@@ -242,17 +285,17 @@ function canViewStoreAudience(params: {
 function listAuthorizedStores(params: {
   context: MemoryAccessContext;
   nowMs: number;
-}): readonly AuthorizedStore[] {
+}): AuthorizedStoreSelection {
   // Expiry owns a durable tombstone and prior-exposure impact. Run it before every new
   // authorization snapshot so a clock-only filter cannot leave an expired projection active.
   expireBuiltinMemoryProjections({ agentId: params.context.agentId, nowMs: params.nowMs });
   if (!isCurrentChildDelegation(params.context)) {
-    return [];
+    return Object.freeze({ stores: [], enterpriseRoleDecisions: [] });
   }
   return withScopedMemoryDatabase(params.context.agentId, (database) => {
     const rows = database
       .prepare(
-        `SELECT store.store_id, store.audience_kind, store.audience_id,
+        `SELECT store.store_id, store.audience_kind, store.audience_id, policy.policy_id,
                 policy.current_revision_id, policy.revocation_epoch
            FROM memory_stores AS store
            JOIN memory_policies AS policy ON policy.policy_id = store.policy_id
@@ -268,6 +311,7 @@ function listAuthorizedStores(params: {
       store_id: string;
       audience_kind: AudienceRef["kind"];
       audience_id: string;
+      policy_id: string;
       current_revision_id: string;
       revocation_epoch: number;
     }>;
@@ -275,43 +319,85 @@ function listAuthorizedStores(params: {
       params.context.subject.kind === "user"
         ? [params.context.subject.principalId]
         : params.context.verifiedPrincipals.map((principal) => principal.principalId);
-    return Object.freeze(
-      rows.flatMap((row) => {
-        if (
-          !canViewStoreAudience({
-            context: params.context,
-            audienceKind: row.audience_kind,
-            audienceId: row.audience_id,
-          })
-        ) {
-          return [];
-        }
-        const decision = evaluateBuiltinScopedMemoryPolicy({
-          agentId: params.context.agentId,
-          storeId: row.store_id,
-          principalIds,
-          deliveryAudiences: params.context.delivery.audiences,
-          operation: params.context.operation,
+    const enterpriseRoleDecisions: AuthorizedStoreSelection["enterpriseRoleDecisions"][number][] =
+      [];
+    const stores = rows.flatMap((row) => {
+      const roleMembership =
+        row.audience_kind === "role" && params.context.subject.kind === "user"
+          ? params.context.verifiedMemberships.find(
+              (membership) =>
+                membership.principalId === params.context.subject.principalId &&
+                membership.groupId === row.audience_id &&
+                Date.parse(membership.observedAt) <= params.nowMs &&
+                Date.parse(membership.expiresAt) > params.nowMs,
+            )
+          : undefined;
+      if (
+        !canViewStoreAudience({
+          context: params.context,
+          audienceKind: row.audience_kind,
+          audienceId: row.audience_id,
           nowMs: params.nowMs,
-        });
-        if (!decision.allowed || decision.policyRevisionId !== row.current_revision_id) {
-          return [];
+        })
+      ) {
+        if (roleMembership) {
+          enterpriseRoleDecisions.push({
+            groupId: roleMembership.groupId,
+            policyId: row.policy_id,
+            decision: "denied",
+            reasonCode: "role-membership-unavailable",
+            policyRevision: row.current_revision_id,
+          });
         }
-        return [
-          Object.freeze({
-            storeId: row.store_id,
-            policyRevisionId: row.current_revision_id,
-            audienceRevision: `mar1_${hash([
-              row.store_id,
-              row.audience_kind,
-              row.audience_id,
-              row.current_revision_id,
-              String(row.revocation_epoch),
-            ])}`,
-          }),
-        ];
-      }),
-    );
+        return [];
+      }
+      const decision = evaluateBuiltinScopedMemoryPolicy({
+        agentId: params.context.agentId,
+        storeId: row.store_id,
+        principalIds,
+        deliveryAudiences: params.context.delivery.audiences,
+        operation: params.context.operation,
+        nowMs: params.nowMs,
+      });
+      if (!decision.allowed || decision.policyRevisionId !== row.current_revision_id) {
+        if (roleMembership) {
+          enterpriseRoleDecisions.push({
+            groupId: roleMembership.groupId,
+            policyId: row.policy_id,
+            decision: "denied",
+            reasonCode: decision.reasonCode,
+            policyRevision: row.current_revision_id,
+          });
+        }
+        return [];
+      }
+      if (roleMembership) {
+        enterpriseRoleDecisions.push({
+          groupId: roleMembership.groupId,
+          policyId: row.policy_id,
+          decision: "allowed",
+          reasonCode: decision.reasonCode,
+          policyRevision: row.current_revision_id,
+        });
+      }
+      return [
+        Object.freeze({
+          storeId: row.store_id,
+          policyRevisionId: row.current_revision_id,
+          audienceRevision: `mar1_${hash([
+            row.store_id,
+            row.audience_kind,
+            row.audience_id,
+            row.current_revision_id,
+            String(row.revocation_epoch),
+          ])}`,
+        }),
+      ];
+    });
+    return Object.freeze({
+      stores: Object.freeze(stores),
+      enterpriseRoleDecisions: Object.freeze(enterpriseRoleDecisions),
+    });
   });
 }
 
@@ -372,10 +458,19 @@ function deleteExpiredPlans(nowMs: number): void {
   }
 }
 
-function createPlan(context: MemoryAccessContext): PlanState {
+function createPlan(
+  context: MemoryAccessContext,
+  enterpriseAccessAuditReporter?: MemoryEnterpriseAccessAuditReporter,
+): PlanState {
   const nowMs = Date.now();
   deleteExpiredPlans(nowMs);
-  const authorizedStores = listAuthorizedStores({ context, nowMs });
+  const authorization = listAuthorizedStores({ context, nowMs });
+  enterpriseAccessAuditReporter?.recordRoleAccessDecisions({
+    context,
+    decisions: authorization.enterpriseRoleDecisions,
+    now: nowMs,
+  });
+  const authorizedStores = authorization.stores;
   // A derivation model gets one representable audience/store, never a
   // post-admission filtered subset of a multi-store authorized view.
   const stores =
@@ -468,7 +563,7 @@ function readPlan(params: {
   ) {
     return undefined;
   }
-  const currentStores = listAuthorizedStores({ context: params.context, nowMs });
+  const currentStores = listAuthorizedStores({ context: params.context, nowMs }).stores;
   if (
     currentStores.length !== state.stores.length ||
     currentStores.some(
@@ -2523,11 +2618,14 @@ async function stageSealedCompaction(
   });
 }
 
-const builtinScopedMemoryRuntime = {
+export function createBuiltinScopedMemoryAuthorizedRuntime(
+  enterpriseAccessAuditReporter?: MemoryEnterpriseAccessAuditReporter,
+): AuthorizedMemoryRuntime {
+  const builtinScopedMemoryRuntime = {
   async authorize(context: MemoryAccessContext): Promise<AuthorizedMemoryPlan> {
     recoverPendingWrites(context.agentId);
     drainMemoryAuditOutbox(context.agentId);
-    const state = createPlan(context);
+    const state = createPlan(context, enterpriseAccessAuditReporter);
     plans.set(state.plan.planId, state);
     return state.plan;
   },
@@ -2554,7 +2652,7 @@ const builtinScopedMemoryRuntime = {
     if (!rootPrincipalId) {
       throw new Error("memory child delegation is unavailable");
     }
-    const parentPlan = createPlan(issue.parentContext);
+    const parentPlan = createPlan(issue.parentContext, enterpriseAccessAuditReporter);
     if (parentPlan.stores.length === 0) {
       throw new Error("memory child delegation is unavailable");
     }
@@ -2816,11 +2914,11 @@ const builtinScopedMemoryRuntime = {
       sourcePolicySetIds: [params.plan.memoryPolicyRevision],
     });
   },
-};
+  };
+  return Object.freeze(builtinScopedMemoryRuntime) as unknown as AuthorizedMemoryRuntime;
+}
 
-export const builtinScopedMemoryAuthorizedRuntime = Object.freeze(
-  builtinScopedMemoryRuntime,
-) as unknown as AuthorizedMemoryRuntime;
+export const builtinScopedMemoryAuthorizedRuntime = createBuiltinScopedMemoryAuthorizedRuntime();
 
 export const builtinScopedMemoryVirtualView = Object.freeze({
   async materializeAuthorizedVirtualView(params: {
