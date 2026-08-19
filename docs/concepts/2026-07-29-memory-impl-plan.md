@@ -1779,7 +1779,7 @@ Phase 4 is complete only when all of the following are demonstrated:
       before constructing principals.
 - [x] Private stores never open for forged, wrong-issuer, wrong-audience,
       expired, revoked, conflicting, or unbound identities.
-- [x] Role and native-channel evidence is revisioned, bounded by documented
+- [ ] Role and native-channel evidence is revisioned, bounded by documented
       staleness, and removed fail-closed during expiry or provider outage.
 - [x] Existing `session_members` remains authoritative only for Gateway
       collaborative sessions; provider membership does not create a competing
