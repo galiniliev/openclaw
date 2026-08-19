@@ -25,10 +25,8 @@ import {
 } from "../../plugins/memory-state.test-fixtures.js";
 import { createEmptyPluginRegistry } from "../../plugins/registry-empty.js";
 import { setActivePluginRegistry } from "../../plugins/runtime.js";
-import {
-  closeOpenClawAgentDatabasesForTest,
-  openOpenClawAgentDatabase,
-} from "../../state/openclaw-agent-db.js";
+import { closeOpenClawAgentDatabasesForTest } from "../../state/openclaw-agent-db.js";
+import { completeTestMemoryIsolationCutover } from "../../test-utils/memory-isolation-cutover.js";
 import type { TemplateContext } from "../templating.js";
 import type { ReplyPayload } from "../types.js";
 import {
@@ -323,16 +321,7 @@ describe("runMemoryFlushIfNeeded", () => {
   let originalStateDir: string | undefined;
 
   function markAgentCutOver(agentId: string): void {
-    const database = openOpenClawAgentDatabase({ agentId });
-    database.db
-      .prepare(
-        `INSERT INTO memory_migrations
-          (migration_id, source_kind, source_hash, phase, classification_json, plan_hash,
-           verified_at, cutover_at, updated_at)
-         VALUES (?, 'test', 'test-source', 'cutover', '{}', 'test-plan', 1, 1, 1)`,
-      )
-      .run(`memory-cutover-${agentId}`);
-    resetMemoryIsolationCutoverForTest();
+    completeTestMemoryIsolationCutover({ agentId });
   }
 
   async function runProjectedCompaction(completed: boolean, followupRun = createTestFollowupRun()) {

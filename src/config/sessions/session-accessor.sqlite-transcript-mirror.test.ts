@@ -5,6 +5,7 @@ import {
   closeOpenClawAgentDatabasesForTest,
   openOpenClawAgentDatabase,
 } from "../../state/openclaw-agent-db.js";
+import { completeTestMemoryIsolationCutover } from "../../test-utils/memory-isolation-cutover.js";
 import { resolveSqliteTranscriptScope } from "./session-accessor.sqlite-scope.js";
 import { readTranscriptMirrorFacts } from "./session-accessor.sqlite-transcript-mirror.js";
 import { appendSqliteTranscriptMessage } from "./session-accessor.sqlite-transcript-write.js";
@@ -52,14 +53,7 @@ describe("readTranscriptMirrorFacts", () => {
     expect(indexState).toMatchObject({ needs_rebuild: 0 });
     expect(indexState.indexed_seq).toBe(indexState.latest_seq);
 
-    database.db
-      .prepare(
-        `INSERT INTO memory_migrations
-          (migration_id, source_kind, source_hash, phase, classification_json, plan_hash,
-           verified_at, cutover_at, updated_at)
-         VALUES (?, 'test', 'test-source', 'cutover', '{}', 'test-plan', 1, 1, 1)`,
-      )
-      .run("mirror-cutover-test");
+    completeTestMemoryIsolationCutover({ agentId: scope.agentId, env });
     resetTranscriptMemoryPolicyForTest(database.db);
 
     expect(
@@ -93,14 +87,7 @@ describe("readTranscriptMirrorFacts", () => {
     });
 
     const database = openOpenClawAgentDatabase({ agentId: scope.agentId, env });
-    database.db
-      .prepare(
-        `INSERT INTO memory_migrations
-          (migration_id, source_kind, source_hash, phase, classification_json, plan_hash,
-           verified_at, cutover_at, updated_at)
-         VALUES (?, 'test', 'test-source', 'cutover', '{}', 'test-plan', 1, 1, 1)`,
-      )
-      .run("mirror-fallback-cutover-test");
+    completeTestMemoryIsolationCutover({ agentId: scope.agentId, env });
     database.db
       .prepare("UPDATE session_transcript_index_state SET needs_rebuild = 1 WHERE session_id = ?")
       .run(scope.sessionId);

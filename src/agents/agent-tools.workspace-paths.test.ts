@@ -12,10 +12,8 @@ import "./test-helpers/fast-openclaw-tools.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { resetMemoryIsolationCutoverForTest } from "../plugins/memory-cutover.js";
 import { createCanonicalFixtureSkill } from "../skills/test-support/test-helpers.js";
-import {
-  closeOpenClawAgentDatabasesForTest,
-  openOpenClawAgentDatabase,
-} from "../state/openclaw-agent-db.js";
+import { closeOpenClawAgentDatabasesForTest } from "../state/openclaw-agent-db.js";
+import { completeTestMemoryIsolationCutover } from "../test-utils/memory-isolation-cutover.js";
 import { createOpenClawCodingTools } from "./agent-tools.js";
 import {
   createHostWorkspaceEditTool,
@@ -95,17 +93,7 @@ describe("workspace path resolution", () => {
       const originalStateDir = process.env.OPENCLAW_STATE_DIR;
       process.env.OPENCLAW_STATE_DIR = stateDir;
       try {
-        const database = openOpenClawAgentDatabase({ agentId: "main" });
-        database.db
-          .prepare(
-            `INSERT INTO memory_migrations
-              (migration_id, source_kind, source_hash, phase, classification_json, plan_hash,
-               verified_at, cutover_at, updated_at)
-             VALUES ('memory-cutover-shell-tools', 'test', 'test-source', 'cutover', '{}',
-                     'test-plan', 1, 1, 1)`,
-          )
-          .run();
-        resetMemoryIsolationCutoverForTest();
+        completeTestMemoryIsolationCutover({ agentId: "main" });
 
         vi.mocked(createOpenClawTools).mockImplementationOnce(() =>
           ["read", "memory_search", "memory_get", "exec"].map((name) => ({ name }) as never),
@@ -131,17 +119,7 @@ describe("workspace path resolution", () => {
       const originalStateDir = process.env.OPENCLAW_STATE_DIR;
       process.env.OPENCLAW_STATE_DIR = stateDir;
       try {
-        const database = openOpenClawAgentDatabase({ agentId: "main" });
-        database.db
-          .prepare(
-            `INSERT INTO memory_migrations
-              (migration_id, source_kind, source_hash, phase, classification_json, plan_hash,
-               verified_at, cutover_at, updated_at)
-             VALUES ('memory-cutover-flush-tools', 'test', 'test-source', 'cutover', '{}',
-                     'test-plan', 1, 1, 1)`,
-          )
-          .run();
-        resetMemoryIsolationCutoverForTest();
+        completeTestMemoryIsolationCutover({ agentId: "main" });
         vi.mocked(createOpenClawTools).mockImplementationOnce(() => [
           { name: "memory_remember" } as never,
         ]);

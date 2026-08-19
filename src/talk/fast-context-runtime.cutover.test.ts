@@ -2,10 +2,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetMemoryIsolationCutoverForTest } from "../plugins/memory-cutover.js";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
-import {
-  closeOpenClawAgentDatabasesForTest,
-  openOpenClawAgentDatabase,
-} from "../state/openclaw-agent-db.js";
+import { closeOpenClawAgentDatabasesForTest } from "../state/openclaw-agent-db.js";
+import { completeTestMemoryIsolationCutover } from "../test-utils/memory-isolation-cutover.js";
 import {
   createOpenClawTestState,
   type OpenClawTestState,
@@ -91,16 +89,7 @@ describe("Talk fast context after scoped-memory cutover", () => {
       } as never);
       mocks.requireActivePluginRegistry.mockReturnValue(registry);
 
-      const database = openOpenClawAgentDatabase({ agentId });
-      database.db
-        .prepare(
-          `INSERT INTO memory_migrations
-            (migration_id, source_kind, source_hash, phase, classification_json, plan_hash,
-             verified_at, cutover_at, updated_at)
-           VALUES ('talk-fast-context-cutover', 'test', 'test-source', 'cutover', '{}', 'test-plan', 1, 1, 1)`,
-        )
-        .run();
-      resetMemoryIsolationCutoverForTest();
+      completeTestMemoryIsolationCutover({ agentId });
 
       const result = await resolveRealtimeVoiceFastContextConsult({
         cfg: { plugins: { slots: { memory: "memory-core" } } } as never,

@@ -1,10 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import {
-  closeOpenClawAgentDatabasesForTest,
-  openOpenClawAgentDatabase,
-} from "openclaw/plugin-sdk/sqlite-runtime-testing";
+import { closeOpenClawAgentDatabasesForTest } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { completeTestMemoryIsolationCutover } from "../../../../src/test-utils/memory-isolation-cutover.js";
 import { prepareCodexAttemptConnection } from "./run-attempt-connection.js";
 import { createParams, setupRunAttemptTestHooks, tempDir } from "./run-attempt-test-harness.js";
 import { testCodexAppServerBindingStore } from "./session-binding.test-helpers.js";
@@ -16,15 +14,7 @@ afterEach(() => {
 });
 
 function markAgentMemoryCutOver(agentId: string): void {
-  const database = openOpenClawAgentDatabase({ agentId });
-  database.db
-    .prepare(
-      `INSERT INTO memory_migrations
-        (migration_id, source_kind, source_hash, phase, classification_json, plan_hash,
-         verified_at, cutover_at, updated_at)
-       VALUES ('codex-project-document-fence', 'test', 'test-source', 'cutover', '{}', 'test-plan', 1, 1, 1)`,
-    )
-    .run();
+  completeTestMemoryIsolationCutover({ agentId });
 }
 
 describe("Codex memory-isolation boundary", () => {

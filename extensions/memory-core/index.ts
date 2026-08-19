@@ -36,10 +36,7 @@ import { registerScopedMemorySharingGatewayMethods } from "./src/memory/scoped-m
 import { buildPromptSection } from "./src/prompt-section.js";
 import { registerSessionBackfillGatewayMethods } from "./src/session-backfill-gateway.js";
 
-export {
-  createMemoryBrokerHandler,
-  initializeMemoryBroker,
-} from "./src/memory/broker-entry.js";
+export { createMemoryBrokerHandler, initializeMemoryBroker } from "./src/memory/broker-entry.js";
 
 type MemoryToolsModule = typeof import("./src/tools.js");
 type StandingIntentToolModule = typeof import("./src/standing-intents-tool.js");
@@ -72,6 +69,9 @@ const loadRuntimeProviderModule = createLazyRuntimeModule(
 );
 const loadScopedMemorySharingModule = createLazyRuntimeModule(
   () => import("./src/memory/scoped-memory-sharing.js"),
+);
+const loadFinalScopedMemoryMigrationModule = createLazyRuntimeModule(
+  () => import("./src/migration/final-scoped-memory-migration.js"),
 );
 
 // The selected broker imports this packaged extension entry, which re-exports its private
@@ -391,6 +391,87 @@ function createLazyMemoryRuntime(
     syncAuthorized: authorizedRuntime.syncAuthorized,
     exportAuthorized: authorizedRuntime.exportAuthorized,
     statusAuthorized: authorizedRuntime.statusAuthorized,
+    async runIsolationMigration(params) {
+      const migration = await loadFinalScopedMemoryMigrationModule();
+      const sources = migration.discoverFinalScopedMemoryMigrationSources({
+        agentId: params.agentId,
+        workspaceDir: params.workspaceDir,
+        stateDir: params.stateDir,
+      });
+      const plan = migration.planFinalScopedMemoryMigration({
+        migrationId: params.migrationId,
+        actor: params.actor,
+        sources,
+        decisions: params.decisions,
+      });
+      if (params.action === "dry-run") {
+        return {
+          state: "planned",
+          migrationId: plan.migrationId,
+          planHash: plan.planHash,
+          sources: plan.sources.map((source) => ({
+            sourceId: source.sourceId,
+            sourceKind: source.sourceKind,
+            sourceHash: source.sourceHash,
+            placement: source.placement,
+          })),
+        };
+      }
+      const result = migration.applyFinalScopedMemoryMigration({
+        agentId: params.agentId,
+        migrationId: params.migrationId,
+        actor: params.actor,
+        sources,
+        decisions: params.decisions,
+        expectedPlanHash: params.expectedPlanHash,
+        ...(params.nowMs === undefined ? {} : { nowMs: params.nowMs }),
+      });
+      return {
+        state: "verified",
+        migrationId: result.migrationId,
+        planHash: result.planHash,
+        sources: plan.sources.map((source) => ({
+          sourceId: source.sourceId,
+          sourceKind: source.sourceKind,
+          sourceHash: source.sourceHash,
+          placement: source.placement,
+        })),
+        verifiedSources: result.verifiedSources,
+      };
+    },
+    async archiveIsolationMigration(params) {
+      const migration = await loadFinalScopedMemoryMigrationModule();
+      migration.archiveFinalScopedMemoryMigration({
+        agentId: params.agentId,
+        migrationId: params.migrationId,
+        sources: migration.discoverFinalScopedMemoryMigrationSources({
+          agentId: params.agentId,
+          workspaceDir: params.workspaceDir,
+          stateDir: params.stateDir,
+        }),
+        cutover: params.cutover,
+        ...(params.nowMs === undefined ? {} : { nowMs: params.nowMs }),
+      });
+    },
+    async rollbackIsolationMigration(params) {
+      const migration = await loadFinalScopedMemoryMigrationModule();
+      migration.rollbackFinalScopedMemoryMigrationByPlan({
+        agentId: params.agentId,
+        migrationId: params.migrationId,
+        planHash: params.planHash,
+        ...(params.nowMs === undefined ? {} : { nowMs: params.nowMs }),
+      });
+    },
+    async exportIsolationMigration(params) {
+      const migration = await loadFinalScopedMemoryMigrationModule();
+      return migration.exportFinalScopedMemoryMigration({
+        agentId: params.agentId,
+        migrationId: params.migrationId,
+        outputDir: params.outputDir,
+        cutover: params.cutover,
+        ...(params.nowMs === undefined ? {} : { nowMs: params.nowMs }),
+      });
+    },
     async getMemorySearchManager(params) {
       const { createMemoryRuntime } = await loadRuntimeProviderModule();
       return await createMemoryRuntime(host).getMemorySearchManager(params);

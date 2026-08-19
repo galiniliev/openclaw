@@ -21,6 +21,7 @@ import {
 import { ensureOpenClawAgentScopedMemorySchema } from "../state/openclaw-agent-scoped-memory-schema.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
 import { ensureProfileForEmail } from "../state/user-profiles.js";
+import { completeTestMemoryIsolationCutover } from "../test-utils/memory-isolation-cutover.js";
 import { resetMemoryIsolationCutoverForTest } from "./memory-cutover.js";
 import { MEMORY_INVOCATION_UNAVAILABLE } from "./memory-invocation.js";
 import { createEmptyPluginRegistry } from "./registry-empty.js";
@@ -106,15 +107,7 @@ function createAuthorizedReadHost() {
     bindingId: binding.bindingId,
     options,
   });
-  database.db
-    .prepare(
-      `INSERT INTO memory_migrations
-        (migration_id, source_kind, source_hash, phase, classification_json, plan_hash,
-         verified_at, cutover_at, updated_at)
-       VALUES ('memory-invocation-cutover', 'test', 'test-source', 'cutover', '{}', 'test-plan', 1, 1, 1)`,
-    )
-    .run();
-  resetMemoryIsolationCutoverForTest();
+  completeTestMemoryIsolationCutover(options);
   const host = createAuthorizedMemoryReadHost({
     agentId,
     sessionKey,

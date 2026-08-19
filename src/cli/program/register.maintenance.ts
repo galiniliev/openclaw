@@ -23,6 +23,8 @@ const STATE_SQLITE_CONFLICTING_OPTION_NAMES = [
   "postUpgrade",
   "memoryIsolation",
   "memoryIsolationAgent",
+  "memoryIsolationPlan",
+  "memoryIsolationDecisions",
   "sessionSqlite",
   "sessionSqliteStore",
   "sessionSqliteAgent",
@@ -98,9 +100,21 @@ export function registerMaintenanceCommands(program: Command) {
     )
     .option(
       "--memory-isolation <mode>",
-      "Manage the durable P1C memory posture (status|shadow-read-only|legacy)",
+      "Manage memory isolation (status|shadow-read-only|legacy|dry-run|cutover|rollback|archive|export)",
     )
     .option("--memory-isolation-agent <id>", "With --memory-isolation: select one configured agent")
+    .option(
+      "--memory-isolation-plan <sha256>",
+      "With --memory-isolation cutover or rollback: the exact reviewed dry-run plan digest",
+    )
+    .option(
+      "--memory-isolation-decisions <path>",
+      "With --memory-isolation dry-run or cutover: version 1 reviewed decision manifest",
+    )
+    .option(
+      "--memory-isolation-export <path>",
+      "With --memory-isolation export: create one explicit downgrade export directory",
+    )
     .option(
       "--session-sqlite <mode>",
       "Run session SQLite migration mode (dry-run|import|validate|inspect|compact|restore|recover)",
@@ -148,9 +162,63 @@ export function registerMaintenanceCommands(program: Command) {
         defaultRuntime.exit(2);
         return;
       }
-      if (!memoryIsolation && typeof opts.memoryIsolationAgent === "string") {
+      if (
+        !memoryIsolation &&
+        (typeof opts.memoryIsolationAgent === "string" ||
+          typeof opts.memoryIsolationPlan === "string" ||
+          typeof opts.memoryIsolationDecisions === "string")
+      ) {
+        defaultRuntime.error("doctor memory isolation options require --memory-isolation.");
+        defaultRuntime.exit(2);
+        return;
+      }
+      if (!memoryIsolation && typeof opts.memoryIsolationExport === "string") {
+        defaultRuntime.error("doctor memory isolation export requires --memory-isolation export.");
+        defaultRuntime.exit(2);
+        return;
+      }
+      if (memoryIsolation !== "export" && typeof opts.memoryIsolationExport === "string") {
         defaultRuntime.error(
-          "doctor memory isolation agent requires --memory-isolation. Use `openclaw doctor --memory-isolation status --memory-isolation-agent <id>`.",
+          "doctor --memory-isolation-export requires --memory-isolation export.",
+        );
+        defaultRuntime.exit(2);
+        return;
+      }
+      if (memoryIsolation === "export" && typeof opts.memoryIsolationExport !== "string") {
+        defaultRuntime.error(
+          "doctor --memory-isolation export requires --memory-isolation-export <path>.",
+        );
+        defaultRuntime.exit(2);
+        return;
+      }
+      if (
+        typeof opts.memoryIsolationPlan === "string" &&
+        memoryIsolation !== "cutover" &&
+        memoryIsolation !== "rollback"
+      ) {
+        defaultRuntime.error(
+          "doctor --memory-isolation-plan requires --memory-isolation cutover or rollback.",
+        );
+        defaultRuntime.exit(2);
+        return;
+      }
+      if (
+        (memoryIsolation === "cutover" || memoryIsolation === "rollback") &&
+        typeof opts.memoryIsolationPlan !== "string"
+      ) {
+        defaultRuntime.error(
+          `doctor --memory-isolation ${memoryIsolation} requires --memory-isolation-plan <sha256>.`,
+        );
+        defaultRuntime.exit(2);
+        return;
+      }
+      if (
+        typeof opts.memoryIsolationDecisions === "string" &&
+        memoryIsolation !== "dry-run" &&
+        memoryIsolation !== "cutover"
+      ) {
+        defaultRuntime.error(
+          "doctor --memory-isolation-decisions requires --memory-isolation dry-run or cutover.",
         );
         defaultRuntime.exit(2);
         return;
@@ -166,6 +234,7 @@ export function registerMaintenanceCommands(program: Command) {
       }
       const jsonImpliesLint =
         opts.json === true &&
+        !memoryIsolation &&
         opts.lint !== true &&
         opts.postUpgrade !== true &&
         typeof opts.stateSqlite !== "string" &&
@@ -231,6 +300,15 @@ export function registerMaintenanceCommands(program: Command) {
             ...(memoryIsolation ? { memoryIsolation } : {}),
             ...(typeof opts.memoryIsolationAgent === "string"
               ? { memoryIsolationAgent: opts.memoryIsolationAgent }
+              : {}),
+            ...(typeof opts.memoryIsolationPlan === "string"
+              ? { memoryIsolationPlan: opts.memoryIsolationPlan }
+              : {}),
+            ...(typeof opts.memoryIsolationDecisions === "string"
+              ? { memoryIsolationDecisions: opts.memoryIsolationDecisions }
+              : {}),
+            ...(typeof opts.memoryIsolationExport === "string"
+              ? { memoryIsolationExport: opts.memoryIsolationExport }
               : {}),
             ...(stateSqlite ? { stateSqlite } : {}),
             ...(sessionSqlite ? { sessionSqlite } : {}),
@@ -362,14 +440,34 @@ function hasSessionSqliteOnlyDoctorOptions(opts: {
 
 function parseDoctorMemoryIsolationMode(
   value: unknown,
-): "status" | "shadow-read-only" | "legacy" | undefined {
+):
+  | "status"
+  | "shadow-read-only"
+  | "legacy"
+  | "dry-run"
+  | "cutover"
+  | "rollback"
+  | "archive"
+  | "export"
+  | undefined {
   if (value === undefined) {
     return undefined;
   }
-  if (value === "status" || value === "shadow-read-only" || value === "legacy") {
+  if (
+    value === "status" ||
+    value === "shadow-read-only" ||
+    value === "legacy" ||
+    value === "dry-run" ||
+    value === "cutover" ||
+    value === "rollback" ||
+    value === "archive" ||
+    value === "export"
+  ) {
     return value;
   }
-  defaultRuntime.error("Invalid --memory-isolation mode. Use status, shadow-read-only, or legacy.");
+  defaultRuntime.error(
+    "Invalid --memory-isolation mode. Use status, shadow-read-only, legacy, dry-run, cutover, rollback, archive, or export.",
+  );
   defaultRuntime.exit(2);
   throw new Error("unreachable");
 }

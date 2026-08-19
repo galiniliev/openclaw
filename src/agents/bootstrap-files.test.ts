@@ -14,13 +14,11 @@ import {
   type AgentBootstrapHookContext,
 } from "../hooks/internal-hooks.js";
 import { resetMemoryIsolationCutoverForTest } from "../plugins/memory-cutover.js";
-import {
-  closeOpenClawAgentDatabasesForTest,
-  openOpenClawAgentDatabase,
-} from "../state/openclaw-agent-db.js";
+import { closeOpenClawAgentDatabasesForTest } from "../state/openclaw-agent-db.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
 import { makeTempWorkspace } from "../test-helpers/workspace.js";
 import { withEnvAsync } from "../test-utils/env.js";
+import { completeTestMemoryIsolationCutover } from "../test-utils/memory-isolation-cutover.js";
 import {
   createOpenClawTestState,
   type OpenClawTestState,
@@ -319,16 +317,7 @@ describe("resolveBootstrapFilesForRun", () => {
     await fs.mkdir(path.join(workspaceDir, "memory"), { recursive: true });
     await fs.writeFile(path.join(workspaceDir, "memory", "2026-08-10.md"), "private daily", "utf8");
     registerNamedBootstrapFileHook("memory/2026-08-10.md", "AGENTS.md");
-    const database = openOpenClawAgentDatabase({ agentId: "main" });
-    database.db
-      .prepare(
-        `INSERT INTO memory_migrations
-          (migration_id, source_kind, source_hash, phase, classification_json, plan_hash,
-           verified_at, cutover_at, updated_at)
-         VALUES ('memory-cutover-test', 'test', 'test-source', 'cutover', '{}', 'test-plan', 1, 1, 1)`,
-      )
-      .run();
-    resetMemoryIsolationCutoverForTest();
+    completeTestMemoryIsolationCutover({ agentId: "main" });
 
     const files = await resolveBootstrapFilesForRun({ workspaceDir, agentId: "main" });
 

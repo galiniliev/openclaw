@@ -5,6 +5,7 @@ import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveUserPath } from "../utils.js";
 import { normalizePluginsConfig } from "./config-state.js";
 import { loadPluginRegistryHandle, resolvePluginRegistryLoadCacheKey } from "./loader.js";
+import { admitMemoryAuthorizationRuntime } from "./memory-authorization-runtime.js";
 import { observeMemoryAuthorizationShadowSurface } from "./memory-authorization-shadow.js";
 import { closeBrokeredMemoryRuntimes } from "./memory-broker-runtime.js";
 import { isMemoryIsolationCutoverAgent } from "./memory-cutover.js";
@@ -12,7 +13,13 @@ import {
   resolveSelectedMemoryCapabilityRegistration,
   setStandaloneMemoryManagerActive,
 } from "./memory-state.js";
-import type { MemoryPluginCapability, MemoryPluginRuntime } from "./registry-contribution-types.js";
+import type {
+  MemoryIsolationDowngradeExport,
+  MemoryIsolationFinalCutover,
+  MemoryIsolationMigrationResult,
+  MemoryPluginCapability,
+  MemoryPluginRuntime,
+} from "./registry-contribution-types.js";
 import type { PluginRegistry } from "./registry-types.js";
 import { requireActivePluginRegistry } from "./runtime.js";
 import { withPluginRuntimeRegistryScope } from "./runtime/gateway-request-scope.js";
@@ -189,6 +196,152 @@ export async function getActiveMemorySearchManagerCore(params: {
     owner,
     async (runtime) => await runtime.getMemorySearchManager(params),
   );
+}
+
+/**
+ * Doctor reaches a selected plugin through the same registry-owned seam as the runtime. The plugin
+ * controls source bytes and scoped state; core receives only redacted plan evidence for final cutover.
+ */
+export async function runSelectedMemoryIsolationMigration(params: {
+  cfg: OpenClawConfig;
+  agentId: string;
+  workspaceDir: string;
+  stateDir: string;
+  migrationId: string;
+  action: "dry-run" | "apply";
+  actor: Readonly<{ role: "owner" | "admin"; principalId: string }>;
+  decisions: readonly (
+    | Readonly<{ sourceId: string; sourceHash: string; placement: "quarantine" }>
+    | Readonly<{
+        sourceId: string;
+        sourceHash: string;
+        placement: "user-private";
+        principalId: string;
+      }>
+  )[];
+  expectedPlanHash?: string;
+  nowMs?: number;
+}): Promise<MemoryIsolationMigrationResult> {
+  const owner = ensureMemoryRuntime({ cfg: params.cfg, agentId: params.agentId });
+  if (!owner) {
+    throw new Error("selected memory plugin is unavailable for memory isolation migration");
+  }
+  return await withMemoryRuntimeOwner(owner, async (runtime) => {
+    if (!runtime.runIsolationMigration) {
+      throw new Error("selected memory plugin does not support final scoped memory migration");
+    }
+    return await runtime.runIsolationMigration({
+      action: params.action,
+      agentId: params.agentId,
+      workspaceDir: params.workspaceDir,
+      stateDir: params.stateDir,
+      migrationId: params.migrationId,
+      actor: params.actor,
+      decisions: params.decisions,
+      ...(params.expectedPlanHash === undefined
+        ? {}
+        : { expectedPlanHash: params.expectedPlanHash }),
+      ...(params.nowMs === undefined ? {} : { nowMs: params.nowMs }),
+    });
+  });
+}
+
+/** Final cutover is unavailable unless the exact selected backend passes the enforced runtime gate. */
+export async function requireSelectedMemoryIsolationBackendConformance(params: {
+  cfg: OpenClawConfig;
+  agentId: string;
+}): Promise<void> {
+  const owner = ensureMemoryRuntime(params);
+  if (!owner) {
+    throw new Error("selected memory plugin is unavailable for memory isolation cutover");
+  }
+  const registry = owner.registry ?? requireActivePluginRegistry();
+  const registration = resolveSelectedMemoryCapabilityRegistration(registry);
+  const admission = await admitMemoryAuthorizationRuntime(registration?.capability);
+  if (!admission.ok) {
+    throw new Error("selected memory backend is nonconforming for enforced memory isolation");
+  }
+}
+
+/** Archive the now-unreachable legacy sources only after core has committed the final marker. */
+export async function archiveSelectedMemoryIsolationMigration(params: {
+  cfg: OpenClawConfig;
+  agentId: string;
+  workspaceDir: string;
+  stateDir: string;
+  migrationId: string;
+  cutover: MemoryIsolationFinalCutover;
+  nowMs?: number;
+}): Promise<void> {
+  const owner = ensureMemoryRuntime({ cfg: params.cfg, agentId: params.agentId });
+  if (!owner) {
+    throw new Error("selected memory plugin is unavailable for memory isolation archival");
+  }
+  await withMemoryRuntimeOwner(owner, async (runtime) => {
+    if (!runtime.archiveIsolationMigration) {
+      throw new Error("selected memory plugin does not support final scoped memory archival");
+    }
+    await runtime.archiveIsolationMigration({
+      agentId: params.agentId,
+      workspaceDir: params.workspaceDir,
+      stateDir: params.stateDir,
+      migrationId: params.migrationId,
+      cutover: params.cutover,
+      ...(params.nowMs === undefined ? {} : { nowMs: params.nowMs }),
+    });
+  });
+}
+
+/** Retire verified scoped copies before the final marker; legacy sources and backups remain intact. */
+export async function rollbackSelectedMemoryIsolationMigration(params: {
+  cfg: OpenClawConfig;
+  agentId: string;
+  migrationId: string;
+  planHash: string;
+  nowMs?: number;
+}): Promise<void> {
+  const owner = ensureMemoryRuntime({ cfg: params.cfg, agentId: params.agentId });
+  if (!owner) {
+    throw new Error("selected memory plugin is unavailable for memory isolation rollback");
+  }
+  await withMemoryRuntimeOwner(owner, async (runtime) => {
+    if (!runtime.rollbackIsolationMigration) {
+      throw new Error("selected memory plugin does not support final scoped memory rollback");
+    }
+    await runtime.rollbackIsolationMigration({
+      agentId: params.agentId,
+      migrationId: params.migrationId,
+      planHash: params.planHash,
+      ...(params.nowMs === undefined ? {} : { nowMs: params.nowMs }),
+    });
+  });
+}
+
+/** Produce the warned export artifact for an operator-directed downgrade; this never alters mode. */
+export async function exportSelectedMemoryIsolationMigration(params: {
+  cfg: OpenClawConfig;
+  agentId: string;
+  migrationId: string;
+  outputDir: string;
+  cutover: MemoryIsolationFinalCutover;
+  nowMs?: number;
+}): Promise<MemoryIsolationDowngradeExport> {
+  const owner = ensureMemoryRuntime({ cfg: params.cfg, agentId: params.agentId });
+  if (!owner) {
+    throw new Error("selected memory plugin is unavailable for memory isolation export");
+  }
+  return await withMemoryRuntimeOwner(owner, async (runtime) => {
+    if (!runtime.exportIsolationMigration) {
+      throw new Error("selected memory plugin does not support final scoped memory export");
+    }
+    return await runtime.exportIsolationMigration({
+      agentId: params.agentId,
+      migrationId: params.migrationId,
+      outputDir: params.outputDir,
+      cutover: params.cutover,
+      ...(params.nowMs === undefined ? {} : { nowMs: params.nowMs }),
+    });
+  });
 }
 
 /** Applies the selected memory plugin's authorization policy to raw search hits. */

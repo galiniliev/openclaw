@@ -3,12 +3,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import { resolveMainSessionKey } from "../config/sessions.js";
 import { resetMemoryIsolationCutoverForTest } from "../plugins/memory-cutover.js";
-import {
-  closeOpenClawAgentDatabasesForTest,
-  openOpenClawAgentDatabase,
-} from "../state/openclaw-agent-db.js";
-import { runHeartbeatOnce } from "./heartbeat-runner.js";
+import { closeOpenClawAgentDatabasesForTest } from "../state/openclaw-agent-db.js";
+import { completeTestMemoryIsolationCutover } from "../test-utils/memory-isolation-cutover.js";
 import { resolveMemoryIsolatedHeartbeatSessionKey } from "./heartbeat-runner-session.js";
+import { runHeartbeatOnce } from "./heartbeat-runner.js";
 import { installHeartbeatRunnerTestRuntime } from "./heartbeat-runner.test-harness.js";
 import {
   readSessionStoreForTest,
@@ -179,17 +177,7 @@ describe("runHeartbeatOnce - isolated heartbeat outbound session mirror", () => 
       const baseSessionKey = resolveMainSessionKey(cfg);
       const serviceSessionKey = resolveMemoryIsolatedHeartbeatSessionKey("main");
       const nowMs = Date.now();
-      const database = openOpenClawAgentDatabase({ agentId: "main" });
-      database.db
-        .prepare(
-          `INSERT INTO memory_migrations
-            (migration_id, source_kind, source_hash, phase, classification_json, plan_hash,
-             verified_at, cutover_at, updated_at)
-           VALUES ('heartbeat-service-session', 'test', 'test-source', 'cutover', '{}',
-                   'test-plan', 1, 1, 1)`,
-        )
-        .run();
-      resetMemoryIsolationCutoverForTest();
+      completeTestMemoryIsolationCutover({ agentId: "main" });
       await seedHeartbeatScratchForTest({ content: "Check the scheduled service work." });
       await seedSessionStore(storePath, baseSessionKey, {
         sessionId: "user-session",

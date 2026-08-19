@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   loadPluginRegistryHandle: vi.fn(),
   logDebug: vi.fn(),
   observeMemoryAuthorizationShadowSurface: vi.fn(),
+  admitMemoryAuthorizationRuntime: vi.fn(),
   requireActivePluginRegistry: vi.fn(),
   resolvePluginRegistryLoadCacheKey: vi.fn((options: unknown) => JSON.stringify(options)),
   resolveAgentWorkspaceDir: vi.fn(),
@@ -37,6 +38,10 @@ vi.mock("./memory-authorization-shadow.js", () => ({
   observeMemoryAuthorizationShadowSurface: mocks.observeMemoryAuthorizationShadowSurface,
 }));
 
+vi.mock("./memory-authorization-runtime.js", () => ({
+  admitMemoryAuthorizationRuntime: mocks.admitMemoryAuthorizationRuntime,
+}));
+
 vi.mock("./runtime.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./runtime.js")>();
   return { ...actual, requireActivePluginRegistry: mocks.requireActivePluginRegistry };
@@ -48,6 +53,7 @@ import {
   closeActiveMemorySearchManagersCore,
   getActiveMemorySearchManagerCore,
   getSelectedMemoryRuntime,
+  requireSelectedMemoryIsolationBackendConformance,
   resolveActiveMemoryBackendConfig,
 } from "./memory-runtime.js";
 import { resetStandaloneMemoryRegistrySlot } from "./memory-runtime.test-support.js";
@@ -94,6 +100,7 @@ describe("memory runtime handles", () => {
     mocks.loadPluginRegistryHandle.mockReset();
     mocks.logDebug.mockReset();
     mocks.observeMemoryAuthorizationShadowSurface.mockReset();
+    mocks.admitMemoryAuthorizationRuntime.mockReset();
     mocks.requireActivePluginRegistry.mockReset().mockReturnValue(createEmptyPluginRegistry());
     mocks.resolvePluginRegistryLoadCacheKey.mockClear();
     mocks.resolveAgentWorkspaceDir
@@ -132,6 +139,25 @@ describe("memory runtime handles", () => {
     expect(resolveActiveMemoryBackendConfig({ cfg: memoryConfig, agentId: "main" })).toEqual({
       backend: "builtin",
     });
+  });
+
+  it("admits final migration only after the exact selected backend passes conformance", async () => {
+    const { registry, capability } = createRegistry();
+    mocks.loadPluginRegistryHandle.mockReturnValue(registry);
+    mocks.admitMemoryAuthorizationRuntime.mockResolvedValueOnce({ ok: true, runtime: {} });
+
+    await expect(
+      requireSelectedMemoryIsolationBackendConformance({ cfg: memoryConfig, agentId: "main" }),
+    ).resolves.toBeUndefined();
+    expect(mocks.admitMemoryAuthorizationRuntime).toHaveBeenCalledWith(capability);
+
+    mocks.admitMemoryAuthorizationRuntime.mockResolvedValueOnce({
+      ok: false,
+      reasonCode: "backend-nonconforming",
+    });
+    await expect(
+      requireSelectedMemoryIsolationBackendConformance({ cfg: memoryConfig, agentId: "main" }),
+    ).rejects.toThrow("backend is nonconforming");
   });
 
   it("tracks standalone managers without activating config-only lookups and rearms reused handles", async () => {

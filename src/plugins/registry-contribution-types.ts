@@ -279,6 +279,53 @@ export type RegisteredMemorySearchManager = MemorySearchManager;
 
 type MemoryRuntimeBackendConfig = { backend: "builtin" };
 
+/**
+ * Doctor supplies the local control-plane facts; the selected memory plugin owns source handling,
+ * backup, placement, scoped catalog/index creation, and verification before core flips cutover.
+ */
+export type MemoryIsolationMigrationAction = "dry-run" | "apply";
+
+export type MemoryIsolationMigrationActor = Readonly<{
+  role: "owner" | "admin";
+  principalId: string;
+}>;
+
+export type MemoryIsolationMigrationDecision =
+  | Readonly<{ sourceId: string; sourceHash: string; placement: "quarantine" }>
+  | Readonly<{
+      sourceId: string;
+      sourceHash: string;
+      placement: "user-private";
+      principalId: string;
+    }>;
+
+/** Core validates this durable marker before delegating destructive legacy archival to a plugin. */
+export type MemoryIsolationFinalCutover = Readonly<{
+  migrationId: string;
+  planHash: string;
+  sources: readonly Readonly<{ sourceKind: string; sourceHash: string }>[];
+}>;
+
+export type MemoryIsolationMigrationResult = Readonly<{
+  state: "planned" | "verified";
+  migrationId: string;
+  planHash: string;
+  sources: readonly Readonly<{
+    sourceId: string;
+    sourceKind: string;
+    sourceHash: string;
+    placement: "quarantine" | "user-private";
+  }>[];
+  verifiedSources?: readonly Readonly<{ sourceKind: string; sourceHash: string }>[];
+}>;
+
+export type MemoryIsolationDowngradeExport = Readonly<{
+  outputDir: string;
+  exportedResources: number;
+  excludedQuarantineResources: number;
+  warning: string;
+}>;
+
 export type MemoryPluginRuntime = {
   authorize?: AuthorizedMemoryRuntime["authorize"];
   searchAuthorized?: AuthorizedMemoryRuntime["searchAuthorized"];
@@ -289,6 +336,41 @@ export type MemoryPluginRuntime = {
   syncAuthorized?: AuthorizedMemoryRuntime["syncAuthorized"];
   exportAuthorized?: AuthorizedMemoryRuntime["exportAuthorized"];
   statusAuthorized?: AuthorizedMemoryRuntime["statusAuthorized"];
+  runIsolationMigration?(params: {
+    action: MemoryIsolationMigrationAction;
+    agentId: string;
+    workspaceDir: string;
+    stateDir: string;
+    migrationId: string;
+    actor: MemoryIsolationMigrationActor;
+    decisions: readonly MemoryIsolationMigrationDecision[];
+    /** Required for apply: the exact dry-run plan digest the operator reviewed. */
+    expectedPlanHash?: string;
+    nowMs?: number;
+  }): Promise<MemoryIsolationMigrationResult>;
+  archiveIsolationMigration?(params: {
+    agentId: string;
+    workspaceDir: string;
+    stateDir: string;
+    migrationId: string;
+    cutover: MemoryIsolationFinalCutover;
+    nowMs?: number;
+  }): Promise<void>;
+  /** Retire verified scoped copies before final cutover while retaining the verified backup/source. */
+  rollbackIsolationMigration?(params: {
+    agentId: string;
+    migrationId: string;
+    planHash: string;
+    nowMs?: number;
+  }): Promise<void>;
+  exportIsolationMigration?(params: {
+    agentId: string;
+    migrationId: string;
+    outputDir: string;
+    /** Core validates the durable final marker before a plugin can export scoped data. */
+    cutover: MemoryIsolationFinalCutover;
+    nowMs?: number;
+  }): Promise<MemoryIsolationDowngradeExport>;
   getMemorySearchManager(params: {
     cfg: OpenClawConfig;
     agentId: string;

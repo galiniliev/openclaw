@@ -6,9 +6,12 @@ read_when:
   - You want to know what memory files to write
 ---
 
-OpenClaw remembers things by writing plain Markdown files in your agent's
-workspace (default `~/.openclaw/workspace`). The model only remembers what gets
-saved to disk; there is no hidden state.
+For an agent using the legacy workspace-memory runtime, OpenClaw remembers
+things by writing plain Markdown files in that agent's workspace (default
+`~/.openclaw/workspace`). The model only remembers what gets saved to disk;
+there is no hidden state.
+
+An agent that has completed a verified [final scoped-memory cutover](/cli/doctor#final-scoped-memory-cutover) uses the selected memory plugin's scoped catalog instead. Its legacy workspace files are not a runtime fallback, and OpenClaw does not infer a memory audience from file contents, names, routes, or senders. This page describes the legacy workspace-memory model; use Doctor's cutover workflow to migrate it deliberately.
 
 ## How it works
 
@@ -32,6 +35,8 @@ If you want your agent to remember something, just ask it: "Remember that I
 prefer TypeScript." It writes the note to the appropriate file.
 </Tip>
 
+The file names in this section apply while the agent remains on legacy workspace memory. After final scoped-memory cutover, use the selected plugin's authorized memory tools and operator workflow rather than adding a legacy file as a way to bypass scoped policy.
+
 ## What goes where
 
 `USER.md` is the compact user-model layer. Write stable preferences and profile
@@ -53,6 +58,8 @@ the default [dreaming](/concepts/dreaming) sweep. The generated workspace
 instructions still encourage the agent to record durable facts as it works,
 while dreaming handles background consolidation. The default heartbeat prompt
 performs no memory maintenance on its own.
+
+Final scoped-memory cutover does not introduce a scheduled retention purge or a second dreaming policy. Legacy migration backup and archival are explicit Doctor actions, while the existing dreaming model remains responsible for consolidation where it is enabled. Operators must make archival or deletion decisions explicitly.
 
 If `MEMORY.md` grows past the bootstrap file budget, OpenClaw keeps the file on
 disk intact but truncates the copy injected into context. Treat that as a

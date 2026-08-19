@@ -168,12 +168,90 @@ describe("registerMaintenanceCommands doctor action", () => {
     });
   });
 
+  it("passes an explicit downgrade export directory only to the export mode", async () => {
+    doctorCommand.mockResolvedValue(undefined);
+
+    await runMaintenanceCli([
+      "doctor",
+      "--memory-isolation",
+      "export",
+      "--memory-isolation-agent",
+      "main",
+      "--memory-isolation-export",
+      "/tmp/memory-export",
+    ]);
+
+    expect(doctorCommand).toHaveBeenCalledTimes(1);
+    const [, options] = commandCall(doctorCommand);
+    expect(options).toMatchObject({
+      memoryIsolation: "export",
+      memoryIsolationAgent: "main",
+      memoryIsolationExport: "/tmp/memory-export",
+    });
+  });
+
+  it("forwards the reviewed plan digest and decision manifest for final cutover", async () => {
+    doctorCommand.mockResolvedValue(undefined);
+
+    await runMaintenanceCli([
+      "doctor",
+      "--memory-isolation",
+      "cutover",
+      "--memory-isolation-agent",
+      "main",
+      "--memory-isolation-plan",
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "--memory-isolation-decisions",
+      "./reviewed-decisions.json",
+    ]);
+
+    expect(doctorCommand).toHaveBeenCalledTimes(1);
+    const [, options] = commandCall(doctorCommand);
+    expect(options).toMatchObject({
+      memoryIsolation: "cutover",
+      memoryIsolationAgent: "main",
+      memoryIsolationPlan:
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      memoryIsolationDecisions: "./reviewed-decisions.json",
+    });
+  });
+
+  it("requires an exact reviewed plan digest for cutover and rollback", async () => {
+    await runMaintenanceCli(["doctor", "--memory-isolation", "cutover"]);
+
+    expect(doctorCommand).not.toHaveBeenCalled();
+    expect(runtime.error).toHaveBeenCalledWith(
+      "doctor --memory-isolation cutover requires --memory-isolation-plan <sha256>.",
+    );
+    expect(runtime.exit).toHaveBeenCalledWith(2);
+  });
+
+  it("requires the explicit downgrade export mode and directory together", async () => {
+    await runMaintenanceCli(["doctor", "--memory-isolation-export", "/tmp/memory-export"]);
+
+    expect(doctorCommand).not.toHaveBeenCalled();
+    expect(runtime.error).toHaveBeenCalledWith(
+      "doctor memory isolation export requires --memory-isolation export.",
+    );
+    expect(runtime.exit).toHaveBeenCalledWith(2);
+  });
+
+  it("rejects export mode without its explicit output directory", async () => {
+    await runMaintenanceCli(["doctor", "--memory-isolation", "export"]);
+
+    expect(doctorCommand).not.toHaveBeenCalled();
+    expect(runtime.error).toHaveBeenCalledWith(
+      "doctor --memory-isolation export requires --memory-isolation-export <path>.",
+    );
+    expect(runtime.exit).toHaveBeenCalledWith(2);
+  });
+
   it("rejects an isolation agent selector without an isolation mode", async () => {
     await runMaintenanceCli(["doctor", "--memory-isolation-agent", "main"]);
 
     expect(doctorCommand).not.toHaveBeenCalled();
     expect(runtime.error).toHaveBeenCalledWith(
-      "doctor memory isolation agent requires --memory-isolation. Use `openclaw doctor --memory-isolation status --memory-isolation-agent <id>`.",
+      "doctor memory isolation options require --memory-isolation.",
     );
     expect(runtime.exit).toHaveBeenCalledWith(2);
   });

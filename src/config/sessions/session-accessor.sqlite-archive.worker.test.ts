@@ -13,6 +13,7 @@ import {
   openOpenClawAgentDatabase,
   runOpenClawAgentWriteTransaction,
 } from "../../state/openclaw-agent-db.js";
+import { completeTestMemoryIsolationCutover } from "../../test-utils/memory-isolation-cutover.js";
 import { appendSqliteTrajectoryRuntimeEvents } from "../../trajectory/runtime-store.sqlite.js";
 import type { TrajectoryEvent } from "../../trajectory/types.js";
 import { decodeSessionArchiveBytes, readSessionArchiveContentSync } from "./archive-compression.js";
@@ -958,10 +959,6 @@ function seedEnforcedArchivePolicy(
     throw new Error(`expected transcript event for ${params.sessionId}`);
   }
   database.db.exec(/* sqlite-allow-raw: fixture establishes one evaluable archive lineage. */ `
-    INSERT INTO memory_migrations
-      (migration_id, source_kind, source_hash, phase, classification_json, plan_hash,
-       verified_at, cutover_at, updated_at)
-    VALUES ('archive-cutover', 'test', 'archive-source', 'cutover', '{}', 'archive-plan', 1, 1, 1);
     INSERT INTO memory_policies
       (policy_id, agent_id, current_revision_id, revocation_epoch, lifecycle_state, created_at, updated_at)
     VALUES ('archive-policy', 'main', 'archive-policy-revision', 0, 'active', 1, 1);
@@ -1034,7 +1031,7 @@ function seedEnforcedArchivePolicy(
       )
       .run(params.sessionId, event.seq, params.sessionId, event.seq);
   }
-  resetMemoryIsolationCutoverForTest();
+  completeTestMemoryIsolationCutover({ agentId: database.agentId, path: database.path });
   resetTranscriptMemoryPolicyForTest(database.db);
   return { eventSeq: event.seq };
 }

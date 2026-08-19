@@ -21,6 +21,7 @@ import {
   openOpenClawAgentDatabase,
   runOpenClawAgentWriteTransaction,
 } from "../../state/openclaw-agent-db.js";
+import { completeTestMemoryIsolationCutover } from "../../test-utils/memory-isolation-cutover.js";
 import { readSessionTranscriptMessageEvents } from "./session-accessor.sqlite-active-events.js";
 import { materializeSessionStateDeletePlans } from "./session-accessor.sqlite-archive.js";
 import { readSessionEntryRow, writeSessionEntry } from "./session-accessor.sqlite-entry-store.js";
@@ -68,14 +69,7 @@ function scope(env: NodeJS.ProcessEnv) {
 
 function markCutOver(env: NodeJS.ProcessEnv) {
   const database = openOpenClawAgentDatabase({ agentId: AGENT_ID, env });
-  database.db
-    .prepare(
-      `INSERT INTO memory_migrations
-        (migration_id, source_kind, source_hash, phase, classification_json, plan_hash,
-         verified_at, cutover_at, updated_at)
-       VALUES (?, 'test', 'test-source', 'cutover', '{}', 'test-plan', 1, 1, 1)`,
-    )
-    .run("memory-cutover-test");
+  completeTestMemoryIsolationCutover({ agentId: AGENT_ID, env });
   database.db
     .prepare(
       `INSERT INTO session_memory_subjects

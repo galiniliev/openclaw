@@ -66,6 +66,7 @@ import {
   openOpenClawStateDatabase,
 } from "../../../../src/state/openclaw-state-db.js";
 import { ensureProfileForEmail } from "../../../../src/state/user-profiles.js";
+import { completeTestMemoryIsolationCutover } from "../../../../src/test-utils/memory-isolation-cutover.js";
 import { verifyNodeWorkerContainerProjectionIsolation } from "../../../../test/helpers/node-worker-container-projection-isolation.js";
 import memoryCorePlugin from "../../index.js";
 import { MEMORY_CORE_AUTHORIZATION_CAPABILITIES } from "../authorization.js";
@@ -180,16 +181,7 @@ describe("builtin scoped authorized runtime", () => {
   });
 
   function markCutOver() {
-    const database = openOpenClawAgentDatabase({ agentId: "main" });
-    database.db
-      .prepare(
-        `INSERT INTO memory_migrations
-          (migration_id, source_kind, source_hash, phase, classification_json, plan_hash,
-           verified_at, cutover_at, updated_at)
-         VALUES ('scoped-runtime-cutover', 'test', 'test-source', 'cutover', '{}', 'test-plan', 1, 1, 1)`,
-      )
-      .run();
-    resetMemoryIsolationCutoverForTest();
+    completeTestMemoryIsolationCutover({ agentId: "main" });
   }
 
   function installBuiltinSelectedRuntime() {

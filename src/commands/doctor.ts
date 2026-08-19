@@ -51,6 +51,11 @@ export async function doctorCommand(runtime?: RuntimeEnv, options?: DoctorOption
     const report = await runDoctorMemoryIsolation({
       action: options.memoryIsolation,
       ...(options.memoryIsolationAgent ? { agentId: options.memoryIsolationAgent } : {}),
+      ...(options.memoryIsolationPlan ? { planHash: options.memoryIsolationPlan } : {}),
+      ...(options.memoryIsolationDecisions
+        ? { decisionsPath: options.memoryIsolationDecisions }
+        : {}),
+      ...(options.memoryIsolationExport ? { exportDir: options.memoryIsolationExport } : {}),
     });
     if (options.json) {
       writeRuntimeJson(outputRuntime, report);
@@ -58,6 +63,15 @@ export async function doctorCommand(runtime?: RuntimeEnv, options?: DoctorOption
       outputRuntime.log(
         `memory isolation: agent=${report.agentId}, mode=${report.mode}${report.restartRequired ? "; restart the Gateway before this posture takes effect" : ""}`,
       );
+      if (report.export) {
+        outputRuntime.log(`memory isolation downgrade export: ${report.export.outputDir}`);
+        outputRuntime.log(`warning: ${report.export.warning}`);
+      }
+      if (report.archiveRequired) {
+        outputRuntime.log(
+          "legacy memory remains archived-in-place until you explicitly run `openclaw doctor --memory-isolation archive`.",
+        );
+      }
     }
     outputRuntime.exit(report.mode === "unavailable" ? 1 : 0);
     return;

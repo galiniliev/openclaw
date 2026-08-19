@@ -6,10 +6,8 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
 import { resetMemoryIsolationCutoverForTest } from "../../plugins/memory-cutover.js";
-import {
-  closeOpenClawAgentDatabasesForTest,
-  openOpenClawAgentDatabase,
-} from "../../state/openclaw-agent-db.js";
+import { closeOpenClawAgentDatabasesForTest } from "../../state/openclaw-agent-db.js";
+import { completeTestMemoryIsolationCutover } from "../../test-utils/memory-isolation-cutover.js";
 import {
   buildSessionStartupContextPrelude as buildSessionStartupContextPreludeForAgent,
   shouldApplyStartupContext,
@@ -45,16 +43,7 @@ describe("buildSessionStartupContextPrelude", () => {
     const originalStateDir = process.env.OPENCLAW_STATE_DIR;
     process.env.OPENCLAW_STATE_DIR = stateDir;
     try {
-      const database = openOpenClawAgentDatabase({ agentId: "main" });
-      database.db
-        .prepare(
-          `INSERT INTO memory_migrations
-            (migration_id, source_kind, source_hash, phase, classification_json, plan_hash,
-             verified_at, cutover_at, updated_at)
-           VALUES ('memory-cutover-test', 'test', 'test-source', 'cutover', '{}', 'test-plan', 1, 1, 1)`,
-        )
-        .run();
-      resetMemoryIsolationCutoverForTest();
+      completeTestMemoryIsolationCutover({ agentId: "main" });
       const readdir = vi.spyOn(fsCore.promises, "readdir");
 
       await expect(

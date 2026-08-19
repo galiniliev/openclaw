@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
   getNodeSqliteKysely,
 } from "../infra/kysely-sync.js";
+import { runSqliteImmediateTransactionSync } from "../infra/sqlite-transaction.js";
 import type { DB as OpenClawAgentDatabaseSchema } from "../state/openclaw-agent-db.generated.js";
 import {
   openOpenClawAgentDatabase,
@@ -24,6 +26,11 @@ const SHADOW_READ_ONLY_MIGRATION_ID = "memory-isolation-shadow-read-only-v1";
 const SHADOW_READ_ONLY_SOURCE_KIND = "memory-isolation-shadow-read-only";
 const SHADOW_READ_ONLY_SOURCE_HASH = "sha256:67d7363a5c0c72aae82474c9903b1444";
 const SHADOW_READ_ONLY_CLASSIFICATION_VERSION = 2;
+const FINAL_CUTOVER_MIGRATION_ID = "memory-isolation-final-cutover-v1";
+const FINAL_CUTOVER_SOURCE_KIND = "memory-isolation-final-cutover";
+const FINAL_CUTOVER_CLASSIFICATION_VERSION = 1;
+const EMPTY_LEGACY_CORPUS_SOURCE_KIND = "memory-isolation-empty-legacy-corpus";
+const EMPTY_LEGACY_CORPUS_VERSION = 1;
 const PILOT_SUBJECT_KINDS = new Set(["user", "conversation", "service", "agent", "system"]);
 
 type ShadowPilotSubject = Readonly<{
@@ -47,26 +54,427 @@ type MemoryIsolationMarker = Readonly<{
   cutover_at: number | null;
 }>;
 
+export type VerifiedMemoryMigrationSource = Readonly<{
+  sourceKind: string;
+  sourceHash: string;
+}>;
+
+type FinalCutoverManifest = Readonly<{
+  migrationId: string;
+  sources: readonly VerifiedMemoryMigrationSource[];
+}>;
+
+/** The only archive grant core gives a selected plugin after validating the durable final marker. */
+export type VerifiedMemoryIsolationFinalCutover = Readonly<{
+  migrationId: string;
+  planHash: string;
+  sources: readonly VerifiedMemoryMigrationSource[];
+}>;
+
+type FinalMigrationSourceEvidence = Readonly<{
+  migrationId: string;
+  source: Readonly<{
+    id: string;
+    kind: string;
+    hash: string;
+    contentHash: string;
+    bytes: number;
+  }>;
+  decision: Readonly<{
+    placement: "quarantine" | "approved";
+    actorRole: "owner" | "admin";
+    actorId: string;
+  }>;
+  backup: Readonly<{
+    artifactHash: string;
+    contentHash: string;
+    verifiedAt: number;
+  }>;
+  destination: Readonly<{
+    storeId: string;
+    resourceId: string;
+    revisionId: string;
+    contentHash: string;
+    lifecycleState: "active" | "quarantined";
+  }>;
+  archive: Readonly<{
+    state: "pending" | "archiving" | "archived";
+    artifactHash?: string;
+  }>;
+}>;
+
+const FINAL_SOURCE_EVIDENCE_VERSION = 1;
+const SHA256_HASH_PATTERN = /^sha256:[a-f0-9]{64}$/u;
+
 // The gateway reads one process-stable snapshot. Doctor mutations take effect after restart, so
 // a transient authority-store failure can never reopen legacy filesystem memory in a live run.
 const snapshotByAgentId = new Map<string, MemoryIsolationSnapshot>();
 
-function isVerifiedCutoverMarker(
-  marker: Pick<MemoryIsolationMarker, "phase" | "verified_at" | "cutover_at">,
-): boolean {
+function hashClassification(value: string): string {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+function normalizeFinalCutoverText(value: string, label: string): string {
+  const normalized = value.trim();
+  if (!normalized || normalized.includes("\0")) {
+    throw new Error(`memory isolation ${label} is required`);
+  }
+  return normalized;
+}
+
+function normalizeFinalMigrationHash(value: string, label: string): string {
+  const normalized = normalizeFinalCutoverText(value, label);
+  if (!SHA256_HASH_PATTERN.test(normalized)) {
+    throw new Error(`memory isolation ${label} must be a sha256 digest`);
+  }
+  return normalized;
+}
+
+function normalizeFinalMigrationBytes(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error("memory isolation source byte count is invalid");
+  }
+  return value;
+}
+
+function createFinalMigrationSourceClassification(evidence: FinalMigrationSourceEvidence): string {
+  return JSON.stringify({
+    mode: "memory-isolation-source",
+    version: FINAL_SOURCE_EVIDENCE_VERSION,
+    migrationId: evidence.migrationId,
+    source: evidence.source,
+    decision: evidence.decision,
+    backup: evidence.backup,
+    destination: evidence.destination,
+    verification: {
+      hash: true,
+      mount: true,
+      denial: true,
+      catalog: true,
+      index: true,
+    },
+    archive: evidence.archive,
+  });
+}
+
+function parseFinalMigrationSourceEvidence(
+  classificationJson: string,
+): FinalMigrationSourceEvidence | undefined {
+  try {
+    const record = asOptionalRecord(JSON.parse(classificationJson));
+    const source = asOptionalRecord(record?.source);
+    const decision = asOptionalRecord(record?.decision);
+    const backup = asOptionalRecord(record?.backup);
+    const destination = asOptionalRecord(record?.destination);
+    const verification = asOptionalRecord(record?.verification);
+    const archive = asOptionalRecord(record?.archive);
+    if (
+      record?.mode !== "memory-isolation-source" ||
+      record.version !== FINAL_SOURCE_EVIDENCE_VERSION ||
+      typeof record.migrationId !== "string" ||
+      !source ||
+      !decision ||
+      !backup ||
+      !destination ||
+      !verification ||
+      !archive ||
+      verification.hash !== true ||
+      verification.mount !== true ||
+      verification.denial !== true ||
+      verification.catalog !== true ||
+      verification.index !== true ||
+      typeof source.id !== "string" ||
+      typeof source.kind !== "string" ||
+      typeof source.hash !== "string" ||
+      typeof source.contentHash !== "string" ||
+      (decision.placement !== "quarantine" && decision.placement !== "approved") ||
+      (decision.actorRole !== "owner" && decision.actorRole !== "admin") ||
+      typeof decision.actorId !== "string" ||
+      typeof backup.artifactHash !== "string" ||
+      typeof backup.contentHash !== "string" ||
+      typeof backup.verifiedAt !== "number" ||
+      typeof destination.storeId !== "string" ||
+      typeof destination.resourceId !== "string" ||
+      typeof destination.revisionId !== "string" ||
+      typeof destination.contentHash !== "string" ||
+      (destination.lifecycleState !== "active" && destination.lifecycleState !== "quarantined") ||
+      (archive.state !== "pending" &&
+        archive.state !== "archiving" &&
+        archive.state !== "archived") ||
+      (archive.artifactHash !== undefined && typeof archive.artifactHash !== "string")
+    ) {
+      return undefined;
+    }
+    const evidence: FinalMigrationSourceEvidence = Object.freeze({
+      migrationId: normalizeFinalCutoverText(record.migrationId, "source migration id"),
+      source: Object.freeze({
+        id: normalizeFinalCutoverText(source.id, "source id"),
+        kind: normalizeFinalCutoverText(source.kind, "source kind"),
+        hash: normalizeFinalMigrationHash(source.hash, "source hash"),
+        contentHash: normalizeFinalMigrationHash(source.contentHash, "source content hash"),
+        bytes: normalizeFinalMigrationBytes(source.bytes),
+      }),
+      decision: Object.freeze({
+        placement: decision.placement,
+        actorRole: decision.actorRole,
+        actorId: normalizeFinalCutoverText(decision.actorId, "decision actor id"),
+      }),
+      backup: Object.freeze({
+        artifactHash: normalizeFinalMigrationHash(backup.artifactHash, "backup artifact hash"),
+        contentHash: normalizeFinalMigrationHash(backup.contentHash, "backup content hash"),
+        verifiedAt: normalizeFinalMigrationBytes(backup.verifiedAt),
+      }),
+      destination: Object.freeze({
+        storeId: normalizeFinalCutoverText(destination.storeId, "destination store id"),
+        resourceId: normalizeFinalCutoverText(destination.resourceId, "destination resource id"),
+        revisionId: normalizeFinalCutoverText(destination.revisionId, "destination revision id"),
+        contentHash: normalizeFinalMigrationHash(
+          destination.contentHash,
+          "destination content hash",
+        ),
+        lifecycleState: destination.lifecycleState,
+      }),
+      archive: Object.freeze({
+        state: archive.state,
+        ...(typeof archive.artifactHash === "string"
+          ? {
+              artifactHash: normalizeFinalMigrationHash(
+                archive.artifactHash,
+                "archive artifact hash",
+              ),
+            }
+          : {}),
+      }),
+    });
+    if (
+      evidence.backup.artifactHash !== evidence.source.contentHash ||
+      evidence.backup.contentHash !== evidence.source.contentHash ||
+      evidence.destination.contentHash !== evidence.source.contentHash ||
+      (evidence.archive.state === "archived" &&
+        evidence.archive.artifactHash !== evidence.source.contentHash) ||
+      !hasVerifiedCutoverTime(evidence.backup.verifiedAt) ||
+      (evidence.decision.placement === "quarantine") !==
+        (evidence.destination.lifecycleState === "quarantined")
+    ) {
+      return undefined;
+    }
+    return createFinalMigrationSourceClassification(evidence) === classificationJson
+      ? evidence
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeVerifiedMigrationSources(
+  sources: readonly VerifiedMemoryMigrationSource[],
+): readonly VerifiedMemoryMigrationSource[] {
+  const normalized = sources
+    .map((source) =>
+      Object.freeze({
+        sourceKind: normalizeFinalCutoverText(source.sourceKind, "source kind"),
+        sourceHash: normalizeFinalMigrationHash(source.sourceHash, "source hash"),
+      }),
+    )
+    .toSorted((left, right) =>
+      `${left.sourceKind}\0${left.sourceHash}`.localeCompare(
+        `${right.sourceKind}\0${right.sourceHash}`,
+      ),
+    );
+  if (
+    normalized.some(
+      (source, index) =>
+        source.sourceKind === FINAL_CUTOVER_SOURCE_KIND ||
+        source.sourceKind === EMPTY_LEGACY_CORPUS_SOURCE_KIND ||
+        (index > 0 &&
+          source.sourceKind === normalized[index - 1]?.sourceKind &&
+          source.sourceHash === normalized[index - 1]?.sourceHash),
+    )
+  ) {
+    throw new Error("memory isolation final cutover sources are invalid");
+  }
+  return Object.freeze(normalized);
+}
+
+function createEmptyLegacyCorpusClassification(params: {
+  migrationId: string;
+  planHash: string;
+}): string {
+  return JSON.stringify({
+    mode: "memory-isolation-empty-legacy-corpus",
+    version: EMPTY_LEGACY_CORPUS_VERSION,
+    migrationId: params.migrationId,
+    planHash: params.planHash,
+  });
+}
+
+function isVerifiedEmptyLegacyCorpusReceipt(params: {
+  receipt: MemoryIsolationMarker;
+  migrationId: string;
+  planHash: string;
+  phase: "verified" | "cutover";
+}): boolean {
+  const classificationJson = createEmptyLegacyCorpusClassification({
+    migrationId: params.migrationId,
+    planHash: params.planHash,
+  });
   return (
-    marker.phase === "cutover" &&
-    typeof marker.verified_at === "number" &&
-    Number.isSafeInteger(marker.verified_at) &&
-    marker.verified_at > 0 &&
-    typeof marker.cutover_at === "number" &&
-    Number.isSafeInteger(marker.cutover_at) &&
-    marker.cutover_at > 0
+    params.receipt.migration_id === params.migrationId &&
+    params.receipt.source_kind === EMPTY_LEGACY_CORPUS_SOURCE_KIND &&
+    params.receipt.source_hash === hashClassification(classificationJson) &&
+    params.receipt.phase === params.phase &&
+    params.receipt.classification_json === classificationJson &&
+    params.receipt.plan_hash === params.planHash &&
+    hasVerifiedCutoverTime(params.receipt.verified_at) &&
+    (params.phase === "verified"
+      ? params.receipt.cutover_at === null
+      : hasVerifiedCutoverTime(params.receipt.cutover_at))
   );
 }
 
-function hashClassification(value: string): string {
-  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+function createFinalCutoverClassification(manifest: FinalCutoverManifest): string {
+  return JSON.stringify({
+    mode: "final-cutover",
+    version: FINAL_CUTOVER_CLASSIFICATION_VERSION,
+    migrationId: manifest.migrationId,
+    sources: manifest.sources,
+  });
+}
+
+function parseFinalCutoverManifest(classificationJson: string): FinalCutoverManifest | undefined {
+  try {
+    const record = asOptionalRecord(JSON.parse(classificationJson));
+    if (
+      record?.mode !== "final-cutover" ||
+      record.version !== FINAL_CUTOVER_CLASSIFICATION_VERSION ||
+      typeof record.migrationId !== "string" ||
+      !Array.isArray(record.sources)
+    ) {
+      return undefined;
+    }
+    return Object.freeze({
+      migrationId: normalizeFinalCutoverText(record.migrationId, "migration id"),
+      sources: normalizeVerifiedMigrationSources(
+        record.sources.map((source) => {
+          const sourceRecord = asOptionalRecord(source);
+          if (
+            !sourceRecord ||
+            typeof sourceRecord.sourceKind !== "string" ||
+            typeof sourceRecord.sourceHash !== "string"
+          ) {
+            throw new Error("memory isolation final cutover source is invalid");
+          }
+          return {
+            sourceKind: sourceRecord.sourceKind,
+            sourceHash: sourceRecord.sourceHash,
+          };
+        }),
+      ),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function hasVerifiedCutoverTime(value: number | null): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function isVerifiedFinalCutoverMarker(params: {
+  database: DatabaseSync;
+  marker: MemoryIsolationMarker;
+}): boolean {
+  const manifest = parseFinalCutoverManifest(params.marker.classification_json);
+  if (
+    !manifest ||
+    params.marker.classification_json !== createFinalCutoverClassification(manifest) ||
+    params.marker.migration_id !== FINAL_CUTOVER_MIGRATION_ID ||
+    params.marker.source_kind !== FINAL_CUTOVER_SOURCE_KIND ||
+    params.marker.source_hash !== hashClassification(params.marker.classification_json) ||
+    !SHA256_HASH_PATTERN.test(params.marker.plan_hash) ||
+    params.marker.phase !== "cutover" ||
+    !hasVerifiedCutoverTime(params.marker.verified_at) ||
+    !hasVerifiedCutoverTime(params.marker.cutover_at)
+  ) {
+    return false;
+  }
+  const memoryDb = getNodeSqliteKysely<MemoryCutoverDatabase>(params.database);
+  const rows = executeSqliteQuerySync(
+    params.database,
+    memoryDb
+      .selectFrom("memory_migrations")
+      .select([
+        "migration_id",
+        "source_kind",
+        "source_hash",
+        "phase",
+        "classification_json",
+        "plan_hash",
+        "verified_at",
+        "cutover_at",
+      ])
+      .where("plan_hash", "=", params.marker.plan_hash),
+  ).rows;
+  const expected = new Set(
+    manifest.sources.map((source) => `${source.sourceKind}\0${source.sourceHash}`),
+  );
+  const requiresEmptyCorpusReceipt = manifest.sources.length === 0;
+  if (rows.length !== expected.size + 1 + (requiresEmptyCorpusReceipt ? 1 : 0)) {
+    return false;
+  }
+  let manifestFound = false;
+  let emptyCorpusReceiptFound = false;
+  for (const row of rows) {
+    if (row.source_kind === FINAL_CUTOVER_SOURCE_KIND) {
+      if (
+        manifestFound ||
+        row.source_hash !== params.marker.source_hash ||
+        row.phase !== "cutover" ||
+        !hasVerifiedCutoverTime(row.verified_at) ||
+        !hasVerifiedCutoverTime(row.cutover_at)
+      ) {
+        return false;
+      }
+      manifestFound = true;
+      continue;
+    }
+    if (row.source_kind === EMPTY_LEGACY_CORPUS_SOURCE_KIND) {
+      if (
+        emptyCorpusReceiptFound ||
+        !requiresEmptyCorpusReceipt ||
+        !isVerifiedEmptyLegacyCorpusReceipt({
+          receipt: row,
+          migrationId: manifest.migrationId,
+          planHash: params.marker.plan_hash,
+          phase: "cutover",
+        })
+      ) {
+        return false;
+      }
+      emptyCorpusReceiptFound = true;
+      continue;
+    }
+    if (
+      row.phase !== "cutover" ||
+      !expected.delete(`${row.source_kind}\0${row.source_hash}`) ||
+      !hasVerifiedCutoverTime(row.verified_at) ||
+      !hasVerifiedCutoverTime(row.cutover_at)
+    ) {
+      return false;
+    }
+    const evidence = parseFinalMigrationSourceEvidence(row.classification_json);
+    if (
+      !evidence ||
+      evidence.migrationId !== manifest.migrationId ||
+      evidence.source.kind !== row.source_kind ||
+      evidence.source.hash !== row.source_hash
+    ) {
+      return false;
+    }
+  }
+  return (
+    manifestFound && expected.size === 0 && emptyCorpusReceiptFound === requiresEmptyCorpusReceipt
+  );
 }
 
 function parseShadowPilotSubject(classificationJson: string): ShadowPilotSubject | undefined {
@@ -124,16 +532,27 @@ function resolveMemoryIsolationSnapshotInDatabase(db: DatabaseSync): MemoryIsola
   ensureOpenClawAgentScopedMemorySchema(db);
   db.exec(AGENT_SESSION_MEMORY_SCHEMA_SQL); // sqlite-allow-raw -- Existing additive subject DDL.
   const memoryDb = getNodeSqliteKysely<MemoryCutoverDatabase>(db);
-  const cutover = executeSqliteQueryTakeFirstSync(
+  const cutovers = executeSqliteQuerySync(
     db,
     memoryDb
       .selectFrom("memory_migrations")
-      .select(["phase", "verified_at", "cutover_at"])
-      .where("phase", "=", "cutover")
-      .limit(1),
-  );
-  if (cutover) {
-    return isVerifiedCutoverMarker(cutover) ? { mode: "cutover" } : { mode: "unavailable" };
+      .select([
+        "migration_id",
+        "source_kind",
+        "source_hash",
+        "phase",
+        "classification_json",
+        "plan_hash",
+        "verified_at",
+        "cutover_at",
+      ])
+      .where("source_kind", "=", FINAL_CUTOVER_SOURCE_KIND),
+  ).rows;
+  if (cutovers.length > 0) {
+    return cutovers.length === 1 &&
+      isVerifiedFinalCutoverMarker({ database: db, marker: cutovers[0]! })
+      ? { mode: "cutover" }
+      : { mode: "unavailable" };
   }
   const shadow = executeSqliteQueryTakeFirstSync(
     db,
@@ -257,16 +676,26 @@ export function enableMemoryShadowReadOnlyMode(params: {
     database.db,
     db
       .selectFrom("memory_migrations")
-      .select(["phase", "verified_at", "cutover_at"])
-      .where("phase", "=", "cutover")
-      .where("verified_at", "is not", null)
-      .where("cutover_at", "is not", null)
+      .select([
+        "migration_id",
+        "source_kind",
+        "source_hash",
+        "phase",
+        "classification_json",
+        "plan_hash",
+        "verified_at",
+        "cutover_at",
+      ])
+      .where("source_kind", "=", FINAL_CUTOVER_SOURCE_KIND)
       .limit(1),
   );
-  if (cutover && isVerifiedCutoverMarker(cutover)) {
+  if (cutover && isVerifiedFinalCutoverMarker({ database: database.db, marker: cutover })) {
     throw new Error(
       "memory isolation has completed final cutover and cannot return to shadow mode",
     );
+  }
+  if (cutover) {
+    throw new Error("memory isolation final cutover marker is invalid");
   }
   const pilotSubject = resolveSingleShadowPilotSubject({ database });
   const classificationJson = createShadowClassification(pilotSubject);
@@ -321,14 +750,24 @@ export function disableMemoryShadowReadOnlyMode(params: {
     database.db,
     db
       .selectFrom("memory_migrations")
-      .select(["phase", "verified_at", "cutover_at"])
-      .where("phase", "=", "cutover")
-      .where("verified_at", "is not", null)
-      .where("cutover_at", "is not", null)
+      .select([
+        "migration_id",
+        "source_kind",
+        "source_hash",
+        "phase",
+        "classification_json",
+        "plan_hash",
+        "verified_at",
+        "cutover_at",
+      ])
+      .where("source_kind", "=", FINAL_CUTOVER_SOURCE_KIND)
       .limit(1),
   );
-  if (cutover && isVerifiedCutoverMarker(cutover)) {
+  if (cutover && isVerifiedFinalCutoverMarker({ database: database.db, marker: cutover })) {
     throw new Error("memory isolation has completed final cutover and cannot be disabled");
+  }
+  if (cutover) {
+    throw new Error("memory isolation final cutover marker is invalid");
   }
   executeSqliteQuerySync(
     database.db,
@@ -345,6 +784,272 @@ export function disableMemoryShadowReadOnlyMode(params: {
   // activation boundary. The direct database read above only proves Doctor removed its marker.
   return snapshot.mode;
 }
+
+/**
+ * Atomically activates one already-verified migration manifest. The selected memory plugin owns
+ * copying and verification; core owns the final switch so no runtime guesses between layouts.
+ */
+export function completeMemoryIsolationCutover(params: {
+  agentId: string;
+  migrationId: string;
+  planHash: string;
+  sources: readonly VerifiedMemoryMigrationSource[];
+  nowMs?: number;
+  options?: OpenClawAgentDatabaseOptions;
+}): MemoryIsolationMode {
+  const agentId = params.agentId.trim();
+  if (!agentId) {
+    throw new Error("memory isolation agent id is required");
+  }
+  const migrationId = normalizeFinalCutoverText(params.migrationId, "migration id");
+  const planHash = normalizeFinalMigrationHash(params.planHash, "plan hash");
+  const manifest = Object.freeze({
+    migrationId,
+    sources: normalizeVerifiedMigrationSources(params.sources),
+  });
+  const classificationJson = createFinalCutoverClassification(manifest);
+  const sourceHash = hashClassification(classificationJson);
+  const nowMs = params.nowMs ?? Date.now();
+  if (!Number.isSafeInteger(nowMs) || nowMs <= 0) {
+    throw new Error("memory isolation cutover time is invalid");
+  }
+  const database = openOpenClawAgentDatabase({
+    ...params.options,
+    agentId,
+  });
+  ensureOpenClawAgentScopedMemorySchema(database.db);
+  database.db.exec(AGENT_SESSION_MEMORY_SCHEMA_SQL); // sqlite-allow-raw -- Existing additive subject DDL.
+  const db = getNodeSqliteKysely<MemoryCutoverDatabase>(database.db);
+  runSqliteImmediateTransactionSync(database.db, () => {
+    const finalMarkers = executeSqliteQuerySync(
+      database.db,
+      db
+        .selectFrom("memory_migrations")
+        .select([
+          "migration_id",
+          "source_kind",
+          "source_hash",
+          "phase",
+          "classification_json",
+          "plan_hash",
+          "verified_at",
+          "cutover_at",
+        ])
+        .where("source_kind", "=", FINAL_CUTOVER_SOURCE_KIND),
+    ).rows;
+    if (finalMarkers.length > 0) {
+      const existing = finalMarkers.length === 1 ? finalMarkers[0] : undefined;
+      if (
+        !existing ||
+        existing.classification_json !== classificationJson ||
+        existing.plan_hash !== planHash ||
+        !isVerifiedFinalCutoverMarker({ database: database.db, marker: existing })
+      ) {
+        throw new Error("memory isolation final cutover marker is invalid");
+      }
+      return;
+    }
+    const planned = executeSqliteQuerySync(
+      database.db,
+      db
+        .selectFrom("memory_migrations")
+        .select([
+          "migration_id",
+          "source_kind",
+          "source_hash",
+          "phase",
+          "plan_hash",
+          "classification_json",
+          "verified_at",
+          "cutover_at",
+        ])
+        .where("plan_hash", "=", planHash)
+        .where("source_kind", "!=", FINAL_CUTOVER_SOURCE_KIND),
+    ).rows;
+    const expected = new Set(
+      manifest.sources.map((source) => `${source.sourceKind}\0${source.sourceHash}`),
+    );
+    const requiresEmptyCorpusReceipt = manifest.sources.length === 0;
+    if (planned.length !== expected.size + (requiresEmptyCorpusReceipt ? 1 : 0)) {
+      throw new Error("memory isolation final cutover must name every verified source in the plan");
+    }
+    for (const verified of planned) {
+      if (verified.source_kind === EMPTY_LEGACY_CORPUS_SOURCE_KIND) {
+        if (
+          !requiresEmptyCorpusReceipt ||
+          !isVerifiedEmptyLegacyCorpusReceipt({
+            receipt: verified,
+            migrationId,
+            planHash,
+            phase: "verified",
+          })
+        ) {
+          throw new Error(
+            "memory isolation final cutover requires a reviewed empty legacy corpus plan",
+          );
+        }
+        continue;
+      }
+      const evidence = verified
+        ? parseFinalMigrationSourceEvidence(verified.classification_json)
+        : undefined;
+      if (
+        verified.phase !== "verified" ||
+        !hasVerifiedCutoverTime(verified.verified_at) ||
+        verified.cutover_at !== null ||
+        !evidence ||
+        evidence.migrationId !== migrationId ||
+        evidence.source.kind !== verified.source_kind ||
+        evidence.source.hash !== verified.source_hash ||
+        !expected.delete(`${verified.source_kind}\0${verified.source_hash}`)
+      ) {
+        throw new Error("memory isolation migration sources are not verified");
+      }
+    }
+    if (expected.size > 0) {
+      throw new Error("memory isolation final cutover must name every verified source in the plan");
+    }
+    if (requiresEmptyCorpusReceipt) {
+      const receipt = planned.find(
+        (source) => source.source_kind === EMPTY_LEGACY_CORPUS_SOURCE_KIND,
+      );
+      if (!receipt) {
+        throw new Error(
+          "memory isolation final cutover requires a reviewed empty legacy corpus plan",
+        );
+      }
+      const updated = executeSqliteQuerySync(
+        database.db,
+        db
+          .updateTable("memory_migrations")
+          .set({ phase: "cutover", cutover_at: nowMs, updated_at: nowMs })
+          .where("source_kind", "=", receipt.source_kind)
+          .where("source_hash", "=", receipt.source_hash)
+          .where("phase", "=", "verified")
+          .where("plan_hash", "=", planHash),
+      );
+      if (updated.numAffectedRows !== 1n) {
+        throw new Error("memory isolation empty legacy corpus receipt changed during cutover");
+      }
+    }
+    for (const source of manifest.sources) {
+      const updated = executeSqliteQuerySync(
+        database.db,
+        db
+          .updateTable("memory_migrations")
+          .set({ phase: "cutover", cutover_at: nowMs, updated_at: nowMs })
+          .where("source_kind", "=", source.sourceKind)
+          .where("source_hash", "=", source.sourceHash)
+          .where("phase", "=", "verified")
+          .where("plan_hash", "=", planHash),
+      );
+      if (updated.numAffectedRows !== 1n) {
+        throw new Error("memory isolation migration sources changed during cutover");
+      }
+    }
+    executeSqliteQuerySync(
+      database.db,
+      db.insertInto("memory_migrations").values({
+        migration_id: FINAL_CUTOVER_MIGRATION_ID,
+        source_kind: FINAL_CUTOVER_SOURCE_KIND,
+        source_hash: sourceHash,
+        phase: "cutover",
+        classification_json: classificationJson,
+        plan_hash: planHash,
+        verified_at: nowMs,
+        cutover_at: nowMs,
+        updated_at: nowMs,
+      }),
+    );
+  });
+  const snapshot = resolveMemoryIsolationSnapshotFromDatabase({ agentId, options: params.options });
+  if (snapshot.mode !== "cutover") {
+    throw new Error("memory isolation final cutover marker did not verify");
+  }
+  return snapshot.mode;
+}
+
+/**
+ * Read the marker only after validating every source in its complete plan. Doctor passes this
+ * bounded grant to the selected plugin for archival; a phase flag by itself never authorizes it.
+ */
+export function readVerifiedMemoryIsolationFinalCutover(params: {
+  agentId: string;
+  options?: OpenClawAgentDatabaseOptions;
+}): VerifiedMemoryIsolationFinalCutover {
+  const agentId = params.agentId.trim();
+  if (!agentId) {
+    throw new Error("memory isolation agent id is required");
+  }
+  const database = openOpenClawAgentDatabase({ ...params.options, agentId });
+  ensureOpenClawAgentScopedMemorySchema(database.db);
+  database.db.exec(AGENT_SESSION_MEMORY_SCHEMA_SQL); // sqlite-allow-raw -- Existing additive subject DDL.
+  const db = getNodeSqliteKysely<MemoryCutoverDatabase>(database.db);
+  const markers = executeSqliteQuerySync(
+    database.db,
+    db
+      .selectFrom("memory_migrations")
+      .select([
+        "migration_id",
+        "source_kind",
+        "source_hash",
+        "phase",
+        "classification_json",
+        "plan_hash",
+        "verified_at",
+        "cutover_at",
+      ])
+      .where("source_kind", "=", FINAL_CUTOVER_SOURCE_KIND),
+  ).rows;
+  const marker = markers.length === 1 ? markers[0] : undefined;
+  const manifest = marker ? parseFinalCutoverManifest(marker.classification_json) : undefined;
+  if (!marker || !manifest || !isVerifiedFinalCutoverMarker({ database: database.db, marker })) {
+    throw new Error("memory isolation archival requires a verified final cutover");
+  }
+  return Object.freeze({
+    migrationId: manifest.migrationId,
+    planHash: marker.plan_hash,
+    sources: manifest.sources,
+  });
+}
+
+export const memoryIsolationCutoverTestApi = {
+  createVerifiedSourceClassification(params: {
+    migrationId: string;
+    sourceId: string;
+    sourceKind: string;
+    sourceHash: string;
+    contentHash: string;
+    actorRole?: "owner" | "admin";
+  }): string {
+    const sourceHash = normalizeFinalMigrationHash(params.sourceHash, "test source hash");
+    const contentHash = normalizeFinalMigrationHash(params.contentHash, "test content hash");
+    return createFinalMigrationSourceClassification({
+      migrationId: normalizeFinalCutoverText(params.migrationId, "test migration id"),
+      source: {
+        id: normalizeFinalCutoverText(params.sourceId, "test source id"),
+        kind: normalizeFinalCutoverText(params.sourceKind, "test source kind"),
+        hash: sourceHash,
+        contentHash,
+        bytes: 1,
+      },
+      decision: {
+        placement: "approved",
+        actorRole: params.actorRole ?? "owner",
+        actorId: "test-actor",
+      },
+      backup: { artifactHash: contentHash, contentHash, verifiedAt: 1 },
+      destination: {
+        storeId: `test-store-${sourceHash}`,
+        resourceId: `test-resource-${sourceHash}`,
+        revisionId: `test-revision-${sourceHash}`,
+        contentHash,
+        lifecycleState: "active",
+      },
+      archive: { state: "pending" },
+    });
+  },
+};
 
 /** The P1C pilot binds one durable subject; a different subject cannot mint a protected context. */
 export function isMemoryIsolationSubjectAdmitted(params: {

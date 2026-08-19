@@ -58,6 +58,11 @@ openclaw doctor --post-upgrade --json
 openclaw doctor --memory-isolation status --memory-isolation-agent main
 openclaw doctor --memory-isolation shadow-read-only --memory-isolation-agent main
 openclaw doctor --memory-isolation legacy --memory-isolation-agent main
+openclaw doctor --memory-isolation dry-run --memory-isolation-agent main --memory-isolation-decisions ./memory-decisions.json --json
+openclaw doctor --memory-isolation cutover --memory-isolation-agent main --memory-isolation-plan sha256:<reviewed-plan-digest> --memory-isolation-decisions ./memory-decisions.json
+openclaw doctor --memory-isolation rollback --memory-isolation-agent main --memory-isolation-plan sha256:<reviewed-plan-digest>
+openclaw doctor --memory-isolation archive --memory-isolation-agent main
+openclaw doctor --memory-isolation export --memory-isolation-agent main --memory-isolation-export ./memory-downgrade-export
 openclaw doctor --state-sqlite compact
 openclaw doctor --state-sqlite compact --json
 openclaw doctor --session-sqlite inspect --session-sqlite-all-agents
@@ -80,33 +85,36 @@ openclaw channels status --probe
 
 ## Options
 
-| Option                          | Effect                                                                                                                                                                                  |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--no-workspace-suggestions`    | Disable workspace memory/search suggestions.                                                                                                                                            |
-| `--yes`                         | Accept defaults without prompting.                                                                                                                                                      |
-| `--repair` / `--fix`            | Apply recommended non-service repairs without prompting (`--fix` is an alias). Gateway service installs/rewrites still require interactive confirmation or explicit `gateway` commands. |
-| `--force`                       | Apply aggressive repairs, including overwriting custom service config.                                                                                                                  |
-| `--non-interactive`             | Run without prompts; safe migrations and non-service repairs only.                                                                                                                      |
-| `--generate-gateway-token`      | Generate and configure a gateway token.                                                                                                                                                 |
-| `--allow-exec`                  | Allow doctor to execute configured `exec` SecretRefs while verifying secrets.                                                                                                           |
-| `--deep`                        | Scan system services for extra gateway installs; report recent Gateway supervisor restart handoffs.                                                                                     |
-| `--lint`                        | Run modernized health checks in read-only mode and emit diagnostic findings.                                                                                                            |
-| `--post-upgrade`                | Run post-upgrade plugin compatibility probes; findings go to stdout; exit code 1 if any error-level finding is present.                                                                 |
-| `--memory-isolation <mode>`     | Read or change the read-only memory-isolation posture: `status`, `shadow-read-only`, or `legacy`.                                                                                       |
-| `--memory-isolation-agent <id>` | With `--memory-isolation`: select one configured agent.                                                                                                                                 |
-| `--state-sqlite <mode>`         | Run explicit shared state SQLite maintenance. The only mode is `compact`.                                                                                                               |
-| `--session-sqlite <mode>`       | Run the targeted session SQLite migration mode: `inspect`, `dry-run`, `import`, `validate`, `compact`, `recover`, or `restore`.                                                         |
-| `--session-sqlite-store <path>` | With `--session-sqlite`: select one legacy `sessions.json` store path.                                                                                                                  |
-| `--session-sqlite-agent <id>`   | With `--session-sqlite`: select one configured agent.                                                                                                                                   |
-| `--session-sqlite-all-agents`   | With `--session-sqlite`: select configured and discovered agent stores.                                                                                                                 |
-| `--github-issue`                | With `--session-sqlite recover`: prepare a sanitized openclaw/openclaw issue report; doctor creates it with `gh` after `--yes` or interactive confirmation.                             |
-| `--json`                        | Emit read-only JSON. Bare `--json` is advisory; combine with `--lint` for threshold-based exit codes. With another machine mode, emit that mode's existing JSON report.                 |
-| `--severity-min <level>`        | With `--lint`: drop findings below `info`, `warning`, or `error`.                                                                                                                       |
-| `--all`                         | With `--lint`: run all registered checks, including opt-in checks excluded from the default set.                                                                                        |
-| `--skip <id>`                   | With `--lint`: skip a check id. Repeatable.                                                                                                                                             |
-| `--only <id>`                   | With `--lint`: run only the given check id(s). Repeatable.                                                                                                                              |
+| Option                                | Effect                                                                                                                                                                                  |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--no-workspace-suggestions`          | Disable workspace memory/search suggestions.                                                                                                                                            |
+| `--yes`                               | Accept defaults without prompting.                                                                                                                                                      |
+| `--repair` / `--fix`                  | Apply recommended non-service repairs without prompting (`--fix` is an alias). Gateway service installs/rewrites still require interactive confirmation or explicit `gateway` commands. |
+| `--force`                             | Apply aggressive repairs, including overwriting custom service config.                                                                                                                  |
+| `--non-interactive`                   | Run without prompts; safe migrations and non-service repairs only.                                                                                                                      |
+| `--generate-gateway-token`            | Generate and configure a gateway token.                                                                                                                                                 |
+| `--allow-exec`                        | Allow doctor to execute configured `exec` SecretRefs while verifying secrets.                                                                                                           |
+| `--deep`                              | Scan system services for extra gateway installs; report recent Gateway supervisor restart handoffs.                                                                                     |
+| `--lint`                              | Run modernized health checks in read-only mode and emit diagnostic findings.                                                                                                            |
+| `--post-upgrade`                      | Run post-upgrade plugin compatibility probes; findings go to stdout; exit code 1 if any error-level finding is present.                                                                 |
+| `--memory-isolation <mode>`           | Manage one agent's memory-isolation posture: `status`, `shadow-read-only`, `legacy`, `dry-run`, `cutover`, `rollback`, `archive`, or `export`.                                          |
+| `--memory-isolation-agent <id>`       | With `--memory-isolation`: select one configured agent.                                                                                                                                 |
+| `--memory-isolation-plan <sha256>`    | With `cutover` or pre-cutover `rollback`: the exact plan digest printed by the reviewed dry run.                                                                                        |
+| `--memory-isolation-decisions <path>` | With `dry-run` or `cutover`: a version-1, reviewed migration-decision manifest.                                                                                                         |
+| `--memory-isolation-export <path>`    | With `export`: a new directory for a warned, explicit downgrade export.                                                                                                                 |
+| `--state-sqlite <mode>`               | Run explicit shared state SQLite maintenance. The only mode is `compact`.                                                                                                               |
+| `--session-sqlite <mode>`             | Run the targeted session SQLite migration mode: `inspect`, `dry-run`, `import`, `validate`, `compact`, `recover`, or `restore`.                                                         |
+| `--session-sqlite-store <path>`       | With `--session-sqlite`: select one legacy `sessions.json` store path.                                                                                                                  |
+| `--session-sqlite-agent <id>`         | With `--session-sqlite`: select one configured agent.                                                                                                                                   |
+| `--session-sqlite-all-agents`         | With `--session-sqlite`: select configured and discovered agent stores.                                                                                                                 |
+| `--github-issue`                      | With `--session-sqlite recover`: prepare a sanitized openclaw/openclaw issue report; doctor creates it with `gh` after `--yes` or interactive confirmation.                             |
+| `--json`                              | Emit read-only JSON. Bare `--json` is advisory; combine with `--lint` for threshold-based exit codes. With another machine mode, emit that mode's existing JSON report.                 |
+| `--severity-min <level>`              | With `--lint`: drop findings below `info`, `warning`, or `error`.                                                                                                                       |
+| `--all`                               | With `--lint`: run all registered checks, including opt-in checks excluded from the default set.                                                                                        |
+| `--skip <id>`                         | With `--lint`: skip a check id. Repeatable.                                                                                                                                             |
+| `--only <id>`                         | With `--lint`: run only the given check id(s). Repeatable.                                                                                                                              |
 
-`--severity-min`, `--all`, `--only`, and `--skip` are only accepted together with `--lint`; `--json` is accepted with `--lint`, `--post-upgrade`, `--memory-isolation`, `--state-sqlite`, and `--session-sqlite`. Memory-isolation mode accepts only `--memory-isolation-agent` and `--json` in addition to its mode.
+`--severity-min`, `--all`, `--only`, and `--skip` are only accepted together with `--lint`; `--json` is accepted with `--lint`, `--post-upgrade`, `--memory-isolation`, `--state-sqlite`, and `--session-sqlite`. Memory-isolation mode accepts `--memory-isolation-agent` and `--json`; the `cutover` and `rollback` modes also require `--memory-isolation-plan`, `dry-run` and `cutover` may read `--memory-isolation-decisions`, and `export` requires `--memory-isolation-export`. It cannot be combined with normal Doctor repair, lint, SQLite-maintenance, or post-upgrade options.
 
 ## Memory isolation pilot
 
@@ -123,6 +131,73 @@ In this posture, legacy content-bearing memory reads and ordinary durable-memory
 The current constrained egress profile permits only the automatic final reply. It rechecks the current recipient binding, route, delivery audience, exposure revision, and registry revision both when queueing and immediately before platform delivery. A changed recipient, route, sink, later exposure, or registry revision suppresses delivery. This is deliberately not a general egress registry and does not authorize model-initiated side effects.
 
 The constrained profile has completed the Phase 1D filesystem, sandbox, exec, egress, and required local/remote cross-platform proof. An operator may use only this exact profile for a two-subject read-only pilot; it remains neither a general production cutover nor a write enablement. The `legacy` mode removes only the reversible P1C marker. It cannot undo a final Phase 6 cutover marker.
+
+## Final scoped-memory cutover
+
+Use this operator workflow only after the selected memory plugin and the deployment have passed their cutover gates. It moves known legacy workspace-memory and transcript sources into opaque scoped stores, then changes the selected agent to the enforced runtime. The Gateway reads the final marker at startup, so restart it after a successful cutover.
+
+1. Produce a content-redacted dry-run plan. Review its `planHash`, source placements, and blockers before proceeding.
+2. Save a version-1 decision manifest. Every entry names the exact `sourceId` and `sourceHash` from the dry run. A source without an explicit private-placement decision is quarantined; Doctor never infers an owner from prose, a filename, a route, or a sender.
+3. Apply exactly that reviewed plan. `cutover` verifies the selected backend, creates and verifies per-source backups, copies and indexes scoped content, verifies the copy and policy denial matrix, then writes one final marker.
+4. Restart the Gateway. Until the restart, the process keeps its prior in-memory posture.
+5. Archive legacy sources only when the operator is ready. Archival is explicit and removes the corresponding legacy index projections only after the final marker and source evidence validate.
+
+```bash
+# 1. Dry run. Record the JSON migration.planHash rather than inventing a digest.
+openclaw doctor --memory-isolation dry-run \
+  --memory-isolation-agent main \
+  --memory-isolation-decisions ./memory-decisions.json \
+  --json
+
+# 2. Apply the exact reviewed plan, then reload the Gateway snapshot.
+openclaw doctor --memory-isolation cutover \
+  --memory-isolation-agent main \
+  --memory-isolation-plan sha256:<reviewed-plan-digest> \
+  --memory-isolation-decisions ./memory-decisions.json
+openclaw gateway restart
+
+# 3. Later, explicitly archive the verified legacy sources.
+openclaw doctor --memory-isolation archive --memory-isolation-agent main
+```
+
+The decision file is JSON shaped like this. The only private placement is the named principal's own private store; an operator administrator may make that placement for a principal. Quarantine is the safe default and remains unavailable to ordinary reads and downgrade export.
+
+```json
+{
+  "version": 1,
+  "decisions": [
+    {
+      "sourceId": "<dry-run-source-id>",
+      "sourceHash": "sha256:<dry-run-source-digest>",
+      "placement": "user-private",
+      "principalId": "<principal-id>"
+    },
+    {
+      "sourceId": "<another-dry-run-source-id>",
+      "sourceHash": "sha256:<another-dry-run-source-digest>",
+      "placement": "quarantine"
+    }
+  ]
+}
+```
+
+Before the final marker, rollback is available only from the readable legacy posture and needs the same reviewed plan digest:
+
+```bash
+openclaw doctor --memory-isolation rollback \
+  --memory-isolation-agent main \
+  --memory-isolation-plan sha256:<reviewed-plan-digest>
+```
+
+After cutover, Doctor does not restore legacy reads, dual-read, dual-write, or lazy import. If new scoped writes mean an operator needs a downgrade artifact, `export` is the only path. It creates a fresh directory of active scoped resources and a manifest warning that audience, policy, identity, lineage, and audit metadata are omitted. It excludes quarantined resources, leaves the cutover marker intact, and cannot re-enable legacy runtime reads.
+
+```bash
+openclaw doctor --memory-isolation export \
+  --memory-isolation-agent main \
+  --memory-isolation-export ./memory-downgrade-export
+```
+
+There is no scheduled memory-retention purge in this workflow. Backup and archival are explicit operator actions; do not treat successful cutover as authorization to delete additional data.
 
 ## Lint mode
 
