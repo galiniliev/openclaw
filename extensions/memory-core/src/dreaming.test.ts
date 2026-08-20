@@ -348,7 +348,16 @@ function getBeforeAgentReplyHandler(
   onMock: ReturnType<typeof vi.fn>,
 ): (
   event: { cleanedBody: string },
-  ctx: { agentId?: string; trigger?: string; workspaceDir?: string; sessionKey?: string },
+  ctx: {
+    agentId?: string;
+    trigger?: string;
+    workspaceDir?: string;
+    sessionKey?: string;
+    sessionId?: string;
+    runId?: string;
+    channel?: string;
+    accountId?: string;
+  },
 ) => Promise<unknown> {
   const call = onMock.mock.calls.find(([eventName]) => eventName === "before_agent_reply");
   if (!call) {
@@ -356,7 +365,16 @@ function getBeforeAgentReplyHandler(
   }
   return call[1] as (
     event: { cleanedBody: string },
-    ctx: { agentId?: string; trigger?: string; workspaceDir?: string; sessionKey?: string },
+    ctx: {
+      agentId?: string;
+      trigger?: string;
+      workspaceDir?: string;
+      sessionKey?: string;
+      sessionId?: string;
+      runId?: string;
+      channel?: string;
+      accountId?: string;
+    },
   ) => Promise<unknown>;
 }
 
@@ -1698,6 +1716,18 @@ describe("gateway startup reconciliation", () => {
     clearInternalHooks();
     isLegacyMemorySurfaceDisabledMock.mockImplementation((agentId) => agentId === "main");
     runDreamingSweepPhasesMock.mockClear();
+    const complete = vi.fn().mockResolvedValue({
+      text: "MODEL_DREAMING_OUTPUT_SENTINEL",
+      provider: "openai",
+      model: "gpt-5.5",
+      agentId: "main",
+      usage: {},
+      execution: {
+        mode: "isolated-agent-runtime",
+        owner: { kind: "harness", id: "test" },
+      },
+      audit: { caller: { kind: "plugin", id: "memory-core" } },
+    });
     const collectSources = vi.fn().mockResolvedValue([
       { text: "SCOPED_DREAMING_SOURCE_SENTINEL", path: "memory/scoped.md" },
     ]);
@@ -1714,7 +1744,9 @@ describe("gateway startup reconciliation", () => {
       collectSources,
       commit,
     });
-    const { api, harness, onMock } = createDreamingTestContext();
+    const { api, harness, onMock } = createDreamingTestContext({
+      runtime: { llm: { complete } },
+    });
 
     try {
       registerShortTermPromotionDreamingForTest(api);
@@ -1726,7 +1758,14 @@ describe("gateway startup reconciliation", () => {
 
       const result = await getBeforeAgentReplyHandler(onMock)(
         { cleanedBody: constants.DREAMING_SYSTEM_EVENT_TEXT },
-        { trigger: "cron", agentId: "main", workspaceDir: "." },
+        {
+          trigger: "cron",
+          agentId: "main",
+          workspaceDir: ".",
+          sessionKey: "agent:main:cron:memory-dreaming",
+          sessionId: "session-1",
+          runId: "run-1",
+        },
       );
 
       expect(result).toEqual({
@@ -1736,12 +1775,130 @@ describe("gateway startup reconciliation", () => {
       expect(harness.listCalls).toBeGreaterThanOrEqual(cronCallsBeforeTrigger);
       expect(prepareAuthorizedMemoryBackgroundDerivationHostMock).toHaveBeenCalledWith({
         agentId: "main",
+        sessionKey: "agent:main:cron:memory-dreaming",
+        sessionId: "session-1",
+        runId: "run-1",
         purpose: "dreaming",
       });
       expect(collectSources).toHaveBeenCalledOnce();
-      expect(commit).toHaveBeenCalledWith({
-        content: "# Dreaming consolidation\n\nSCOPED_DREAMING_SOURCE_SENTINEL",
+      expect(complete).toHaveBeenCalledOnce();
+      const completionRequest = complete.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(completionRequest).toMatchObject({
+        purpose: "memory.dreaming",
+        maxTokens: 2048,
+        execution: { mode: "isolated-agent-runtime", timeoutMs: 30_000 },
       });
+      expect(completionRequest).not.toHaveProperty("agentId");
+      expect(completionRequest).not.toHaveProperty("model");
+      expect(completionRequest.messages).toEqual([
+        { role: "user", content: "SCOPED_DREAMING_SOURCE_SENTINEL" },
+      ]);
+      expect(String(completionRequest.systemPrompt)).not.toContain("memory/scoped.md");
+      expect(collectSources.mock.invocationCallOrder[0]).toBeLessThan(
+        complete.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+      );
+      expect(commit).toHaveBeenCalledWith({
+        content: "MODEL_DREAMING_OUTPUT_SENTINEL",
+      });
+      expect(complete.mock.invocationCallOrder[0]).toBeLessThan(
+        commit.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+      );
+      expect(runDreamingSweepPhasesMock).not.toHaveBeenCalled();
+    } finally {
+      await triggerGatewayStop(onMock).catch(() => undefined);
+      clearInternalHooks();
+    }
+  });
+
+  it("fails closed without committing raw source material when isolated dreaming fails", async () => {
+    clearInternalHooks();
+    isLegacyMemorySurfaceDisabledMock.mockImplementation((agentId) => agentId === "main");
+    runDreamingSweepPhasesMock.mockClear();
+    const collectSources = vi.fn().mockResolvedValue([
+      { text: "SCOPED_DREAMING_SOURCE_SENTINEL", path: "memory/scoped.md" },
+    ]);
+    const commit = vi.fn();
+    prepareAuthorizedMemoryBackgroundDerivationHostMock.mockResolvedValue({
+      search: vi.fn(),
+      read: vi.fn(),
+      collectSources,
+      commit,
+    });
+
+    const completionCases = [
+      () => Promise.reject(new Error("isolated completion failed")),
+      () =>
+        Promise.resolve({
+          text: "   ",
+        }),
+      () =>
+        Promise.resolve({
+          text: "x".repeat(12_001),
+        }),
+    ];
+    for (const complete of completionCases.map((implementation) => vi.fn(implementation))) {
+      const { api, harness, onMock } = createDreamingTestContext({ runtime: { llm: { complete } } });
+      try {
+        registerShortTermPromotionDreamingForTest(api);
+        await triggerGatewayStart(onMock, {
+          config: api.config,
+          getCron: () => harness.cron,
+        });
+        await expect(
+          getBeforeAgentReplyHandler(onMock)(
+            { cleanedBody: constants.DREAMING_SYSTEM_EVENT_TEXT },
+            {
+              trigger: "cron",
+              agentId: "main",
+              sessionKey: "agent:main:cron:memory-dreaming",
+              sessionId: "session-1",
+            },
+          ),
+        ).resolves.toEqual({ handled: true, reason: "memory-core: scoped dreaming unavailable" });
+        expect(commit).not.toHaveBeenCalled();
+        expect(runDreamingSweepPhasesMock).not.toHaveBeenCalled();
+      } finally {
+        await triggerGatewayStop(onMock).catch(() => undefined);
+      }
+    }
+  });
+
+  it("keeps a rejected final derivation commit out of legacy dreaming", async () => {
+    clearInternalHooks();
+    isLegacyMemorySurfaceDisabledMock.mockImplementation((agentId) => agentId === "main");
+    runDreamingSweepPhasesMock.mockClear();
+    const commit = vi.fn().mockResolvedValue({
+      disabled: true,
+      unavailable: true,
+      error: "memory unavailable",
+    });
+    prepareAuthorizedMemoryBackgroundDerivationHostMock.mockResolvedValue({
+      search: vi.fn(),
+      read: vi.fn(),
+      collectSources: vi.fn().mockResolvedValue([{ text: "source", path: "memory/scoped.md" }]),
+      commit,
+    });
+    const complete = vi.fn().mockResolvedValue({ text: "MODEL_DREAMING_OUTPUT_SENTINEL" });
+    const { api, harness, onMock } = createDreamingTestContext({ runtime: { llm: { complete } } });
+
+    try {
+      registerShortTermPromotionDreamingForTest(api);
+      await triggerGatewayStart(onMock, {
+        config: api.config,
+        getCron: () => harness.cron,
+      });
+      await expect(
+        getBeforeAgentReplyHandler(onMock)(
+          { cleanedBody: constants.DREAMING_SYSTEM_EVENT_TEXT },
+          {
+            trigger: "cron",
+            agentId: "main",
+            sessionKey: "agent:main:cron:memory-dreaming",
+            sessionId: "session-1",
+          },
+        ),
+      ).resolves.toEqual({ handled: true, reason: "memory-core: scoped dreaming unavailable" });
+      expect(commit).toHaveBeenCalledWith({ content: "MODEL_DREAMING_OUTPUT_SENTINEL" });
       expect(runDreamingSweepPhasesMock).not.toHaveBeenCalled();
     } finally {
       await triggerGatewayStop(onMock).catch(() => undefined);

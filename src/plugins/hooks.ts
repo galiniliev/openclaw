@@ -114,6 +114,7 @@ import {
   type PluginSubagentRequesterContext,
   withPluginSubagentRequesterContext,
 } from "./runtime/subagent-requester-context.js";
+import { withPluginRuntimeAgentSessionScope } from "./runtime/gateway-request-scope.js";
 import {
   createPluginToolMatcherScope,
   pluginToolMatcherCoversTool,
@@ -983,10 +984,12 @@ export function createHookRunner(
     event: PluginHookBeforeAgentReplyEvent,
     ctx: PluginHookAgentContext,
   ): Promise<PluginHookBeforeAgentReplyResult | undefined> {
-    return runClaimingHook<"before_agent_reply", PluginHookBeforeAgentReplyResult>(
-      "before_agent_reply",
-      event,
-      ctx,
+    return await withPluginRuntimeAgentSessionScope(ctx, async () =>
+      await runClaimingHook<"before_agent_reply", PluginHookBeforeAgentReplyResult>(
+        "before_agent_reply",
+        event,
+        ctx,
+      ),
     );
   }
 

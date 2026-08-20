@@ -19,7 +19,10 @@ import { normalizeAgentId } from "../../routing/session-key.js";
 import { modelKey } from "../../shared/model-key.js";
 import { estimateUsageCost, resolveModelCostConfig } from "../../utils/usage-format.js";
 import { normalizePluginsConfig } from "../config-state.js";
-import { getPluginRuntimeGatewayRequestScope } from "./gateway-request-scope.js";
+import {
+  getPluginRuntimeAgentSessionScope,
+  getPluginRuntimeGatewayRequestScope,
+} from "./gateway-request-scope.js";
 import {
   assertSupportedExecutionMode,
   isIsolatedAgentRuntimeRequest,
@@ -137,10 +140,40 @@ async function resolveAgentId(params: {
   authority?: RuntimeLlmAuthority;
   allowAgentIdOverride: boolean;
 }): Promise<string> {
+  const hookAgentSession = getPluginRuntimeAgentSessionScope();
+  if (hookAgentSession && !hookAgentSession.active) {
+    throw completionError(
+      "LLM_COMPLETION_NOT_AUTHORIZED",
+      "Plugin LLM completion outlived its owning agent hook.",
+    );
+  }
+  const hookAgentIdRaw = normalizeOptionalString(hookAgentSession?.agentId);
+  if (hookAgentSession && !hookAgentIdRaw) {
+    throw completionError(
+      "LLM_COMPLETION_NOT_AUTHORIZED",
+      "Plugin LLM completion hook scope is not bound to an active session agent.",
+    );
+  }
+  const hookAgentId = hookAgentIdRaw ? normalizeAgentId(hookAgentIdRaw) : undefined;
   const authorityAgentIdRaw = normalizeOptionalString(params.authority?.agentId);
   const requestedAgentIdRaw = normalizeOptionalString(params.request.agentId);
   const authorityAgentId = authorityAgentIdRaw ? normalizeAgentId(authorityAgentIdRaw) : undefined;
   const requestedAgentId = requestedAgentIdRaw ? normalizeAgentId(requestedAgentIdRaw) : undefined;
+  if (hookAgentId) {
+    if (authorityAgentId && authorityAgentId !== hookAgentId) {
+      throw completionError(
+        "LLM_COMPLETION_NOT_AUTHORIZED",
+        "Plugin LLM completion host authority conflicts with the active session agent.",
+      );
+    }
+    if (requestedAgentId && requestedAgentId !== hookAgentId) {
+      throw completionError(
+        "LLM_COMPLETION_NOT_AUTHORIZED",
+        "Plugin LLM completion cannot override the active session agent.",
+      );
+    }
+    return hookAgentId;
+  }
   if (params.authority?.requiresBoundAgent && !authorityAgentId) {
     throw completionError(
       "LLM_COMPLETION_NOT_AUTHORIZED",
@@ -167,6 +200,16 @@ async function resolveAgentId(params: {
   }
   const { resolveDefaultAgentId } = await import("../../agents/agent-scope.js");
   return resolveDefaultAgentId(params.cfg);
+}
+
+function assertHookAgentSessionStillActive(): void {
+  const hookAgentSession = getPluginRuntimeAgentSessionScope();
+  if (hookAgentSession && !hookAgentSession.active) {
+    throw completionError(
+      "LLM_COMPLETION_NOT_AUTHORIZED",
+      "Plugin LLM completion outlived its owning agent hook.",
+    );
+  }
 }
 
 function buildSystemPrompt(params: LlmCompleteParams): string | undefined {
@@ -610,6 +653,7 @@ export function createRuntimeLlm(
             : authorityPolicy?.allowAgentIdOverride === true ||
               pluginPolicy?.allowAgentIdOverride === true,
       });
+      assertHookAgentSessionStillActive();
       const requestedModel = normalizeOptionalString(params.model);
       const requestedModelProfile = requestedModel
         ? normalizeOptionalString(splitTrailingAuthProfile(requestedModel).profile)
@@ -670,6 +714,7 @@ export function createRuntimeLlm(
           authProfileId:
             executionProfile ?? requestedModelProfile ?? preferredProfile ?? modelProfile,
         });
+        assertHookAgentSessionStillActive();
         return finalizeCompletion({
           cfg,
           hostPluginId: pluginPolicyId,
@@ -695,6 +740,7 @@ export function createRuntimeLlm(
         allowMissingApiKeyModes: ["aws-sdk"],
         skipAgentDiscovery: true,
       });
+      assertHookAgentSessionStillActive();
 
       if ("error" in prepared) {
         throw new Error(`Plugin LLM completion failed: ${prepared.error}`);
@@ -722,6 +768,7 @@ export function createRuntimeLlm(
           signal: params.signal,
         },
       });
+      assertHookAgentSessionStillActive();
 
       const text = result.content
         .filter((c): c is { type: "text"; text: string } => c.type === "text")

@@ -30,6 +30,7 @@ import {
 import { peekSystemEventEntries } from "openclaw/plugin-sdk/system-event-runtime";
 import { appendFailedDreamingEvent } from "./dreaming-events.js";
 import type { NarrativePhaseData } from "./dreaming-narrative.js";
+import { runScopedDreamingConsolidation } from "./scoped-dreaming.js";
 import { formatErrorMessage, includesSystemEventToken } from "./dreaming-shared.js";
 
 const RUNTIME_CRON_RECONCILE_INTERVAL_MS = 60_000;
@@ -449,14 +450,6 @@ function hasDreamingWork(cfg: OpenClawConfig): boolean {
   return resolveMemoryDreamingWorkspaces(cfg).some(({ agentIds }) => agentIds.length > 0);
 }
 
-function buildScopedDreamingArtifact(sources: readonly { text: string; path: string }[]): string {
-  const sections = sources
-    .map((source) => source.text.trim())
-    .filter(Boolean)
-    .map((text) => text.replace(/\n{3,}/gu, "\n\n"));
-  return ["# Dreaming consolidation", ...sections].join("\n\n").trim();
-}
-
 /**
  * Cut-over dreaming never touches workspace Markdown. The host has already
  * admitted one operational store and records every source read before this
@@ -472,6 +465,7 @@ async function runScopedDreamingPromotionIfTriggered(params: {
   agentAccountId?: string;
   config: ShortTermPromotionDreamingConfig;
   logger: Logger;
+  complete?: OpenClawPluginApi["runtime"]["llm"]["complete"];
 }): Promise<{ handled: true; reason: string } | undefined> {
   if (!includesSystemEventToken(params.cleanedBody, DREAMING_SYSTEM_EVENT_TEXT)) {
     return undefined;
@@ -495,20 +489,15 @@ async function runScopedDreamingPromotionIfTriggered(params: {
   if (!host) {
     return { handled: true, reason: "memory-core: scoped dreaming unavailable" };
   }
-  const sources = await host.collectSources();
-  if ("unavailable" in sources) {
-    return { handled: true, reason: "memory-core: scoped dreaming unavailable" };
-  }
-  const content = buildScopedDreamingArtifact(sources);
-  if (!content) {
+  const result = await runScopedDreamingConsolidation({ host, complete: params.complete });
+  if (result.status === "empty") {
     return { handled: true, reason: "memory-core: scoped dreaming found no eligible sources" };
   }
-  const result = await host.commit({ content });
-  if ("unavailable" in result) {
+  if (result.status === "unavailable") {
     return { handled: true, reason: "memory-core: scoped dreaming unavailable" };
   }
   params.logger.info(
-    `memory-core: scoped dreaming committed one derived revision from ${sources.length} source resource(s).`,
+    `memory-core: scoped dreaming committed one derived revision from ${result.sourceCount} source resource(s).`,
   );
   return { handled: true, reason: "memory-core: scoped dreaming completed" };
 }
@@ -640,6 +629,7 @@ async function runShortTermDreamingPromotionIfTriggered(params: {
   config: ShortTermPromotionDreamingConfig;
   logger: Logger;
   subagent?: OpenClawPluginApi["runtime"]["subagent"];
+  complete?: OpenClawPluginApi["runtime"]["llm"]["complete"];
 }): Promise<{ handled: true; reason: string } | undefined> {
   if (params.trigger !== "heartbeat" && params.trigger !== "cron") {
     return undefined;
@@ -1291,6 +1281,7 @@ export function registerShortTermPromotionDreaming(api: OpenClawPluginApi): void
           config,
           logger: api.logger,
           subagent: config.enabled ? api.runtime?.subagent : undefined,
+          complete: api.runtime?.llm?.complete,
         });
       } catch (err) {
         api.logger.error(`memory-core: dreaming trigger failed: ${formatErrorMessage(err)}`);

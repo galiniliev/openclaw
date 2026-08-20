@@ -18,7 +18,22 @@ type PluginRuntimeGatewayRequestScope = {
   pluginTrustedOfficialInstall?: boolean;
   gatewayMethodDispatchAllowed?: boolean;
   pluginRegistry?: PluginRegistry;
+  agentSession?: PluginRuntimeAgentSessionScope;
 };
+
+/**
+ * Internal authority carried only while an agent lifecycle hook is executing.
+ * Retained async work observes `active: false` once its owning hook returns.
+ */
+export type PluginRuntimeAgentSessionScope = {
+  agentId?: string;
+  sessionKey?: string;
+  sessionId?: string;
+  runId?: string;
+  active: boolean;
+};
+
+type PluginRuntimeAgentSessionFacts = Omit<PluginRuntimeAgentSessionScope, "active">;
 
 type PluginRuntimePluginScope = {
   pluginId: string;
@@ -60,6 +75,28 @@ export function withPluginRuntimeRegistryScope<T>(
   return pluginRuntimeGatewayRequestScope.run(
     { isWebchatConnect: () => false, ...current, pluginRegistry: registry },
     run,
+  );
+}
+
+/**
+ * Binds one hook invocation to its current agent/session facts. The mutable
+ * admission token prevents detached work from reusing that authority later.
+ */
+export async function withPluginRuntimeAgentSessionScope<T>(
+  facts: PluginRuntimeAgentSessionFacts,
+  run: () => Promise<T>,
+): Promise<T> {
+  const current = pluginRuntimeGatewayRequestScope.getStore();
+  const agentSession: PluginRuntimeAgentSessionScope = { ...facts, active: true };
+  return await pluginRuntimeGatewayRequestScope.run(
+    { isWebchatConnect: () => false, ...current, agentSession },
+    async () => {
+      try {
+        return await run();
+      } finally {
+        agentSession.active = false;
+      }
+    },
   );
 }
 
@@ -106,4 +143,9 @@ export function getPluginRuntimeGatewayRequestScope():
   | PluginRuntimeGatewayRequestScope
   | undefined {
   return pluginRuntimeGatewayRequestScope.getStore();
+}
+
+/** Returns the current hook-owned agent/session token, including a revoked token for callers to deny. */
+export function getPluginRuntimeAgentSessionScope(): PluginRuntimeAgentSessionScope | undefined {
+  return pluginRuntimeGatewayRequestScope.getStore()?.agentSession;
 }

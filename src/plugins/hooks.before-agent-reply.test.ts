@@ -2,10 +2,37 @@
 import { describe, expect, it, vi } from "vitest";
 import { createHookRunner } from "./hooks.js";
 import { createMockPluginRegistry, TEST_PLUGIN_AGENT_CTX } from "./hooks.test-fixtures.js";
+import { getPluginRuntimeAgentSessionScope } from "./runtime/gateway-request-scope.js";
 
 const EVENT = { cleanedBody: "hello world" };
 
 describe("before_agent_reply hook runner (claiming pattern)", () => {
+  it("binds a claiming hook to its active agent/session scope", async () => {
+    const handler = vi.fn(async () => {
+      expect(getPluginRuntimeAgentSessionScope()).toMatchObject({
+        agentId: "main",
+        sessionKey: "agent:main:session",
+        sessionId: "session-1",
+        runId: "run-1",
+        active: true,
+      });
+      return { handled: true };
+    });
+    const registry = createMockPluginRegistry([{ hookName: "before_agent_reply", handler }]);
+    const runner = createHookRunner(registry);
+
+    await expect(
+      runner.runBeforeAgentReply(EVENT, {
+        ...TEST_PLUGIN_AGENT_CTX,
+        agentId: "main",
+        sessionKey: "agent:main:session",
+        sessionId: "session-1",
+        runId: "run-1",
+      }),
+    ).resolves.toEqual({ handled: true });
+    expect(getPluginRuntimeAgentSessionScope()).toBeUndefined();
+  });
+
   it("returns the result when a plugin claims with { handled: true }", async () => {
     const handler = vi.fn().mockResolvedValue({
       handled: true,

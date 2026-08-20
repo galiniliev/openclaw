@@ -115,7 +115,7 @@ describe("admitAuthorizedMemoryDerivation", () => {
     ).resolves.toBe(false);
   });
 
-  it("does not mint a host for a spawned child without an explicit delegation", () => {
+  it("does not mint a host for a spawned child without an explicit delegation", async () => {
     mocks.currentSession.mockReturnValue({
       kind: "current",
       context: {
@@ -137,6 +137,14 @@ describe("admitAuthorizedMemoryDerivation", () => {
         sessionId: "child-session",
       }),
     ).toBeUndefined();
+    await expect(
+      prepareAuthorizedMemoryBackgroundDerivationHost({
+        agentId: "main",
+        sessionKey: "agent:main:subagent:child",
+        sessionId: "child-session",
+        purpose: "dreaming",
+      }),
+    ).resolves.toBeUndefined();
     expect(mocks.createDeriveInvocation).not.toHaveBeenCalled();
   });
 

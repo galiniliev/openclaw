@@ -84,4 +84,43 @@ describe("gateway request scope", () => {
       expect(requireActivePluginRegistry()).toBe(activeRegistry);
     });
   });
+
+  it("revokes agent/session facts when a hook returns, including for retained async work", async () => {
+    const runtimeScope = await importGatewayRequestScopeModule();
+    let releaseDetached!: () => void;
+    const detachedStart = new Promise<void>((resolve) => {
+      releaseDetached = resolve;
+    });
+    let observeDetached!: () => void;
+    const detachedObserved = new Promise<void>((resolve) => {
+      observeDetached = resolve;
+    });
+    let detachedScope: ReturnType<typeof runtimeScope.getPluginRuntimeAgentSessionScope>;
+
+    await runtimeScope.withPluginRuntimeAgentSessionScope(
+      {
+        agentId: "memory-owner",
+        sessionKey: "agent:memory-owner:cron",
+        sessionId: "session-1",
+        runId: "run-1",
+      },
+      async () => {
+        expect(runtimeScope.getPluginRuntimeAgentSessionScope()).toMatchObject({
+          agentId: "memory-owner",
+          sessionKey: "agent:memory-owner:cron",
+          sessionId: "session-1",
+          runId: "run-1",
+          active: true,
+        });
+        void detachedStart.then(() => {
+          detachedScope = runtimeScope.getPluginRuntimeAgentSessionScope();
+          observeDetached();
+        });
+      },
+    );
+
+    releaseDetached();
+    await detachedObserved;
+    expect(detachedScope).toMatchObject({ agentId: "memory-owner", active: false });
+  });
 });

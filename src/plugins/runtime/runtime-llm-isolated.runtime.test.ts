@@ -6,7 +6,10 @@ import {
   resetDiagnosticEventsForTest,
 } from "../../infra/diagnostic-events.js";
 import { markTrustedOtelDiagnosticListener } from "../../infra/diagnostic-otel-listener-provenance.js";
-import { withPluginRuntimePluginIdScope } from "./gateway-request-scope.js";
+import {
+  withPluginRuntimeAgentSessionScope,
+  withPluginRuntimePluginIdScope,
+} from "./gateway-request-scope.js";
 import { createRuntimeLlm } from "./runtime-llm.runtime.js";
 
 const hoisted = vi.hoisted(() => ({
@@ -73,6 +76,47 @@ describe("runtime.llm.complete isolated agent runtime", () => {
     hoisted.resolveSimpleCompletionSelectionForAgent.mockReset();
     hoisted.runIsolatedCompletion.mockReset();
     primeCompletionMocks();
+  });
+
+  it("uses the active hook agent and denies retained completion after hook close", async () => {
+    const llm = createRuntimeLlm({ getConfig: () => cfg });
+    await withPluginRuntimeAgentSessionScope(
+      {
+        agentId: "memory-owner",
+        sessionKey: "agent:memory-owner:cron",
+        sessionId: "session-1",
+        runId: "run-1",
+      },
+      async () => {
+        await llm.complete({
+          messages: [{ role: "user", content: "Consolidate" }],
+          execution: { mode: "isolated-agent-runtime" },
+        });
+      },
+    );
+    expectSingleCallFirstArg(hoisted.runIsolatedCompletion, { agentId: "memory-owner" });
+
+    let releaseDetached!: () => void;
+    const detachedStart = new Promise<void>((resolve) => {
+      releaseDetached = resolve;
+    });
+    let detachedCompletion!: Promise<unknown>;
+    await withPluginRuntimeAgentSessionScope(
+      { agentId: "memory-owner", sessionKey: "agent:memory-owner:cron", sessionId: "session-1" },
+      async () => {
+        detachedCompletion = detachedStart.then(async () =>
+          await llm.complete({
+            messages: [{ role: "user", content: "Consolidate" }],
+            execution: { mode: "isolated-agent-runtime" },
+          }),
+        );
+      },
+    );
+    releaseDetached();
+    await expect(detachedCompletion).rejects.toMatchObject({
+      code: "LLM_COMPLETION_NOT_AUTHORIZED",
+    });
+    expect(hoisted.runIsolatedCompletion).toHaveBeenCalledTimes(1);
   });
 
   it("routes authorized isolated completion through the configured agent runtime", async () => {
