@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { readAuthorizedTranscriptDerivation } from "../config/sessions/session-transcript-memory-policy.js";
 import type {
   AuthorizedMemoryVirtualView,
   AuthorizedSealedCompactionArtifact,
@@ -8,7 +9,6 @@ import type {
   MemoryAccessContext,
   MemoryActorEvidence,
 } from "../memory-host-sdk/host/authorization.js";
-import { readAuthorizedTranscriptDerivation } from "../config/sessions/session-transcript-memory-policy.js";
 import { isMemoryIsolationCutoverAgent } from "../plugins/memory-cutover.js";
 import {
   MEMORY_INVOCATION_UNAVAILABLE,
@@ -58,7 +58,9 @@ export type AuthorizedMemoryVirtualFileBroker = Readonly<{
 /** Core-private sealed compaction capability; plugins never receive this host. */
 export type AuthorizedSealedCompactionHost = Readonly<{
   source: AuthorizedTranscriptDerivationSource;
-  stage: (content: string) => Promise<AuthorizedSealedCompactionArtifact | typeof MEMORY_INVOCATION_UNAVAILABLE>;
+  stage: (
+    content: string,
+  ) => Promise<AuthorizedSealedCompactionArtifact | typeof MEMORY_INVOCATION_UNAVAILABLE>;
 }>;
 
 type AuthorizedMemoryReadHostWithVirtualBroker = AuthorizedMemoryReadHost &
@@ -141,6 +143,11 @@ function createTrustedMemoryHostContext(
     return undefined;
   }
   const { context } = session;
+  if (context.isChildSession) {
+    // A child starts with the empty memory intersection. Only a future
+    // host-issued delegation may add a bounded view; session metadata cannot.
+    return undefined;
+  }
   if (
     params.background === true &&
     context.subject.kind !== "agent" &&
@@ -338,7 +345,8 @@ export function createAuthorizedMemoryDerivationHost(
  * session key.
  */
 export async function prepareAuthorizedMemoryBackgroundDerivationHost(
-  params: Omit<AuthorizedMemoryHostParams, "background"> & Readonly<{
+  params: Omit<AuthorizedMemoryHostParams, "background"> &
+    Readonly<{
       purpose: AuthorizedResourceDerivationPurpose;
     }>,
 ): Promise<AuthorizedMemoryResourceDerivationHost | undefined> {
@@ -406,7 +414,8 @@ export async function admitAuthorizedMemoryDerivation(
  * substitute a session, event list, policy set, or delivery audience.
  */
 export async function prepareAuthorizedTranscriptDerivationHost(
-  params: AuthorizedMemoryHostParams & Readonly<{ derivationPurpose?: AuthorizedTranscriptDerivationPurpose }>,
+  params: AuthorizedMemoryHostParams &
+    Readonly<{ derivationPurpose?: AuthorizedTranscriptDerivationPurpose }>,
 ): Promise<AuthorizedMemoryWriteHost | undefined> {
   const sessionId = params.sessionId?.trim();
   const trusted = createTrustedMemoryHostContext({ ...params, operation: "derive" });
@@ -475,12 +484,12 @@ export async function prepareAuthorizedSealedCompactionHost(
     return undefined;
   }
   const sealedSource = Object.freeze({
-      kind: "transcript",
-      sessionId,
-      eventSeqs: transcriptSource.eventSeqs,
-      sourcePolicySetId: transcriptSource.sourcePolicySetId,
-      deliveryAudiencesJson: transcriptSource.deliveryAudiencesJson,
-    });
+    kind: "transcript",
+    sessionId,
+    eventSeqs: transcriptSource.eventSeqs,
+    sourcePolicySetId: transcriptSource.sourcePolicySetId,
+    deliveryAudiencesJson: transcriptSource.deliveryAudiencesJson,
+  });
   return Object.freeze({
     source: sealedSource,
     async stage(content) {

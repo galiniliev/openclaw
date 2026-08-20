@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { consumeAdmittedChannelMemoryIdentityFromContext } from "../channels/message-access/memory-identity-admission.js";
 import { generateSecureUuid } from "../infra/secure-random.js";
 import { isMemoryIsolationSubjectAdmitted } from "../plugins/memory-cutover.js";
+import { isSubagentSessionKey } from "../routing/session-key.js";
 import {
   ensureMemoryOperationalPrincipal,
   recheckMemoryIdentityBinding,
@@ -52,6 +53,8 @@ export type CurrentMemorySessionContext = Readonly<{
   subject: PersistedMemorySessionSubject["subject"];
   principalId: string;
   bindingId?: string;
+  /** A spawned child has no memory authority unless a host-issued delegation says otherwise. */
+  isChildSession: boolean;
   /** Persisted transport identity for a channel/group subject; never a sender identity. */
   conversation?: Readonly<{
     channel: string;
@@ -267,6 +270,8 @@ export function createCurrentMemorySessionContext(params: {
               ss.session_id AS snapshot_session_id, ss.session_key AS snapshot_session_key,
               ss.subject_revision AS snapshot_subject_revision,
               ss.session_identity_revision,
+              sn.created_via,
+              sn.spawned_by,
               c.channel AS conversation_channel, c.account_id AS conversation_account_id,
               sw.primary_conversation_id, c.delivery_target AS conversation_delivery_target
        FROM session_nodes sn
@@ -288,6 +293,8 @@ export function createCurrentMemorySessionContext(params: {
         snapshot_session_key: string | null;
         snapshot_subject_revision: string | null;
         session_identity_revision: string | null;
+        created_via: string | null;
+        spawned_by: string | null;
         conversation_channel: string | null;
         conversation_account_id: string | null;
         primary_conversation_id: string | null;
@@ -381,6 +388,10 @@ export function createCurrentMemorySessionContext(params: {
     subject: persisted.subject,
     principalId: persisted.subject.principalId,
     ...(persisted.subject.kind === "user" ? { bindingId: persisted.subject.bindingId } : {}),
+    // Spawn metadata is authoritative. A legacy subagent-shaped key is also a
+    // fail-closed restriction, never evidence that can grant memory authority.
+    isChildSession:
+      row.created_via === "spawn" || Boolean(row.spawned_by) || isSubagentSessionKey(sessionKey),
     ...(conversation ? { conversation } : {}),
     authorityRevision,
     fingerprint,

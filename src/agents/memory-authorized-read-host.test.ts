@@ -54,6 +54,7 @@ vi.mock("./memory-egress-admission.js", () => ({
 import {
   admitAuthorizedMemoryDerivation,
   createAuthorizedMemoryDerivationHost,
+  createAuthorizedMemoryReadHost,
   prepareAuthorizedMemoryBackgroundDerivationHost,
   prepareAuthorizedTranscriptDerivationHost,
 } from "./memory-authorized-read-host.js";
@@ -114,6 +115,31 @@ describe("admitAuthorizedMemoryDerivation", () => {
     ).resolves.toBe(false);
   });
 
+  it("does not mint a host for a spawned child without an explicit delegation", () => {
+    mocks.currentSession.mockReturnValue({
+      kind: "current",
+      context: {
+        agentId: "main",
+        fingerprint: "child-session-fingerprint",
+        isChildSession: true,
+        principalId: "agent:child",
+        sessionId: "child-session",
+        sessionKey: "agent:main:subagent:child",
+        authorityRevision: "child-authority-1",
+        subject: { kind: "agent", principalId: "agent:child" },
+      },
+    });
+
+    expect(
+      createAuthorizedMemoryReadHost({
+        agentId: "main",
+        sessionKey: "agent:main:subagent:child",
+        sessionId: "child-session",
+      }),
+    ).toBeUndefined();
+    expect(mocks.createDeriveInvocation).not.toHaveBeenCalled();
+  });
+
   it("keeps source reads on the derive invocation after admission", async () => {
     const invocation = {};
     mocks.createDeriveInvocation.mockResolvedValue(invocation);
@@ -134,8 +160,14 @@ describe("admitAuthorizedMemoryDerivation", () => {
   it("binds background dreaming output to the same derive invocation that exposed its source", async () => {
     const invocation = {};
     mocks.createDeriveInvocation.mockResolvedValue(invocation);
-    mocks.search.mockResolvedValue({ results: [{ handleId: "source-1", snippet: "scoped source" }] });
-    mocks.commitDerivation.mockResolvedValue({ version: 1, mutationId: "dream", status: "committed" });
+    mocks.search.mockResolvedValue({
+      results: [{ handleId: "source-1", snippet: "scoped source" }],
+    });
+    mocks.commitDerivation.mockResolvedValue({
+      version: 1,
+      mutationId: "dream",
+      status: "committed",
+    });
 
     const host = await prepareAuthorizedMemoryBackgroundDerivationHost({
       agentId: "main",

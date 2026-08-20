@@ -20,12 +20,16 @@ import {
   consumeAdmittedChannelMemoryIdentityFromContext,
   createChannelMemoryIdentityAdmission,
 } from "../../../../src/channels/message-access/memory-identity-admission.js";
+import { writeSessionEntry } from "../../../../src/config/sessions/session-accessor.sqlite-entry-store.js";
 import { appendSqliteTranscriptMessage } from "../../../../src/config/sessions/session-accessor.sqlite-transcript-write.js";
 import { readAuthorizedTranscriptDerivation } from "../../../../src/config/sessions/session-transcript-memory-policy.js";
 import { withOwnedSessionTranscriptWrites } from "../../../../src/config/sessions/transcript-write-context.js";
+import {
+  registerAgentRunContext,
+  resetAgentRunRegistryForTest,
+} from "../../../../src/infra/agent-run-registry.js";
 import { admitMemoryAuthorizationReadRuntime } from "../../../../src/plugins/memory-authorization-runtime.js";
 import { resetMemoryIsolationCutoverForTest } from "../../../../src/plugins/memory-cutover.js";
-import { registerAgentRunContext, resetAgentRunRegistryForTest } from "../../../../src/infra/agent-run-registry.js";
 import {
   persistMemoryRunExposureBeforeContentInDatabase,
   readLatestDurableMemoryRunExposure,
@@ -45,7 +49,10 @@ import {
   admitInboundMemorySessionContext,
   createCurrentMemorySessionContext,
 } from "../../../../src/state/memory-session-subject.js";
-import { openOpenClawAgentDatabase } from "../../../../src/state/openclaw-agent-db.js";
+import {
+  openOpenClawAgentDatabase,
+  runOpenClawAgentWriteTransaction,
+} from "../../../../src/state/openclaw-agent-db.js";
 import {
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
@@ -236,6 +243,35 @@ describe("builtin scoped authorized runtime", () => {
       throw new Error("fixture failed to persist a conversation subject");
     }
     return admitted.context.principalId;
+  }
+
+  function createSpawnedChildSession(params: {
+    sessionKey: string;
+    sessionId: string;
+    spawnedBy: string;
+  }) {
+    runOpenClawAgentWriteTransaction(
+      (database) => {
+        writeSessionEntry(database, params.sessionKey, {
+          sessionId: params.sessionId,
+          updatedAt: 1,
+          createdVia: "spawn",
+          createdActor: { type: "agent", id: "main" },
+          spawnedBy: params.spawnedBy,
+        });
+      },
+      { agentId: "main" },
+      { operationLabel: "scoped-memory-runtime.test.spawned-child" },
+    );
+    const current = createCurrentMemorySessionContext({
+      sessionKey: params.sessionKey,
+      sessionId: params.sessionId,
+      options: { agentId: "main" },
+    });
+    if (current.kind !== "current" || current.context.subject.kind !== "agent") {
+      throw new Error("fixture failed to create an operational child session");
+    }
+    return current.context;
   }
 
   function createContext(principalId: string): MemoryContentAccessContext<"read"> {
@@ -937,7 +973,11 @@ describe("builtin scoped authorized runtime", () => {
       },
       async () => {
         await appendSqliteTranscriptMessage(
-          { agentId: context.agentId, sessionId: context.sessionId, sessionKey: context.sessionKey },
+          {
+            agentId: context.agentId,
+            sessionId: context.sessionId,
+            sessionKey: context.sessionKey,
+          },
           {
             message: {
               role: "assistant",
@@ -1060,6 +1100,32 @@ describe("builtin scoped authorized runtime", () => {
       unavailable: true,
       error: "memory unavailable",
     });
+  });
+
+  it("does not mount a parent private store for a spawned child without delegation", () => {
+    const parentSession = { sessionKey: "agent:main:direct:alice", sessionId: "alice-session" };
+    const alicePrincipalId = createVerifiedDirectSession({ name: "alice", ...parentSession });
+    createPrivateResource(alicePrincipalId, "ALICE_CHILD_ISOLATION_SENTINEL");
+    const childSession = {
+      sessionKey: "agent:main:subagent:child",
+      sessionId: "child-session",
+    };
+    const child = createSpawnedChildSession({
+      ...childSession,
+      spawnedBy: parentSession.sessionKey,
+    });
+    expect(child.isChildSession).toBe(true);
+
+    markCutOver();
+    installBuiltinSelectedRuntime();
+    expect(
+      createAuthorizedMemoryReadHost({
+        agentId: "main",
+        ...childSession,
+        // A parent delivery route is not authority for a child memory mount.
+        deliveryContext: { channel: "telegram", accountId: "default", to: "alice" },
+      }),
+    ).toBeUndefined();
   });
 
   it("invalidates materialized virtual views after binding revocation and plan expiry", async () => {

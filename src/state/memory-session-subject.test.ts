@@ -739,17 +739,17 @@ describe("memory session subject", () => {
   });
 
   it.each([
-    ["cron", "cron", false, "service"],
-    ["heartbeat", "cron", false, "service"],
-    ["subagent", "spawn", false, "agent"],
-    ["system", "internal", false, "system"],
-    ["import", undefined, false, "ambiguous"],
-    ["non-direct channel", "channel", true, "ambiguous"],
-    ["webhook without attestation", "channel", true, "ambiguous"],
-    ["incognito channel without attestation", "channel", true, "ambiguous"],
+    ["cron", "cron", false, "service", false],
+    ["heartbeat", "cron", false, "service", false],
+    ["subagent", "spawn", false, "agent", true],
+    ["system", "internal", false, "system", false],
+    ["import", undefined, false, "ambiguous", false],
+    ["non-direct channel", "channel", true, "ambiguous", false],
+    ["webhook without attestation", "channel", true, "ambiguous", false],
+    ["incognito channel without attestation", "channel", true, "ambiguous", false],
   ] as const)(
     "persists the canonical %s subject without sender inference",
-    (name, createdVia, deferredChannel, expectedKind) => {
+    (name, createdVia, deferredChannel, expectedKind, isChildSession) => {
       const { agentOptions } = fixture();
       const database = openOpenClawAgentDatabase(agentOptions);
       const sessionKey = `agent:main:memory-${name.replaceAll(" ", "-")}`;
@@ -785,7 +785,7 @@ describe("memory session subject", () => {
       } else {
         expect(context).toMatchObject({
           kind: "current",
-          context: { subject: { kind: expectedKind } },
+          context: { subject: { kind: expectedKind }, isChildSession },
         });
       }
       expect(
@@ -795,6 +795,39 @@ describe("memory session subject", () => {
       ).toEqual({ subject_kind: expectedKind });
     },
   );
+
+  it("fails closed for a legacy subagent-shaped session without spawn metadata", () => {
+    const { agentOptions } = fixture();
+    const sessionKey = "agent:main:subagent:legacy";
+    const sessionId = "legacy-child";
+    runOpenClawAgentWriteTransaction(
+      (database) => {
+        writeSessionEntry(database, sessionKey, {
+          sessionId,
+          updatedAt: 1,
+          // Old persisted children can lack `createdVia` and `spawnedBy` but
+          // retain their child key. That shape may restrict access, never grant it.
+          createdActor: { type: "agent", id: "main" },
+        });
+      },
+      agentOptions,
+      { operationLabel: "memory-session-subject.test.legacy-child" },
+    );
+
+    expect(
+      createCurrentMemorySessionContext({
+        sessionKey,
+        sessionId,
+        options: agentOptions,
+      }),
+    ).toMatchObject({
+      kind: "current",
+      context: {
+        subject: { kind: "agent" },
+        isChildSession: true,
+      },
+    });
+  });
 
   it("mints a frozen context only from core-captured facts after a current binding recheck", () => {
     const { env, profileId, agentOptions } = fixture();
