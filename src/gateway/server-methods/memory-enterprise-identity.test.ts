@@ -5,10 +5,13 @@ const mocks = vi.hoisted(() => ({
   complete: vi.fn(),
   start: vi.fn(),
   listAudit: vi.fn(),
+  listEvidenceDenials: vi.fn(),
   listPolicyDriftAlerts: vi.fn(),
   listEvidenceTransitionImpacts: vi.fn(),
+  deleteAudit: vi.fn(),
   revokeProfileEvidence: vi.fn(),
   unlinkProfile: vi.fn(),
+  ensureOperationalPrincipal: vi.fn(),
   resolvePrincipal: vi.fn(),
   resolveProfileId: vi.fn((profileId: string) => profileId),
 }));
@@ -19,7 +22,9 @@ vi.mock("../memory-enterprise-oidc-transaction.js", () => ({
 }));
 
 vi.mock("../../state/memory-enterprise-access-audit.js", () => ({
+  deleteMemoryEnterpriseAuditForUserPrincipal: mocks.deleteAudit,
   listMemoryEnterpriseAccessDecisionAudit: mocks.listAudit,
+  listMemoryEnterpriseEvidenceDenialAudit: mocks.listEvidenceDenials,
   listMemoryEnterprisePolicyDriftAlerts: mocks.listPolicyDriftAlerts,
 }));
 
@@ -34,6 +39,7 @@ vi.mock("../../state/memory-enterprise-identity.js", () => ({
 }));
 
 vi.mock("../../state/memory-identity.js", () => ({
+  ensureMemoryOperationalPrincipal: mocks.ensureOperationalPrincipal,
   resolveMemoryPrincipalForUserProfile: mocks.resolvePrincipal,
 }));
 
@@ -60,6 +66,7 @@ describe("memory enterprise identity Gateway methods", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.resolveProfileId.mockImplementation((profileId: string) => profileId);
+    mocks.listEvidenceDenials.mockReturnValue([]);
   });
 
   it("starts only a caller-bound provider transaction", async () => {
@@ -131,6 +138,11 @@ describe("memory enterprise identity Gateway methods", () => {
       providerId: "entra",
       limit: 10,
     });
+    expect(mocks.listEvidenceDenials).toHaveBeenCalledWith({
+      subjectPrincipalId: "principal:alice",
+      providerId: "entra",
+      limit: 10,
+    });
     expect(respond).toHaveBeenCalledWith(true, {
       decisions: [
         {
@@ -141,6 +153,7 @@ describe("memory enterprise identity Gateway methods", () => {
           collaboration: "not-applicable",
         },
       ],
+      evidenceDenials: [],
     });
   });
 
@@ -156,7 +169,7 @@ describe("memory enterprise identity Gateway methods", () => {
     expect(mocks.resolveProfileId).toHaveBeenNthCalledWith(1, "profile-alice");
     expect(mocks.resolveProfileId).toHaveBeenNthCalledWith(2, "profile-alice-old");
     expect(mocks.resolvePrincipal).toHaveBeenCalledWith({ userProfileId: "profile-alice-old" });
-    expect(respond).toHaveBeenCalledWith(true, { decisions: [] });
+    expect(respond).toHaveBeenCalledWith(true, { decisions: [], evidenceDenials: [] });
   });
 
   it("rejects a cross-profile audit lookup unless the caller has operator.admin", async () => {
@@ -186,7 +199,7 @@ describe("memory enterprise identity Gateway methods", () => {
 
     expect(mocks.resolvePrincipal).toHaveBeenCalledWith({ userProfileId: "profile-bob" });
     expect(mocks.listAudit).toHaveBeenCalledWith({ subjectPrincipalId: "principal:bob" });
-    expect(respond).toHaveBeenCalledWith(true, { decisions: [] });
+    expect(respond).toHaveBeenCalledWith(true, { decisions: [], evidenceDenials: [] });
   });
 
   it("exports one bounded redacted audit record for its owning profile", async () => {
@@ -224,6 +237,11 @@ describe("memory enterprise identity Gateway methods", () => {
       providerId: "entra",
       limit: 10,
     });
+    expect(mocks.listEvidenceDenials).toHaveBeenCalledWith({
+      subjectPrincipalId: "principal:alice",
+      providerId: "entra",
+      limit: 10,
+    });
     expect(mocks.listEvidenceTransitionImpacts).toHaveBeenCalledWith({
       userPrincipalId: "principal:alice",
       providerId: "entra",
@@ -239,6 +257,7 @@ describe("memory enterprise identity Gateway methods", () => {
           collaboration: "not-applicable",
         },
       ],
+      evidenceDenials: [],
       alerts: [
         {
           alertId: "alert:one",
@@ -280,7 +299,12 @@ describe("memory enterprise identity Gateway methods", () => {
     expect(mocks.listEvidenceTransitionImpacts).toHaveBeenCalledWith({
       userPrincipalId: "principal:bob",
     });
-    expect(respond).toHaveBeenCalledWith(true, { decisions: [], alerts: [], transitions: [] });
+    expect(respond).toHaveBeenCalledWith(true, {
+      decisions: [],
+      evidenceDenials: [],
+      alerts: [],
+      transitions: [],
+    });
   });
 
   it("lets an owner unlink only their own enterprise identity without exposing IDs", async () => {
@@ -355,19 +379,136 @@ describe("memory enterprise identity Gateway methods", () => {
     );
   });
 
-  it("rejects profile-less administrators before an enterprise mutation can be attributed", async () => {
+  it("attributes a profile-less operator.admin through trusted Gateway client metadata", async () => {
+    mocks.resolvePrincipal.mockReturnValue({ principalId: "principal:bob" });
+    mocks.ensureOperationalPrincipal.mockReturnValue({ principalId: "principal:gateway-admin" });
+    mocks.unlinkProfile.mockReturnValue({
+      providerId: "entra",
+      kind: "unlink",
+      affectedIdentityCount: 0,
+      affectedSnapshotCount: 0,
+    });
     const respond = await invoke(
       "memory.enterpriseIdentity.unlink",
       { userProfileId: "profile-bob", providerId: "entra" },
-      { connect: { scopes: ["operator.admin"] } },
+      {
+        connect: {
+          scopes: ["operator.admin"],
+          client: { id: "gateway-control-plane" },
+          device: { id: "device-admin" },
+        },
+      },
     );
 
-    expect(mocks.unlinkProfile).not.toHaveBeenCalled();
+    expect(mocks.ensureOperationalPrincipal).toHaveBeenCalledWith({
+      kind: "system",
+      stableRef: "gateway-enterprise-audit-admin:v1\u0000gateway-control-plane\u0000device-admin",
+    });
     expect(respond).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({
+        kind: "unlinked",
+        providerId: "entra",
+      }),
+    );
+    expect(mocks.unlinkProfile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userPrincipalId: "principal:bob",
+        actorPrincipalId: "principal:gateway-admin",
+      }),
+    );
+  });
+
+  it("lets an owner delete only their redacted audit projection", async () => {
+    mocks.resolvePrincipal.mockReturnValue({ principalId: "principal:alice" });
+    mocks.deleteAudit.mockReturnValue({
+      accessDecisionCount: 1,
+      policyObservationCount: 2,
+      policyDriftAlertCount: 3,
+      evidenceTransitionProfileLinkCount: 4,
+      identityActionCount: 5,
+    });
+
+    const respond = await invoke("memory.enterpriseIdentity.accessAudit.delete", {
+      userProfileId: "profile-alice",
+    });
+
+    expect(mocks.deleteAudit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userPrincipalId: "principal:alice",
+        actorPrincipalId: "principal:alice",
+      }),
+    );
+    expect(respond).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({
+        kind: "deleted",
+        accessDecisionCount: 1,
+        policyObservationCount: 2,
+        policyDriftAlertCount: 3,
+        evidenceTransitionProfileLinkCount: 4,
+        identityActionCount: 5,
+        occurredAt: expect.any(Number),
+      }),
+    );
+    expect(Object.keys(respond.mock.calls[0]?.[1] ?? {}).sort()).toEqual([
+      "accessDecisionCount",
+      "evidenceTransitionProfileLinkCount",
+      "identityActionCount",
+      "kind",
+      "occurredAt",
+      "policyDriftAlertCount",
+      "policyObservationCount",
+    ]);
+  });
+
+  it("lets operator.admin delete another profile's audit projection without private-memory access", async () => {
+    mocks.resolvePrincipal.mockReturnValue({ principalId: "principal:bob" });
+    mocks.ensureOperationalPrincipal.mockReturnValue({ principalId: "principal:gateway-admin" });
+    mocks.deleteAudit.mockReturnValue({
+      accessDecisionCount: 0,
+      policyObservationCount: 0,
+      policyDriftAlertCount: 0,
+      evidenceTransitionProfileLinkCount: 0,
+      identityActionCount: 0,
+    });
+
+    const respond = await invoke(
+      "memory.enterpriseIdentity.accessAudit.delete",
+      { userProfileId: "profile-bob" },
+      {
+        connect: {
+          scopes: ["operator.admin"],
+          client: { id: "gateway-control-plane" },
+        },
+      },
+    );
+
+    expect(mocks.deleteAudit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userPrincipalId: "principal:bob",
+        actorPrincipalId: "principal:gateway-admin",
+      }),
+    );
+    expect(respond.mock.calls[0]?.[0]).toBe(true);
+  });
+
+  it("rejects cross-profile audit deletion without operator.admin and rejects extra params", async () => {
+    const crossProfile = await invoke("memory.enterpriseIdentity.accessAudit.delete", {
+      userProfileId: "profile-bob",
+    });
+    const malformed = await invoke("memory.enterpriseIdentity.accessAudit.delete", {
+      userProfileId: "profile-alice",
+      principalId: "private",
+    });
+
+    expect(mocks.deleteAudit).not.toHaveBeenCalled();
+    expect(crossProfile).toHaveBeenCalledWith(
       false,
       undefined,
       expect.objectContaining({ code: "FORBIDDEN" }),
     );
+    expect(malformed.mock.calls[0]?.[0]).toBe(false);
   });
 
   it("returns only redacted selected-policy drift alerts for the selected Gateway profile", async () => {

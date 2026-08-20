@@ -6,7 +6,6 @@ import {
   getNodeSqliteKysely,
 } from "../infra/kysely-sync.js";
 import { generateSecureUuid } from "../infra/secure-random.js";
-import { runSqliteImmediateTransactionSync } from "../infra/sqlite-transaction.js";
 import { ensureMemoryIdentitySchema } from "./memory-identity.js";
 import {
   openOpenClawStateDatabase,
@@ -242,6 +241,12 @@ export type MemoryEnterpriseMembershipSnapshot = Readonly<{
   expiresAt: number;
   revokedAt: number | null;
 }>;
+
+/** Internal admission inspection: never expose raw group or tenant material. */
+export type MemoryEnterpriseMembershipAdmissionCheck =
+  | Readonly<{ kind: "current"; membership: MemoryEnterpriseMembershipSnapshot }>
+  | Readonly<{ kind: "missing" }>
+  | Readonly<{ kind: "stale"; evidenceRevision: string }>;
 
 export type MemoryEnterpriseProfileLink = Readonly<{
   linkId: string;
@@ -1021,8 +1026,11 @@ function requireEnterpriseIdentityActionPrincipalsInTransaction(params: {
       .select(["principal_kind", "state"])
       .where("principal_id", "=", params.actorPrincipalId),
   );
-  if (actor?.principal_kind !== "user" || actor.state !== "active") {
-    throw new Error("enterprise identity action requires an active Gateway user principal actor");
+  if (
+    actor?.state !== "active" ||
+    (actor.principal_kind !== "user" && actor.principal_kind !== "system")
+  ) {
+    throw new Error("enterprise identity action requires an active Gateway user or system actor");
   }
 }
 
@@ -1420,6 +1428,65 @@ export function readCurrentMemoryEnterpriseMembership(params: {
       .limit(1),
   );
   return row ? toMembership(row) : undefined;
+}
+
+/**
+ * Classifies one exact verifier-owned snapshot for context admission. The
+ * caller records only the classified outcome; raw provider group values never
+ * leave this state boundary or enter a selected memory plugin.
+ */
+export function inspectMemoryEnterpriseMembershipForAdmission(params: {
+  principalId: string;
+  providerId: string;
+  tenant: string;
+  group: string;
+  evidenceRevision: string;
+  now?: number;
+  options?: OpenClawStateDatabaseOptions;
+}): MemoryEnterpriseMembershipAdmissionCheck {
+  const options = params.options ?? {};
+  ensureMemoryEnterpriseIdentitySchema(options);
+  const now = requireTimestamp(params.now ?? Date.now(), "now");
+  const providerId = requireText(params.providerId, "providerId");
+  const evidenceRevision = requireText(params.evidenceRevision, "evidenceRevision");
+  const database = openOpenClawStateDatabase(options).db;
+  if (!hasAuditIdentityKey(database)) {
+    return { kind: "missing" };
+  }
+  const db = getNodeSqliteKysely<EnterpriseIdentityDatabase>(database);
+  const row = executeSqliteQueryTakeFirstSync(
+    database,
+    db
+      .selectFrom("memory_enterprise_membership_snapshots")
+      .selectAll()
+      .where("principal_id", "=", requireText(params.principalId, "principalId"))
+      .where("provider_id", "=", providerId)
+      .where(
+        "tenant_ref",
+        "=",
+        enterpriseRef(database, providerId, "tenant", requireText(params.tenant, "tenant")),
+      )
+      .where(
+        "group_ref",
+        "=",
+        enterpriseRef(database, providerId, "group", requireText(params.group, "group")),
+      )
+      .orderBy("observed_at", "desc")
+      .orderBy("snapshot_id", "desc")
+      .limit(1),
+  );
+  if (!row) {
+    return { kind: "missing" };
+  }
+  if (
+    row.evidence_revision !== evidenceRevision ||
+    row.revoked_at !== null ||
+    row.observed_at > now ||
+    row.expires_at <= now
+  ) {
+    return Object.freeze({ kind: "stale", evidenceRevision: row.evidence_revision });
+  }
+  return Object.freeze({ kind: "current", membership: toMembership(row) });
 }
 
 /**

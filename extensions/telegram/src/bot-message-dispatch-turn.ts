@@ -108,6 +108,16 @@ export async function runTelegramDispatchTurn(params: {
         stableSenderId: String(stableSenderId),
       });
     }
+    if (context.isGroup) {
+      // The native conversation is the group/channel authority. In particular,
+      // do not couple it to the latest sender or Gateway collaboration state.
+      params.telegramDeps.nativeChannelMemoryEvidenceAdmission?.attachVerifiedNativeConversation({
+        context: context.ctxPayload,
+        channel: "telegram",
+        accountId: context.accountId,
+        nativeChannelId: String(context.chatId),
+      });
+    }
     const turnResult = await runChannelInboundEvent({
       channel: "telegram",
       accountId: context.route.accountId,

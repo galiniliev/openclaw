@@ -451,6 +451,8 @@ export {
   MemoryEnterpriseIdentityEvidenceTransitionListResultSchema,
   MemoryEnterpriseIdentityAccessAuditExportParamsSchema,
   MemoryEnterpriseIdentityAccessAuditExportResultSchema,
+  MemoryEnterpriseIdentityAccessAuditDeleteParamsSchema,
+  MemoryEnterpriseIdentityAccessAuditDeleteResultSchema,
   MemoryEnterpriseIdentityUnlinkParamsSchema,
   MemoryEnterpriseIdentityUnlinkResultSchema,
   MemoryEnterpriseIdentityEvidenceRevokeParamsSchema,

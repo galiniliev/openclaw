@@ -551,6 +551,14 @@ const CORE_GATEWAY_METHOD_SPECS = [
     "operator.write",
     "2026.8",
   ],
+  // Explicit audit-projection deletion keeps identity evidence and private
+  // memory intact; the handler enforces profile ownership or operator.admin.
+  [
+    "memory.enterpriseIdentity.accessAudit.delete",
+    "memory-enterprise-identity",
+    "operator.write",
+    "2026.8",
+  ],
 ] as const satisfies readonly CoreGatewayMethodSpecRow[];
 
 export type CoreGatewayHandlerFamily = Exclude<(typeof CORE_GATEWAY_METHOD_SPECS)[number][1], null>;

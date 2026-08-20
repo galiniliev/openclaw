@@ -22,6 +22,7 @@ import {
   consumeAdmittedChannelMemoryIdentityFromContext,
   createChannelMemoryIdentityAdmission,
 } from "../../../../src/channels/message-access/memory-identity-admission.js";
+import { createNativeChannelMemoryEvidenceAdmission } from "../../../../src/channels/message-access/memory-native-channel-evidence-admission.js";
 import { writeSessionEntry } from "../../../../src/config/sessions/session-accessor.sqlite-entry-store.js";
 import {
   appendSqliteTranscriptMessage,
@@ -148,24 +149,26 @@ describe("builtin scoped authorized runtime", () => {
     chatType: "direct" | "group" | "channel";
     primaryConversationId?: string;
     primaryConversationTarget?: string;
+    primaryConversationNativeChannelId?: string;
   }) {
     const database = openOpenClawAgentDatabase({ agentId: "main" });
     database.db
       .prepare(
         "INSERT INTO session_nodes (session_key, current_session_id, entry_json, updated_at) VALUES (?, ?, ?, 1)",
       )
-      .run(params.sessionKey, params.sessionId, '{"toolsBySender":{"alice":{"role":"owner"}}}');
+      .run(params.sessionKey, params.sessionId, "{}");
     if (params.primaryConversationId) {
       database.db
         .prepare(
           `INSERT INTO conversations
-           (conversation_id, channel, account_id, kind, peer_id, delivery_target, created_at, updated_at)
-           VALUES (?, 'telegram', 'default', ?, ?, ?, 1, 1)`,
+           (conversation_id, channel, account_id, kind, peer_id, native_channel_id, delivery_target, created_at, updated_at)
+           VALUES (?, 'telegram', 'default', ?, ?, ?, ?, 1, 1)`,
         )
         .run(
           params.primaryConversationId,
           params.chatType,
           `${params.primaryConversationId}-peer`,
+          params.primaryConversationNativeChannelId ?? `${params.primaryConversationId}-native`,
           params.primaryConversationTarget ?? `${params.primaryConversationId}-target`,
         );
     }
@@ -244,13 +247,35 @@ describe("builtin scoped authorized runtime", () => {
       chatType: "group",
       primaryConversationId: params.conversationId,
       primaryConversationTarget: params.conversationTarget,
+      primaryConversationNativeChannelId: `${params.conversationId}-native`,
+    });
+    return refreshConversationNativeEvidence({
+      sessionKey: params.sessionKey,
+      sessionId: params.sessionId,
+      nativeChannelId: `${params.conversationId}-native`,
+    });
+  }
+
+  function refreshConversationNativeEvidence(params: {
+    sessionKey: string;
+    sessionId: string;
+    nativeChannelId: string;
+  }) {
+    const admission = createNativeChannelMemoryEvidenceAdmission({
+      pluginId: "telegram",
+      adapterId: "plugin:telegram",
+      ownsChannel: (channel) => channel === "telegram",
+      isActive: () => true,
+    });
+    const context = {};
+    admission.attachVerifiedNativeConversation({
+      context,
+      channel: "telegram",
+      accountId: "default",
+      nativeChannelId: params.nativeChannelId,
     });
     const admitted = admitInboundMemorySessionContext({
-      context: {
-        From: "telegram:alice",
-        senderRole: "owner",
-        toolsBySender: { alice: { role: "owner" } },
-      },
+      context,
       sessionKey: params.sessionKey,
       sessionId: params.sessionId,
       options: { agentId: "main" },
@@ -779,6 +804,14 @@ describe("builtin scoped authorized runtime", () => {
         kind: "unattributed" as const,
         transportAuditRef: "channel-fanout",
         evidenceRevision: "channel-fanout-evidence",
+      },
+      conversation: {
+        conversationPrincipalId,
+        channel: "telegram",
+        accountId: "default",
+        evidenceRevision: "channel-fanout-evidence",
+        observedAt: new Date(Date.now() - 1_000).toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
       },
       verifiedPrincipals: [],
       delivery: {
@@ -2116,6 +2149,88 @@ describe("builtin scoped authorized runtime", () => {
         revisionId: projection.copyRevisionId,
       })?.content,
     ).toBe("GROUP_EXPLICITLY_ADDRESSED_PROJECTION");
+  });
+
+  it("invalidates existing group invocations and virtual views after evidence refresh or expiry", async () => {
+    const session = {
+      sessionKey: "agent:main:telegram:group:native-evidence",
+      sessionId: "native-evidence-session",
+    };
+    const conversationId = "telegram-group-native-evidence";
+    const conversationPrincipalId = createConversationSession({
+      ...session,
+      conversationId,
+      conversationTarget: "native-evidence-target",
+    });
+    const store = createBuiltinScopedMemoryStore({
+      agentId: "main",
+      scopeKind: "conversation",
+      audienceKind: "conversation",
+      audienceId: conversationPrincipalId,
+      authorityKind: "conversation",
+      authorityOwnerId: conversationPrincipalId,
+      defaultCapabilities: ["retrieve", "read"],
+      actor: { kind: "unattributed" },
+      reason: "native evidence lifecycle fixture",
+    });
+    createBuiltinScopedMemoryResource({
+      agentId: "main",
+      store,
+      logicalLocator: "native-evidence.md",
+      content: "NATIVE_EVIDENCE_CURRENT_CONTENT",
+      actor: { kind: "unattributed" },
+    });
+    markCutOver();
+    installBuiltinSelectedRuntime();
+
+    const staleHost = createAuthorizedMemoryReadHost({
+      agentId: "main",
+      ...session,
+      deliveryContext: { channel: "telegram", accountId: "default", to: "native-evidence-target" },
+    });
+    const staleBroker = staleHost && (await resolveAuthorizedMemoryVirtualFileBroker(staleHost));
+    const stalePath = staleBroker?.view.files[0]?.virtualPath;
+    if (!staleHost || !staleBroker || !stalePath) {
+      throw new Error("fixture failed to materialize a group virtual view");
+    }
+    await expect(staleBroker.readFile(stalePath)).resolves.toBe("NATIVE_EVIDENCE_CURRENT_CONTENT");
+
+    // A fresh receipt is a new authority revision. Existing invocations and
+    // views cannot continue under their mint-time fingerprint.
+    refreshConversationNativeEvidence({
+      ...session,
+      nativeChannelId: `${conversationId}-native`,
+    });
+    await expect(staleHost.search({ query: "NATIVE_EVIDENCE_CURRENT_CONTENT", limit: 1 })).resolves.toEqual({
+      disabled: true,
+      unavailable: true,
+      error: "memory unavailable",
+    });
+    await expect(staleBroker.readFile(stalePath)).resolves.toBeUndefined();
+
+    const currentHost = createAuthorizedMemoryReadHost({
+      agentId: "main",
+      ...session,
+      deliveryContext: { channel: "telegram", accountId: "default", to: "native-evidence-target" },
+    });
+    const currentBroker = currentHost && (await resolveAuthorizedMemoryVirtualFileBroker(currentHost));
+    const currentPath = currentBroker?.view.files[0]?.virtualPath;
+    if (!currentHost || !currentBroker || !currentPath) {
+      throw new Error("fixture failed to rematerialize a refreshed group virtual view");
+    }
+    await expect(currentBroker.readFile(currentPath)).resolves.toBe("NATIVE_EVIDENCE_CURRENT_CONTENT");
+
+    openOpenClawStateDatabase()
+      .db.prepare(
+        "UPDATE memory_native_channel_evidence SET expires_at = ? WHERE conversation_principal_id = ?",
+      )
+      .run(Date.now() - 1, conversationPrincipalId);
+    await expect(currentHost.search({ query: "NATIVE_EVIDENCE_CURRENT_CONTENT", limit: 1 })).resolves.toEqual({
+      disabled: true,
+      unavailable: true,
+      error: "memory unavailable",
+    });
+    await expect(currentBroker.readFile(currentPath)).resolves.toBeUndefined();
   });
 
   it("durably expires a due projection before a fresh authorized group read", async () => {

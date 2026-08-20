@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   subjectKind: "user" as "user" | "agent" | "conversation",
   recipientMatches: true,
   conversationTarget: "chat-1",
+  roleIds: [] as string[],
 }));
 
 vi.mock("../infra/agent-run-registry.js", () => ({
@@ -28,6 +29,15 @@ vi.mock("../plugins/memory-run-exposure-ledger.js", () => ({
 vi.mock("../state/memory-identity.js", () => ({
   recheckMemoryIdentityBindingRecipient: () =>
     mocks.recipientMatches ? { kind: "current" } : { kind: "unbound" },
+}));
+
+vi.mock("../state/memory-enterprise-admission.js", () => ({
+  readCurrentEnterpriseMemoryFactsForUser: ({ userPrincipalId }: { userPrincipalId: string }) => ({
+    verifiedMemberships: mocks.roleIds.map((groupId) => ({
+      principalId: userPrincipalId,
+      groupId,
+    })),
+  }),
 }));
 
 vi.mock("../state/memory-session-subject.js", () => ({
@@ -108,6 +118,7 @@ beforeEach(() => {
   mocks.subjectKind = "user";
   mocks.recipientMatches = true;
   mocks.conversationTarget = "chat-1";
+  mocks.roleIds = [];
 });
 
 describe("memory egress admission", () => {
@@ -148,6 +159,46 @@ describe("memory egress admission", () => {
     mocks.recipientMatches = false;
 
     expect(prepareFinal()).toEqual({ allowed: false, reason: "unavailable" });
+  });
+
+  it("binds direct role-memory egress to current verified membership", () => {
+    mocks.roleIds = ["engineering"];
+    const prepared = prepareFinal();
+    expect(prepared).toMatchObject({
+      allowed: true,
+      authorization: {
+        audiences: [
+          { kind: "role", id: "engineering" },
+          { kind: "user", id: "alice" },
+        ],
+      },
+    });
+    if (!prepared.allowed) {
+      return;
+    }
+    mocks.lookup = {
+      kind: "current",
+      snapshot: {
+        agentId: "memory-agent",
+        sessionId: "session-1",
+        sessionKey: "agent:memory-agent:direct:alice",
+        runId: "run-1",
+        exposureSetId: "role-exposure",
+        revisionNumber: 1,
+        egressReceiptIds: ["receipt-1"],
+        deliveryAudiences: prepared.authorization.audiences,
+        deliveryRevision: prepared.authorization.deliveryRevision,
+        egressRegistryRevision: prepared.authorization.egressRegistryRevision,
+      },
+    };
+
+    mocks.roleIds = [];
+    expect(
+      admitMemoryEgressAtDelivery({
+        authorization: prepared.authorization,
+        deliveryContext,
+      }),
+    ).toEqual({ allowed: false, reason: "stale" });
   });
 
   it("admits only the persisted group conversation target", () => {

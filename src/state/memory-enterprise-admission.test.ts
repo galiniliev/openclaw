@@ -7,6 +7,7 @@ import {
   clearMemoryEnterpriseAdmissionsForTest,
   readCurrentEnterpriseMemoryFactsForUser,
 } from "./memory-enterprise-admission.js";
+import { listMemoryEnterpriseEvidenceDenialAudit } from "./memory-enterprise-access-audit.js";
 import {
   ensureMemoryEnterprisePrincipal,
   linkMemoryEnterpriseProfile,
@@ -215,5 +216,91 @@ describe("enterprise memory admission", () => {
     ).toMatchObject({
       verifiedMemberships: [{ groupId: "reviewers", evidenceRevision: "oidc-evidence-2" }],
     });
+  });
+
+  it("records stale, missing, and expired provider evidence as redacted denial projections", () => {
+    const { env } = fixture();
+    const options = { env };
+    const now = 1_000;
+    const identity = {
+      providerId: "entra",
+      issuer: "https://login.microsoftonline.com/tenant-private/v2.0",
+      tenant: "tenant-private",
+      subject: "enterprise-alice-private",
+      groups: ["writers-private", "missing-private"],
+      evidenceRevision: "evidence-private:v1",
+      observedAt: now,
+      expiresAt: now + 1_000,
+    };
+    const persisted = persistMemoryEnterpriseIdentity({
+      verified: identity,
+      groups: ["writers-private"],
+      options,
+    });
+    createUserPrincipal({ principalId: "user-alice", profileId: "profile-alice", env });
+    const link = linkMemoryEnterpriseProfile({
+      enterprisePrincipalId: persisted.principal.principalId,
+      providerId: "entra",
+      userPrincipalId: "user-alice",
+      createdByPrincipalId: "user-alice",
+      now,
+      options,
+    });
+    admitVerifiedEnterpriseIdentityForMemory({
+      userPrincipalId: "user-alice",
+      principal: persisted.principal,
+      profileLink: link,
+      identity,
+    });
+
+    expect(
+      readCurrentEnterpriseMemoryFactsForUser({ userPrincipalId: "user-alice", now: now + 1, options }),
+    ).toMatchObject({ verifiedMemberships: [{ groupId: "writers-private" }] });
+    const snapshot = openOpenClawStateDatabase(options)
+      .db.prepare(
+        `SELECT snapshot_id FROM memory_enterprise_membership_snapshots
+         WHERE principal_id = ?`,
+      )
+      .get(persisted.principal.principalId) as { snapshot_id: string };
+    revokeMemoryEnterpriseMembershipSnapshot({
+      snapshotId: snapshot.snapshot_id,
+      revokedAt: now + 2,
+      options,
+    });
+    expect(
+      readCurrentEnterpriseMemoryFactsForUser({ userPrincipalId: "user-alice", now: now + 3, options }),
+    ).toEqual({ verifiedPrincipals: [], verifiedMemberships: [] });
+    expect(
+      readCurrentEnterpriseMemoryFactsForUser({
+        userPrincipalId: "user-alice",
+        now: identity.expiresAt,
+        options,
+      }),
+    ).toEqual({ verifiedPrincipals: [], verifiedMemberships: [] });
+
+    const denials = listMemoryEnterpriseEvidenceDenialAudit(
+      { subjectPrincipalId: "user-alice" },
+      options,
+    );
+    expect(denials.map((denial) => denial.reasonCode).sort()).toEqual([
+      "membership-stale",
+      "principal-evidence-unavailable",
+      "principal-evidence-unavailable",
+      "role-membership-unavailable",
+    ]);
+    const persistedDenials = JSON.stringify(
+      openOpenClawStateDatabase(options)
+        .db.prepare("SELECT * FROM memory_enterprise_evidence_denials")
+        .all(),
+    );
+    for (const rawValue of [
+      identity.tenant,
+      identity.subject,
+      identity.groups[0],
+      identity.groups[1],
+      identity.evidenceRevision,
+    ]) {
+      expect(persistedDenials).not.toContain(rawValue);
+    }
   });
 });

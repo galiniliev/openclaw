@@ -712,6 +712,9 @@ export function createPluginRuntimeMock(overrides: DeepPartial<PluginRuntime> = 
         attachVerifiedDirectSender: vi.fn(),
         admitVerifiedDirectPairingSender: vi.fn(),
       } as PluginRuntime["channel"]["memoryIdentityAdmission"],
+      nativeChannelMemoryEvidenceAdmission: {
+        attachVerifiedNativeConversation: vi.fn(),
+      } as PluginRuntime["channel"]["nativeChannelMemoryEvidenceAdmission"],
       text: {
         chunkByNewline: vi.fn((text: string) => (text ? [text] : [])),
         chunkMarkdownText: vi.fn((text: string) => [text]),

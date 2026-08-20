@@ -1746,7 +1746,8 @@ provider evidence.
 #### 15.4 Operations
 
 - redacted access explanation;
-- audit query/export/retention;
+- audit query/export and explicit redacted-audit deletion; no scheduled
+  retention or access-review job;
 - policy drift alerts;
 - revocation impact;
 - load tests for hundreds/thousands of stores, roles, and channels on the
@@ -1787,9 +1788,10 @@ Phase 4 is complete only when all of the following are demonstrated:
 - [x] Operators can explain allow/deny decisions from redacted revisions,
       subject/store kinds, collaboration roles, evidence, and rules without
       storing or revealing unauthorized memory content.
-- [x] Audit retention/export behavior is approved and implemented: profile
-      owners can export their redacted record, while `operator.admin` has full
-      cross-profile administrative control without direct private-memory reads.
+- [x] Audit retention/export behavior is approved and implemented: there is no
+      scheduled purge or access-review job; profile owners can export and
+      explicitly delete their redacted audit projection, while `operator.admin`
+      has the same cross-profile control without direct private-memory reads.
 - [ ] Provider verification, outage/expiry, group removal, registry sealing,
       audit explanation, and scale/fan-out tests pass, including required live
       official-provider proof.

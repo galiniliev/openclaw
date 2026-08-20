@@ -7,6 +7,7 @@ import {
   type DurableMemoryRunExposureLookup,
 } from "../plugins/memory-run-exposure-ledger.js";
 import { normalizeAccountId } from "../routing/account-id.js";
+import { readCurrentEnterpriseMemoryFactsForUser } from "../state/memory-enterprise-admission.js";
 import { recheckMemoryIdentityBindingRecipient } from "../state/memory-identity.js";
 import { createCurrentMemorySessionContext } from "../state/memory-session-subject.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
@@ -71,9 +72,15 @@ function hash(value: unknown): string {
 }
 
 function sortedAudiences(audiences: readonly AudienceRef[]): readonly AudienceRef[] {
+  const unique = new Map<string, AudienceRef>();
+  for (const audience of audiences) {
+    unique.set(`${audience.kind}\u0000${audience.id}`, Object.freeze({
+      kind: audience.kind,
+      id: audience.id,
+    }));
+  }
   return Object.freeze(
-    [...audiences]
-      .map((audience) => Object.freeze({ kind: audience.kind, id: audience.id }))
+    [...unique.values()]
       .toSorted((left, right) =>
         `${left.kind}\u0000${left.id}`.localeCompare(`${right.kind}\u0000${right.id}`),
       ),
@@ -89,6 +96,14 @@ function sameAudiences(left: readonly AudienceRef[], right: readonly AudienceRef
     leftKeys.length === rightKeys.length &&
     leftKeys.every((value, index) => value === rightKeys[index])
   );
+}
+
+function currentEnterpriseRoleAudiences(userPrincipalId: string): readonly AudienceRef[] {
+  const memberships = readCurrentEnterpriseMemoryFactsForUser({ userPrincipalId })
+    .verifiedMemberships;
+  return memberships
+    .filter((membership) => membership.principalId === userPrincipalId)
+    .map((membership) => ({ kind: "role" as const, id: membership.groupId }));
 }
 
 /** Recomputes route, sink, and audience facts from the current session owner. */
@@ -131,7 +146,13 @@ export function resolveMemoryEgressDeliveryFacts(params: {
         }).kind === "current"
         ? {
             sink: "private" as const,
-            audiences: [{ kind: "user" as const, id: session.context.subject.principalId }],
+            // A direct recipient may receive role-scoped memory only while the
+            // matching verified membership is current. Keep it in the same
+            // route fact as outbound egress so revocation invalidates both.
+            audiences: [
+              { kind: "user" as const, id: session.context.subject.principalId },
+              ...currentEnterpriseRoleAudiences(session.context.subject.principalId),
+            ],
           }
         : undefined
       : session.context.subject.kind === "conversation"

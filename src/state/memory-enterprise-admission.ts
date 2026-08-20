@@ -3,12 +3,16 @@ import type {
   VerifiedPrincipalRef,
 } from "../memory-host-sdk/host/authorization.js";
 import {
-  readCurrentMemoryEnterpriseMembership,
+  inspectMemoryEnterpriseMembershipForAdmission,
   recheckMemoryEnterprisePrincipal,
   recheckMemoryEnterpriseProfileLink,
   type MemoryEnterprisePrincipal,
   type MemoryEnterpriseProfileLink,
 } from "./memory-enterprise-identity.js";
+import {
+  recordMemoryEnterpriseEvidenceAdmissionDenials,
+  type MemoryEnterpriseEvidenceAdmissionDenial,
+} from "./memory-enterprise-access-audit.js";
 import type { VerifiedEnterpriseOidcIdentity } from "./memory-enterprise-verifier.js";
 import type { OpenClawStateDatabaseOptions } from "./openclaw-state-db.js";
 
@@ -95,8 +99,33 @@ export function readCurrentEnterpriseMemoryFactsForUser(params: {
   const now = params.now ?? Date.now();
   const verifiedPrincipals: VerifiedPrincipalRef[] = [];
   const verifiedMemberships: MemoryVerifiedMembership[] = [];
+  const denials: MemoryEnterpriseEvidenceAdmissionDenial[] = [];
+  const denyAdmission = (
+    admission: EnterpriseAdmission,
+    reasonCode: MemoryEnterpriseEvidenceAdmissionDenial["reasonCode"],
+    groupId: string,
+    membershipEvidenceRevision?: string,
+  ) => {
+    denials.push(
+      Object.freeze({
+        providerId: admission.providerId,
+        tenant: admission.tenant,
+        subjectPrincipalId: admission.userPrincipalId,
+        groupId,
+        reasonCode,
+        principalEvidenceRevision: admission.evidenceRevision,
+        ...(membershipEvidenceRevision ? { membershipEvidenceRevision } : {}),
+      }),
+    );
+  };
   for (const admission of admissionsByUser.values()) {
-    if (admission.userPrincipalId !== params.userPrincipalId || admission.expiresAt <= now) {
+    if (admission.userPrincipalId !== params.userPrincipalId) {
+      continue;
+    }
+    if (admission.expiresAt <= now) {
+      for (const group of admission.groups) {
+        denyAdmission(admission, "principal-evidence-unavailable", group);
+      }
       continue;
     }
     const link = recheckMemoryEnterpriseProfileLink({
@@ -107,6 +136,9 @@ export function readCurrentEnterpriseMemoryFactsForUser(params: {
       options: params.options,
     });
     if (!link || link.revision !== admission.profileLinkRevision) {
+      for (const group of admission.groups) {
+        denyAdmission(admission, "principal-evidence-unavailable", group);
+      }
       continue;
     }
     const principal = recheckMemoryEnterprisePrincipal({
@@ -116,20 +148,31 @@ export function readCurrentEnterpriseMemoryFactsForUser(params: {
       options: params.options,
     });
     if (!principal || principal.evidenceRevision !== admission.evidenceRevision) {
+      for (const group of admission.groups) {
+        denyAdmission(admission, "principal-evidence-unavailable", group);
+      }
       continue;
     }
     const memberships = admission.groups.flatMap((group) => {
-      const snapshot = readCurrentMemoryEnterpriseMembership({
+      const inspection = inspectMemoryEnterpriseMembershipForAdmission({
         principalId: admission.enterprisePrincipalId,
         providerId: admission.providerId,
         tenant: admission.tenant,
         group,
+        evidenceRevision: admission.evidenceRevision,
         now,
         options: params.options,
       });
-      if (!snapshot || snapshot.evidenceRevision !== admission.evidenceRevision) {
+      if (inspection.kind !== "current") {
+        denyAdmission(
+          admission,
+          inspection.kind === "stale" ? "membership-stale" : "role-membership-unavailable",
+          group,
+          inspection.kind === "stale" ? inspection.evidenceRevision : undefined,
+        );
         return [];
       }
+      const snapshot = inspection.membership;
       return [
         Object.freeze({
           snapshotId: snapshot.snapshotId,
@@ -154,6 +197,14 @@ export function readCurrentEnterpriseMemoryFactsForUser(params: {
       expiresAt: iso(principal.expiresAt),
     });
     verifiedMemberships.push(...memberships);
+  }
+  if (denials.length > 0) {
+    try {
+      recordMemoryEnterpriseEvidenceAdmissionDenials({ denials, now, options: params.options });
+    } catch {
+      // A redacted audit write failure never converts unavailable provider
+      // evidence into a role grant; the context remains absent for this turn.
+    }
   }
   return Object.freeze({
     verifiedPrincipals: Object.freeze(verifiedPrincipals),

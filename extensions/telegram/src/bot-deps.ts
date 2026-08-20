@@ -69,6 +69,15 @@ type TelegramMemoryIdentityAdmission = {
   }) => unknown;
 };
 
+type TelegramNativeChannelMemoryEvidenceAdmission = {
+  attachVerifiedNativeConversation: (params: {
+    context: object;
+    channel: string;
+    accountId: string;
+    nativeChannelId: string;
+  }) => void;
+};
+
 export type TelegramBotDeps = {
   getRuntimeConfig: typeof getRuntimeConfig;
   resolveStorePath: typeof resolveStorePath;
@@ -100,6 +109,8 @@ export type TelegramBotDeps = {
   createChannelMessageReplyPipeline?: typeof createChannelMessageReplyPipeline;
   /** Loader-bound capability; no sender evidence crosses the plugin boundary as authority. */
   memoryIdentityAdmission?: TelegramMemoryIdentityAdmission;
+  /** Loader-bound group/channel proof; it cannot attest a sender or session membership. */
+  nativeChannelMemoryEvidenceAdmission?: TelegramNativeChannelMemoryEvidenceAdmission;
 };
 
 export const defaultTelegramBotDeps: TelegramBotDeps = {
@@ -190,6 +201,11 @@ export const defaultTelegramBotDeps: TelegramBotDeps = {
   get memoryIdentityAdmission() {
     return getOptionalTelegramRuntime()?.channel.memoryIdentityAdmission as
       | TelegramMemoryIdentityAdmission
+      | undefined;
+  },
+  get nativeChannelMemoryEvidenceAdmission() {
+    return getOptionalTelegramRuntime()?.channel.nativeChannelMemoryEvidenceAdmission as
+      | TelegramNativeChannelMemoryEvidenceAdmission
       | undefined;
   },
 };

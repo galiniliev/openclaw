@@ -80,6 +80,10 @@ export const OperationsProtocolSchemas = {
     memoryEnterpriseIdentity.MemoryEnterpriseIdentityAccessAuditExportParamsSchema,
   MemoryEnterpriseIdentityAccessAuditExportResult:
     memoryEnterpriseIdentity.MemoryEnterpriseIdentityAccessAuditExportResultSchema,
+  MemoryEnterpriseIdentityAccessAuditDeleteParams:
+    memoryEnterpriseIdentity.MemoryEnterpriseIdentityAccessAuditDeleteParamsSchema,
+  MemoryEnterpriseIdentityAccessAuditDeleteResult:
+    memoryEnterpriseIdentity.MemoryEnterpriseIdentityAccessAuditDeleteResultSchema,
   MemoryEnterpriseIdentityUnlinkParams:
     memoryEnterpriseIdentity.MemoryEnterpriseIdentityUnlinkParamsSchema,
   MemoryEnterpriseIdentityUnlinkResult:

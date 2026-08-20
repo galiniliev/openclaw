@@ -89,8 +89,28 @@ const MemoryEnterpriseIdentityAccessAuditEntrySchema = closedObject({
   collaboration: Type.Literal("not-applicable"),
 });
 
+const MemoryEnterpriseIdentityEvidenceDenialEntrySchema = closedObject({
+  eventId: NonEmptyString,
+  providerId: NonEmptyString,
+  tenantRef: NonEmptyString,
+  subjectPrincipalId: NonEmptyString,
+  reasonCode: Type.Union([
+    Type.Literal("membership-stale"),
+    Type.Literal("principal-evidence-unavailable"),
+    Type.Literal("role-membership-unavailable"),
+  ]),
+  groupRef: NonEmptyString,
+  principalEvidenceRevision: NonEmptyString,
+  membershipEvidenceRevision: Type.Union([NonEmptyString, Type.Null()]),
+  occurredAt: Type.Integer({ minimum: 0 }),
+  receivedAt: Type.Integer({ minimum: 0 }),
+  storeKind: Type.Literal("role"),
+  collaboration: Type.Literal("not-applicable"),
+});
+
 export const MemoryEnterpriseIdentityAccessAuditListResultSchema = closedObject({
   decisions: Type.Array(MemoryEnterpriseIdentityAccessAuditEntrySchema, { maxItems: 100 }),
+  evidenceDenials: Type.Array(MemoryEnterpriseIdentityEvidenceDenialEntrySchema, { maxItems: 100 }),
 });
 
 /** Redacted policy changes, with the same owner-or-operator.admin boundary. */
@@ -150,8 +170,27 @@ export const MemoryEnterpriseIdentityAccessAuditExportParamsSchema =
 
 export const MemoryEnterpriseIdentityAccessAuditExportResultSchema = closedObject({
   decisions: Type.Array(MemoryEnterpriseIdentityAccessAuditEntrySchema, { maxItems: 100 }),
+  evidenceDenials: Type.Array(MemoryEnterpriseIdentityEvidenceDenialEntrySchema, { maxItems: 100 }),
   alerts: Type.Array(MemoryEnterpriseIdentityPolicyDriftAlertSchema, { maxItems: 100 }),
   transitions: Type.Array(MemoryEnterpriseIdentityEvidenceTransitionSchema, { maxItems: 100 }),
+});
+
+/** Explicitly deletes one profile's redacted enterprise-audit projection. */
+export const MemoryEnterpriseIdentityAccessAuditDeleteParamsSchema = closedObject({
+  userProfileId: Type.String({ minLength: 1, maxLength: 256 }),
+});
+
+export const MemoryEnterpriseIdentityAccessAuditDeleteResultSchema = closedObject({
+  kind: Type.Literal("deleted"),
+  accessDecisionCount: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  policyObservationCount: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  policyDriftAlertCount: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  evidenceTransitionProfileLinkCount: Type.Integer({
+    minimum: 0,
+    maximum: Number.MAX_SAFE_INTEGER,
+  }),
+  identityActionCount: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  occurredAt: Type.Integer({ minimum: 0 }),
 });
 
 const MemoryEnterpriseIdentityMutationParamsSchema = closedObject({
@@ -211,6 +250,12 @@ export type MemoryEnterpriseIdentityAccessAuditExportParams = Static<
 >;
 export type MemoryEnterpriseIdentityAccessAuditExportResult = Static<
   typeof MemoryEnterpriseIdentityAccessAuditExportResultSchema
+>;
+export type MemoryEnterpriseIdentityAccessAuditDeleteParams = Static<
+  typeof MemoryEnterpriseIdentityAccessAuditDeleteParamsSchema
+>;
+export type MemoryEnterpriseIdentityAccessAuditDeleteResult = Static<
+  typeof MemoryEnterpriseIdentityAccessAuditDeleteResultSchema
 >;
 export type MemoryEnterpriseIdentityUnlinkParams = Static<
   typeof MemoryEnterpriseIdentityUnlinkParamsSchema

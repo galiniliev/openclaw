@@ -565,10 +565,13 @@ function createTrustedMemoryHostContext(
         verifiedMemberships,
       });
   } else if (context.subject.kind === "conversation") {
+    if (!context.conversation) {
+      return undefined;
+    }
     actor = {
       kind: "unattributed" as const,
       transportAuditRef: `mta1_${hash({ session: context.fingerprint })}`,
-      evidenceRevision: context.authorityRevision,
+      evidenceRevision: context.conversation.evidenceRevision,
     };
   } else {
     const actorKind =

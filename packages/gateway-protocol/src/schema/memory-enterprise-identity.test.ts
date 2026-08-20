@@ -2,6 +2,7 @@ import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
 import {
   validateMemoryEnterpriseIdentityAccessAuditListParams,
+  validateMemoryEnterpriseIdentityAccessAuditDeleteParams,
   validateMemoryEnterpriseIdentityAccessAuditExportParams,
   validateMemoryEnterpriseIdentityEvidenceRevokeParams,
   validateMemoryEnterpriseIdentityEvidenceTransitionListParams,
@@ -11,6 +12,7 @@ import {
   validateMemoryEnterpriseIdentityAuthorizationStartParams,
 } from "../validator-registry.js";
 import {
+  MemoryEnterpriseIdentityAccessAuditDeleteResultSchema,
   MemoryEnterpriseIdentityAccessAuditExportResultSchema,
   MemoryEnterpriseIdentityEvidenceRevokeResultSchema,
   MemoryEnterpriseIdentityUnlinkResultSchema,
@@ -120,6 +122,34 @@ describe("memory enterprise identity authorization protocol", () => {
     ).toBe(false);
   });
 
+  it("accepts only an owning-profile audit-deletion target and a count-only result", () => {
+    expect(validateMemoryEnterpriseIdentityAccessAuditDeleteParams({ userProfileId: "profile-alice" })).toBe(
+      true,
+    );
+    expect(
+      validateMemoryEnterpriseIdentityAccessAuditDeleteParams({
+        userProfileId: "profile-alice",
+        principalId: "private",
+      }),
+    ).toBe(false);
+    const result = {
+      kind: "deleted",
+      accessDecisionCount: 1,
+      policyObservationCount: 2,
+      policyDriftAlertCount: 3,
+      evidenceTransitionProfileLinkCount: 4,
+      identityActionCount: 5,
+      occurredAt: 6,
+    };
+    expect(Value.Check(MemoryEnterpriseIdentityAccessAuditDeleteResultSchema, result)).toBe(true);
+    expect(
+      Value.Check(MemoryEnterpriseIdentityAccessAuditDeleteResultSchema, {
+        ...result,
+        actionIds: ["private"],
+      }),
+    ).toBe(false);
+  });
+
   it("keeps the export to the existing redacted audit projections", () => {
     const exportRecord = {
       decisions: [
@@ -142,6 +172,7 @@ describe("memory enterprise identity authorization protocol", () => {
           collaboration: "not-applicable",
         },
       ],
+      evidenceDenials: [],
       alerts: [],
       transitions: [
         {

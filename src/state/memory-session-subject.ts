@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { consumeAdmittedChannelMemoryIdentityFromContext } from "../channels/message-access/memory-identity-admission.js";
+import { consumeAdmittedNativeChannelMemoryEvidenceFromContext } from "../channels/message-access/memory-native-channel-evidence-admission.js";
 import { generateSecureUuid } from "../infra/secure-random.js";
 import { isMemoryIsolationSubjectAdmitted } from "../plugins/memory-cutover.js";
 import { isSubagentSessionKey } from "../routing/session-key.js";
@@ -11,6 +12,11 @@ import {
   type MemoryPrincipalKind,
   type MemoryIdentityBindingCheck,
 } from "./memory-identity.js";
+import {
+  inspectMemoryNativeChannelEvidence,
+  persistAdmittedNativeChannelMemoryEvidence,
+  recordMemoryNativeChannelEvidenceDenial,
+} from "./memory-native-channel-evidence.js";
 import {
   snapshotMemorySessionSubjectInTransaction,
   type MemorySessionSubjectSnapshot,
@@ -61,6 +67,9 @@ export type CurrentMemorySessionContext = Readonly<{
     accountId: string;
     primaryConversationId: string;
     deliveryTarget: string;
+    evidenceRevision: string;
+    observedAt: number;
+    expiresAt: number;
   }>;
   authorityRevision: string;
   fingerprint: string;
@@ -74,6 +83,7 @@ export type MemorySessionContextCheck =
         | "session-rebound"
         | "binding-revoked"
         | "principal-revoked"
+        | "native-channel-evidence-unavailable"
         | "shadow-subject-mismatch"
         | "merge-head-mismatch";
     }>;
@@ -273,7 +283,8 @@ export function createCurrentMemorySessionContext(params: {
               sn.created_via,
               sn.spawned_by,
               c.channel AS conversation_channel, c.account_id AS conversation_account_id,
-              sw.primary_conversation_id, c.delivery_target AS conversation_delivery_target
+              sw.primary_conversation_id, c.delivery_target AS conversation_delivery_target,
+              c.native_channel_id AS conversation_native_channel_id
        FROM session_nodes sn
        LEFT JOIN session_memory_subjects ms ON ms.session_key = sn.session_key
        LEFT JOIN session_memory_subject_snapshots ss ON ss.session_id = sn.current_session_id
@@ -299,6 +310,7 @@ export function createCurrentMemorySessionContext(params: {
         conversation_account_id: string | null;
         primary_conversation_id: string | null;
         conversation_delivery_target: string | null;
+        conversation_native_channel_id: string | null;
       }
     | undefined;
   if (
@@ -324,22 +336,66 @@ export function createCurrentMemorySessionContext(params: {
   if (persisted.subject.kind === "ambiguous" || persisted.subject.kind === "quarantined") {
     return { kind: "ambiguous" };
   }
-  const conversation =
+  const conversationIdentity =
     persisted.subject.kind === "conversation" &&
     row.conversation_channel &&
     row.conversation_account_id &&
     row.primary_conversation_id &&
-    row.conversation_delivery_target
+    row.conversation_delivery_target &&
+    row.conversation_native_channel_id
       ? Object.freeze({
           channel: row.conversation_channel,
           accountId: row.conversation_account_id,
           primaryConversationId: row.primary_conversation_id,
           deliveryTarget: row.conversation_delivery_target,
+          nativeChannelId: row.conversation_native_channel_id,
         })
       : undefined;
-  if (persisted.subject.kind === "conversation" && !conversation) {
-    return { kind: "ambiguous" };
+  if (persisted.subject.kind === "conversation" && !conversationIdentity) {
+    return { kind: "native-channel-evidence-unavailable" };
   }
+  const evidenceInspection = conversationIdentity
+    ? inspectMemoryNativeChannelEvidence({
+        agentId: params.options.agentId,
+        conversationPrincipalId: persisted.subject.principalId,
+        channel: conversationIdentity.channel,
+        accountId: conversationIdentity.accountId,
+        conversationId: conversationIdentity.primaryConversationId,
+        nativeChannelId: conversationIdentity.nativeChannelId,
+        options: params.options,
+      })
+    : undefined;
+  if (conversationIdentity && evidenceInspection?.kind !== "current") {
+    try {
+      recordMemoryNativeChannelEvidenceDenial({
+        agentId: params.options.agentId,
+        conversationPrincipalId: persisted.subject.principalId,
+        channel: conversationIdentity.channel,
+        accountId: conversationIdentity.accountId,
+        conversationId: conversationIdentity.primaryConversationId,
+        nativeChannelId: conversationIdentity.nativeChannelId,
+        inspection: evidenceInspection ?? { kind: "missing" },
+        options: params.options,
+      });
+    } catch {
+      // Receipt-audit delivery never turns a missing, expired, or revoked
+      // transport proof into a usable conversation memory subject.
+    }
+    return { kind: "native-channel-evidence-unavailable" };
+  }
+  const evidence = evidenceInspection?.kind === "current" ? evidenceInspection.evidence : undefined;
+  const conversation =
+    conversationIdentity && evidence
+      ? Object.freeze({
+          channel: conversationIdentity.channel,
+          accountId: conversationIdentity.accountId,
+          primaryConversationId: conversationIdentity.primaryConversationId,
+          deliveryTarget: conversationIdentity.deliveryTarget,
+          evidenceRevision: evidence.evidenceRevision,
+          observedAt: evidence.observedAt,
+          expiresAt: evidence.expiresAt,
+        })
+      : undefined;
   let authorityRevision: string;
   if (persisted.subject.kind === "user") {
     const binding = recheckMemoryIdentityBinding({
@@ -375,7 +431,7 @@ export function createCurrentMemorySessionContext(params: {
   }
   const fingerprint = createHash("sha256")
     .update(
-      `${params.options.agentId}\u0000${sessionKey}\u0000${sessionId}\u0000${row.subject_revision}\u0000${row.session_identity_revision}\u0000${authorityRevision}`,
+      `${params.options.agentId}\u0000${sessionKey}\u0000${sessionId}\u0000${row.subject_revision}\u0000${row.session_identity_revision}\u0000${authorityRevision}\u0000${conversation?.evidenceRevision ?? ""}`,
     )
     .digest("base64url");
   const context = Object.freeze({
@@ -421,6 +477,9 @@ export function admitInboundMemorySessionContext(params: {
   options: OpenClawAgentDatabaseOptions;
 }): MemorySessionContextCheck {
   const admission = consumeAdmittedChannelMemoryIdentityFromContext(params.context);
+  const nativeChannelAdmission = consumeAdmittedNativeChannelMemoryEvidenceFromContext(
+    params.context,
+  );
   const inboundSession = readInboundSessionIdentity({
     sessionKey: params.sessionKey,
     sessionId: params.sessionId,
@@ -449,13 +508,46 @@ export function admitInboundMemorySessionContext(params: {
           sessionId: params.sessionId,
           options: params.options,
         });
-  persistMemorySessionSubject({
+  const persistedSubject = persistMemorySessionSubject({
     sessionKey: params.sessionKey,
     sessionId: params.sessionId,
     ...(binding.kind === "current" ? { bindingId: binding.binding.bindingId } : {}),
     ...(conversationSubject ? { subject: conversationSubject } : {}),
     options: params.options,
   });
+  if (nativeChannelAdmission) {
+    const conversation = readInboundSessionIdentity({
+      sessionKey: params.sessionKey,
+      sessionId: params.sessionId,
+      options: params.options,
+    });
+    if (
+      !conversation ||
+      conversation.chatType === "direct" ||
+      !conversation.primaryConversationId ||
+      !conversation.nativeChannelId ||
+      persistedSubject.subject.kind !== "conversation" ||
+      conversationSubject?.principalId !== persistedSubject.subject.principalId
+    ) {
+      return { kind: "native-channel-evidence-unavailable" };
+    }
+    try {
+      persistAdmittedNativeChannelMemoryEvidence({
+        admission: nativeChannelAdmission,
+        agentId: params.options.agentId,
+        conversationPrincipalId: persistedSubject.subject.principalId,
+        channel: conversation.channel,
+        accountId: conversation.accountId,
+        conversationId: conversation.primaryConversationId,
+        nativeChannelId: conversation.nativeChannelId,
+        options: params.options,
+      });
+    } catch {
+      // A stale or cross-routed proof must not inherit an earlier conversation
+      // receipt. The turn still runs, but protected memory stays unavailable.
+      return { kind: "native-channel-evidence-unavailable" };
+    }
+  }
   const context = createCurrentMemorySessionContext({
     sessionKey: params.sessionKey,
     sessionId: params.sessionId,
@@ -503,13 +595,18 @@ function readInboundSessionIdentity(params: {
       chatType: "direct" | "group" | "channel";
       sessionScope: "conversation" | "shared-main" | "group" | "channel";
       primaryConversationId: string | null;
+      nativeChannelId: string | null;
     }
   | undefined {
   const row = openOpenClawAgentDatabase(params.options)
     .db.prepare(
-      `SELECT account_id, channel, chat_type, session_scope, primary_conversation_id
-       FROM session_windows
-       WHERE session_id = ? AND session_key = ?`,
+      `SELECT sw.account_id, sw.channel, sw.chat_type, sw.session_scope,
+              sw.primary_conversation_id, c.native_channel_id,
+              c.channel AS conversation_channel, c.account_id AS conversation_account_id,
+              c.kind AS conversation_kind
+       FROM session_windows AS sw
+       LEFT JOIN conversations AS c ON c.conversation_id = sw.primary_conversation_id
+       WHERE sw.session_id = ? AND sw.session_key = ?`,
     )
     .get(params.sessionId, params.sessionKey) as
     | {
@@ -518,6 +615,10 @@ function readInboundSessionIdentity(params: {
         chat_type: string | null;
         session_scope: string | null;
         primary_conversation_id: string | null;
+        native_channel_id: string | null;
+        conversation_channel: string | null;
+        conversation_account_id: string | null;
+        conversation_kind: string | null;
       }
     | undefined;
   if (
@@ -531,12 +632,24 @@ function readInboundSessionIdentity(params: {
   ) {
     return undefined;
   }
+  if (
+    row.primary_conversation_id &&
+    (!row.conversation_channel ||
+      !row.conversation_account_id ||
+      !row.conversation_kind ||
+      row.conversation_channel !== row.channel ||
+      row.conversation_account_id !== row.account_id ||
+      row.conversation_kind !== row.chat_type)
+  ) {
+    return undefined;
+  }
   return {
     accountId: row.account_id,
     channel: row.channel,
     chatType: row.chat_type,
     sessionScope: row.session_scope,
     primaryConversationId: row.primary_conversation_id,
+    nativeChannelId: row.native_channel_id,
   };
 }
 

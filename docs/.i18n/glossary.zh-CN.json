@@ -1762,5 +1762,21 @@
   {
     "source": "Updating OpenClaw",
     "target": "更新 OpenClaw"
+  },
+  {
+    "source": "Enterprise Memory Identity",
+    "target": "企业内存身份"
+  },
+  {
+    "source": "Memory Identity Entra plugin",
+    "target": "Memory Identity Entra 插件"
+  },
+  {
+    "source": "Memory Identity Google Workspace plugin",
+    "target": "Memory Identity Google Workspace 插件"
+  },
+  {
+    "source": "Memory Identity Okta plugin",
+    "target": "Memory Identity Okta 插件"
   }
 ]

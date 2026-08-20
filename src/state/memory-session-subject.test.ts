@@ -7,6 +7,7 @@ import {
   consumeAdmittedChannelMemoryIdentityFromContext,
   createChannelMemoryIdentityAdmission,
 } from "../channels/message-access/memory-identity-admission.js";
+import { createNativeChannelMemoryEvidenceAdmission } from "../channels/message-access/memory-native-channel-evidence-admission.js";
 import { resolveStableChannelMessageIngress } from "../channels/message-access/runtime.js";
 import { writeSessionEntry } from "../config/sessions/session-accessor.sqlite-entry-store.js";
 import { importSqliteSessionRows } from "../config/sessions/session-accessor.sqlite-import.js";
@@ -41,6 +42,7 @@ import {
   resolveIncognitoOpenClawAgentSqlitePath,
   runOpenClawAgentWriteTransaction,
 } from "./openclaw-agent-db.js";
+import { openOpenClawStateDatabase } from "./openclaw-state-db.js";
 import { ensureProfileForEmail, linkEmail } from "./user-profiles.js";
 
 const roots: string[] = [];
@@ -319,20 +321,21 @@ describe("memory session subject", () => {
   });
 
   it.each(["group", "channel"] as const)(
-    "uses the persisted %s conversation—not its sender—as the subject",
+    "requires a loader-issued native proof for the persisted %s conversation—not its sender",
     (chatType) => {
       const { agentOptions } = fixture();
       const database = openOpenClawAgentDatabase(agentOptions);
       const conversationId = `conv_${chatType}`;
+      const nativeChannelId = `${chatType}-native-1`;
       const sessionKey = `agent:main:telegram:${chatType}:1`;
       const sessionId = `${chatType}-session`;
       database.db
         .prepare(
           `INSERT INTO conversations
-         (conversation_id, channel, account_id, kind, peer_id, delivery_target, created_at, updated_at)
-         VALUES (?, 'telegram', 'default', ?, ?, ?, 1, 1)`,
+         (conversation_id, channel, account_id, kind, peer_id, native_channel_id, delivery_target, created_at, updated_at)
+         VALUES (?, 'telegram', 'default', ?, ?, ?, ?, 1, 1)`,
         )
-        .run(conversationId, chatType, `${chatType}-1`, `${chatType}-1`);
+        .run(conversationId, chatType, `${chatType}-1`, nativeChannelId, `${chatType}-1`);
       database.db
         .prepare(
           "INSERT INTO session_nodes (session_key, current_session_id, entry_json, updated_at) VALUES (?, ?, ?, ?)",
@@ -348,7 +351,51 @@ describe("memory session subject", () => {
 
       expect(
         admitInboundMemorySessionContext({
-          context: { From: "telegram:attacker" },
+          context: {
+            From: "telegram:attacker",
+            toolsBySender: { attacker: { role: "owner" } },
+            session_members: [{ principalId: "attacker", role: "owner" }],
+          },
+          sessionKey,
+          sessionId,
+          options: agentOptions,
+        }),
+      ).toEqual({ kind: "native-channel-evidence-unavailable" });
+      const storedDenials = JSON.stringify(
+        openOpenClawStateDatabase({ env: agentOptions.env })
+          .db.prepare("SELECT * FROM memory_native_channel_evidence_denials")
+          .all(),
+      );
+      for (const senderOrSessionMemberValue of [
+        "telegram:attacker",
+        "attacker",
+        "owner",
+        "toolsBySender",
+        "session_members",
+      ]) {
+        expect(storedDenials).not.toContain(senderOrSessionMemberValue);
+      }
+
+      const admission = createNativeChannelMemoryEvidenceAdmission({
+        pluginId: "telegram",
+        adapterId: "plugin:telegram",
+        ownsChannel: (channel) => channel === "telegram",
+        isActive: () => true,
+      });
+      const context = {
+        From: "telegram:attacker",
+        toolsBySender: { attacker: { role: "owner" } },
+        session_members: [{ principalId: "attacker", role: "owner" }],
+      };
+      admission.attachVerifiedNativeConversation({
+        context,
+        channel: "telegram",
+        accountId: "default",
+        nativeChannelId,
+      });
+      expect(
+        admitInboundMemorySessionContext({
+          context,
           sessionKey,
           sessionId,
           options: agentOptions,
@@ -357,7 +404,12 @@ describe("memory session subject", () => {
         kind: "current",
         context: {
           subject: { kind: "conversation" },
-          conversation: { deliveryTarget: `${chatType}-1` },
+          conversation: {
+            deliveryTarget: `${chatType}-1`,
+            evidenceRevision: expect.any(String),
+            observedAt: expect.any(Number),
+            expiresAt: expect.any(Number),
+          },
         },
       });
     },

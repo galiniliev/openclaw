@@ -72,15 +72,13 @@ type AuthorizedStore = Readonly<{
   audienceRevision: string;
 }>;
 
+type EnterpriseRoleAccessDecision = Parameters<
+  MemoryEnterpriseAccessAuditReporter["recordRoleAccessDecisions"]
+>[0]["decisions"][number];
+
 type AuthorizedStoreSelection = Readonly<{
   stores: readonly AuthorizedStore[];
-  enterpriseRoleDecisions: readonly {
-    groupId: string;
-    policyId: string;
-    decision: "allowed" | "denied";
-    reasonCode: string;
-    policyRevision: string;
-  }[];
+  enterpriseRoleDecisions: readonly EnterpriseRoleAccessDecision[];
 }>;
 
 type PlanState = Readonly<{
@@ -247,6 +245,33 @@ function hasCurrentRoleMembership(params: {
   });
 }
 
+function hasCurrentNativeChannelEvidence(params: {
+  context: MemoryAccessContext;
+  audienceId: string;
+  nowMs: number;
+}): boolean {
+  const conversation = params.context.conversation;
+  if (
+    params.context.subject.kind !== "conversation" ||
+    params.context.subject.conversationPrincipalId !== params.audienceId ||
+    !conversation ||
+    conversation.conversationPrincipalId !== params.audienceId ||
+    conversation.channel !== params.context.subject.channel ||
+    conversation.accountId !== params.context.subject.accountId
+  ) {
+    return false;
+  }
+  const observedAt = Date.parse(conversation.observedAt);
+  const expiresAt = Date.parse(conversation.expiresAt);
+  return (
+    conversation.evidenceRevision.length > 0 &&
+    Number.isFinite(observedAt) &&
+    Number.isFinite(expiresAt) &&
+    observedAt <= params.nowMs &&
+    expiresAt > params.nowMs
+  );
+}
+
 function canViewStoreAudience(params: {
   context: MemoryAccessContext;
   audienceKind: AudienceRef["kind"];
@@ -261,10 +286,11 @@ function canViewStoreAudience(params: {
     case "user":
       return context.subject.kind === "user" && context.subject.principalId === params.audienceId;
     case "conversation":
-      return (
-        context.subject.kind === "conversation" &&
-        context.subject.conversationPrincipalId === params.audienceId
-      );
+      return hasCurrentNativeChannelEvidence({
+        context,
+        audienceId: params.audienceId,
+        nowMs: params.nowMs,
+      });
     case "role":
       // A group sender is never its owner. Role stores require a user-scoped context and an
       // explicit role audience prepared by the host, never a latest-actor field.

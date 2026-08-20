@@ -1425,6 +1425,17 @@ enterprise role membership is separate provider evidence consumed by the same
 plugin evaluator; it is never mirrored into or inferred from
 `session_members`.
 
+Native group and channel access uses a separate, loader-issued conversation
+receipt. A receipt binds one persisted agent, conversation principal, channel,
+account, conversation, and native channel address; sender IDs,
+`toolsBySender`, and `session_members` cannot create or extend it. Each
+post-transport-auth group or channel event refreshes the exact address with a
+new revision. The receipt expires after 15 minutes with no background refresh,
+so adapter or transport outage removes the conversation mount at expiry. Reads
+recheck the receipt and its revision, which invalidates already-minted memory
+plans and virtual views after refresh, expiry, or revocation. State stores only
+keyed-HMAC address references, never raw native conversation identifiers.
+
 Identity plugins may supply issuer metadata, signed claims when the transport
 supports them, trusted-adapter attestations otherwise, group snapshots, and
 refresh support. Core validates the protocol-appropriate issuer, audience,
@@ -1460,6 +1471,7 @@ than duplicating them:
 | -------------------------- | ---------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | `memory_principals`        | `principal_id`, optional user-profile ID, kind, issuer, subject, state                                     | Canonical references for existing profiles plus enterprise, agent, and system identities |
 | `memory_identity_bindings` | channel, account, keyed-HMAC sender lookup, principal, adapter, assurance, evidence revision, revoked time | Verified transport-to-principal mapping without raw provider IDs in ordinary lookups     |
+| `memory_native_channel_evidence` | agent, conversation principal, channel/account, keyed-HMAC conversation and native-channel references, revision, observed/expiry/revoked times | Short-lived native group/channel receipt; exact-address reads fail closed after its 15-minute bound |
 | `memory_group_snapshots`   | provider, group, principal, revision, observed and expiry times                                            | Bounded-staleness role evidence                                                          |
 | `memory_access_audit`      | batch, request, actor, subject, operation, decision, reason, resource revision, time                       | Redacted decision and exposure history                                                   |
 
@@ -1777,8 +1789,9 @@ with direct access to its private source.
   refresh, removal, and fail-closed behavior.
 - Integrate provider channel membership with existing session collaboration
   policy instead of a parallel `channel_member` authority.
-- Add audit query, retention, export, access explanation, policy drift alerts,
-  revocation impact, and periodic access review.
+- Add redacted audit query, export, and explicit deletion, access explanation,
+  policy drift alerts, and revocation impact. Retention adds no scheduled purge
+  and this stage adds no periodic or event-driven access-review workflow.
 - Load-test hundreds of principals, stores, roles, and channels; benchmark
   alternate-backend collection fan-out.
 

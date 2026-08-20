@@ -78,10 +78,14 @@ type PluginRuntimeChannelContextRegistry = {
 
 type ChannelMemoryIdentityAdmission =
   import("../../channels/message-access/memory-identity-admission.js").ChannelMemoryIdentityAdmission;
+type NativeChannelMemoryEvidenceAdmission =
+  import("../../channels/message-access/memory-native-channel-evidence-admission.js").NativeChannelMemoryEvidenceAdmission;
 
 export type PluginRuntimeChannel = {
   /** Per-adapter post-transport-auth attestation; injected only by the loader. */
   memoryIdentityAdmission: ChannelMemoryIdentityAdmission;
+  /** Per-adapter native conversation attestation; it intentionally has no sender authority. */
+  nativeChannelMemoryEvidenceAdmission: NativeChannelMemoryEvidenceAdmission;
   text: {
     chunkByNewline: typeof import("../../auto-reply/chunk.js").chunkByNewline;
     chunkMarkdownText: typeof import("../../auto-reply/chunk.js").chunkMarkdownText;

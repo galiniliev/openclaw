@@ -259,6 +259,70 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_identity_bindings_active_sender
 CREATE INDEX IF NOT EXISTS idx_memory_identity_bindings_principal
   ON memory_identity_bindings(principal_id, revoked_at);
 
+-- An audit-deletion grant exists only during one owner-bound projection purge
+-- transaction. It can never authorize deletion of identity evidence or links.
+CREATE TABLE IF NOT EXISTS memory_enterprise_audit_deletion_grants (
+  target_user_principal_id TEXT NOT NULL PRIMARY KEY,
+  actor_principal_id TEXT NOT NULL,
+  granted_at INTEGER NOT NULL,
+  FOREIGN KEY (target_user_principal_id) REFERENCES memory_principals(principal_id),
+  FOREIGN KEY (actor_principal_id) REFERENCES memory_principals(principal_id)
+) STRICT;
+
+-- Native-channel evidence is distinct from sender/profile bindings and from
+-- Gateway session_members. The channel adapter attests an exact persisted
+-- conversation address; state retains only keyed lookup references so later
+-- reads can fail closed when that attestation expires or is revoked.
+CREATE TABLE IF NOT EXISTS memory_native_channel_evidence (
+  evidence_id TEXT NOT NULL PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  conversation_principal_id TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  conversation_ref TEXT NOT NULL,
+  native_channel_ref TEXT NOT NULL,
+  adapter_id TEXT NOT NULL,
+  assurance TEXT NOT NULL CHECK (assurance IN ('adapter-attested')),
+  verification_method TEXT NOT NULL,
+  adapter_evidence_revision TEXT NOT NULL,
+  evidence_revision TEXT NOT NULL UNIQUE,
+  observed_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  revoked_at INTEGER,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (conversation_principal_id) REFERENCES memory_principals(principal_id)
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_memory_native_channel_evidence_current
+  ON memory_native_channel_evidence(
+    agent_id, conversation_principal_id, channel, account_id,
+    conversation_ref, native_channel_ref, expires_at DESC
+  )
+  WHERE revoked_at IS NULL;
+
+-- Failed receipt checks are redacted operational evidence, never sender or
+-- session-member authority. Address and receipt references are keyed HMACs.
+CREATE TABLE IF NOT EXISTS memory_native_channel_evidence_denials (
+  event_id TEXT NOT NULL PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  conversation_principal_id TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  conversation_ref TEXT NOT NULL,
+  native_channel_ref TEXT NOT NULL,
+  receipt_ref TEXT,
+  reason_code TEXT NOT NULL CHECK (reason_code IN ('missing', 'expired', 'revoked')),
+  occurred_at INTEGER NOT NULL,
+  received_at INTEGER NOT NULL,
+  FOREIGN KEY (conversation_principal_id) REFERENCES memory_principals(principal_id)
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_memory_native_channel_evidence_denials_address_time
+  ON memory_native_channel_evidence_denials(
+    agent_id, conversation_principal_id, channel, account_id,
+    conversation_ref, native_channel_ref, occurred_at DESC, event_id
+  );
+
 -- A pairing receipt is short-lived, internal evidence that a trusted adapter
 -- observed the sender which created a particular pending pairing request.
 -- It keeps only the binding lookup HMAC; raw provider sender IDs stay in the
@@ -409,7 +473,12 @@ END;
 CREATE TRIGGER IF NOT EXISTS memory_enterprise_evidence_transition_profile_links_no_delete
 BEFORE DELETE ON memory_enterprise_evidence_transition_profile_links
 BEGIN
-  SELECT RAISE(ABORT, 'enterprise evidence transition profile links cannot be deleted');
+  SELECT RAISE(ABORT, 'enterprise evidence transition profile links cannot be deleted')
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM memory_enterprise_audit_deletion_grants
+    WHERE target_user_principal_id = OLD.user_principal_id
+  );
 END;
 
 -- A Gateway user principal may be explicitly linked to one verified enterprise
@@ -463,7 +532,12 @@ END;
 CREATE TRIGGER IF NOT EXISTS memory_enterprise_identity_actions_no_delete
 BEFORE DELETE ON memory_enterprise_identity_actions
 BEGIN
-  SELECT RAISE(ABORT, 'enterprise identity actions cannot be deleted');
+  SELECT RAISE(ABORT, 'enterprise identity actions cannot be deleted')
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM memory_enterprise_audit_deletion_grants
+    WHERE target_user_principal_id = OLD.target_user_principal_id
+  );
 END;
 
 -- Redacted shared sink for durable memory decisions. It stores ids and hashes,
@@ -509,6 +583,30 @@ CREATE TABLE IF NOT EXISTS memory_enterprise_access_decisions (
 
 CREATE INDEX IF NOT EXISTS idx_memory_enterprise_access_decisions_subject_time
   ON memory_enterprise_access_decisions(subject_principal_id, occurred_at DESC, event_id);
+
+-- This core-owned ledger records fail-closed admission before a selected memory
+-- plugin can receive a context. References are HMAC-reduced in the same write.
+CREATE TABLE IF NOT EXISTS memory_enterprise_evidence_denials (
+  event_id TEXT NOT NULL PRIMARY KEY,
+  provider_id TEXT NOT NULL,
+  tenant_ref TEXT NOT NULL,
+  subject_principal_id TEXT NOT NULL,
+  reason_code TEXT NOT NULL CHECK (
+    reason_code IN (
+      'membership-stale',
+      'principal-evidence-unavailable',
+      'role-membership-unavailable'
+    )
+  ),
+  group_ref TEXT NOT NULL,
+  principal_evidence_revision TEXT NOT NULL,
+  membership_evidence_revision TEXT,
+  occurred_at INTEGER NOT NULL,
+  received_at INTEGER NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_memory_enterprise_evidence_denials_subject_time
+  ON memory_enterprise_evidence_denials(subject_principal_id, occurred_at DESC, event_id);
 
 -- The selected memory plugin owns the actual policy evaluation. Core retains
 -- only this redacted last-observation baseline and allow/deny revision flips.
@@ -556,7 +654,12 @@ END;
 CREATE TRIGGER IF NOT EXISTS memory_enterprise_policy_drift_alerts_no_delete
 BEFORE DELETE ON memory_enterprise_policy_drift_alerts
 BEGIN
-  SELECT RAISE(ABORT, 'enterprise policy drift alerts cannot be deleted');
+  SELECT RAISE(ABORT, 'enterprise policy drift alerts cannot be deleted')
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM memory_enterprise_audit_deletion_grants
+    WHERE target_user_principal_id = OLD.subject_principal_id
+  );
 END;
 
 CREATE TABLE IF NOT EXISTS session_state_events (

@@ -162,8 +162,9 @@ uses the same owner-or-`operator.admin` object boundary to show a bounded
 refresh or revocation history. A read-scoped caller cannot select another
 profile. Lifecycle history stays with the profile linked when each event
 occurred; relinking an enterprise identity never transfers historical entries
-to the new profile. These operations return redacted decision evidence, an
-allow/deny flip from the selected memory plugin, or a provider lifecycle count.
+to the new profile. These operations return redacted decision evidence,
+admission denials, an allow/deny flip from the selected memory plugin, or a
+provider lifecycle count.
 Results identify provider, opaque tenant and rule references, policy/evidence
 revisions, role-store scope, lifecycle timestamps, and only the number of
 superseded snapshots. They never return group names, snapshot or transition
@@ -171,14 +172,28 @@ IDs, resource titles, memory content, raw claims, tokens, or a Gateway
 collaboration session.
 
 `memory.enterpriseIdentity.accessAudit.export` requires `operator.write` and
-returns one bounded redacted snapshot of that same profile's decisions, policy
-drift alerts, and lifecycle-impact counts. The profile owner can export its
-own record; an attributed `operator.admin` can export any profile's record.
+returns one bounded redacted snapshot of that same profile's decisions,
+admission denials, policy-drift alerts, and lifecycle-impact counts. The
+profile owner can export its own record; an attributed `operator.admin` can
+export any profile's record.
 It is a structured response, not a file download, and each collection is
 capped at 100 entries.
 
-The two write controls also use the owner-or-attributed-`operator.admin`
-boundary and accept only a Gateway `userProfileId` plus configured provider:
+`memory.enterpriseIdentity.accessAudit.delete` requires `operator.write` and
+uses the same owner-or-attributed-`operator.admin` boundary. It accepts only a
+Gateway `userProfileId` and returns counts, never identifiers. It explicitly
+deletes that profile's redacted decision, denial, policy-observation,
+policy-drift, lifecycle-link, and identity-action projections. It preserves
+verified principal evidence, membership snapshots, transition headers and
+memberships, profile links, generic exposure audit, and private-memory content.
+An `operator.admin` connection without an authenticated profile must carry
+trusted Gateway client or device metadata so the action has a reduced system
+actor; otherwise the mutation is unavailable.
+
+`memory.enterpriseIdentity.unlink` and
+`memory.enterpriseIdentity.evidence.revoke` also use the
+owner-or-attributed-`operator.admin` boundary and accept only a Gateway
+`userProfileId` plus configured provider:
 
 - `memory.enterpriseIdentity.unlink` removes the current profile association
   and immediately denies future enterprise-memory access. It preserves
@@ -187,11 +202,18 @@ boundary and accept only a Gateway `userProfileId` plus configured provider:
   current verified evidence and membership snapshots. A fresh verified OIDC
   flow is required before that identity can be linked again.
 
-Both controls return provider and count-only results, persist a redacted actor
-and target action record, and never accept or return an enterprise principal,
-link, snapshot, store, resource, session, run, or exposure identifier. They
-do not delete private-memory content; content deletion remains an authorized
+All three controls return only count-based results and never accept or return
+an enterprise principal, link, snapshot, store, resource, session, run, or
+exposure identifier. Unlink and revoke persist a redacted actor-and-target
+action record; audit deletion removes that profile's audit projection. None
+deletes private-memory content; content deletion remains an authorized
 operation of the selected memory backend.
+
+Enterprise identity adds no scheduled retention or physical-purge job and no
+periodic or event-driven access-review workflow. Evidence expiry, revocation,
+and policy-drift alerts deny future role access; they do not physically delete
+memory or audit data. Owners use the explicit audit-deletion control above and
+postbox purge remains an explicit owner action.
 
 Each evidence-transition result also reports a count-only revocation impact:
 the number of prior content exposures associated with the superseded snapshots.

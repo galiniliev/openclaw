@@ -893,6 +893,25 @@ export interface MemoryEnterpriseAccessDecisions {
   tenant_ref: string;
 }
 
+export interface MemoryEnterpriseAuditDeletionGrants {
+  actor_principal_id: string;
+  granted_at: number;
+  target_user_principal_id: string;
+}
+
+export interface MemoryEnterpriseEvidenceDenials {
+  event_id: string;
+  group_ref: string;
+  membership_evidence_revision: string | null;
+  occurred_at: number;
+  principal_evidence_revision: string;
+  provider_id: string;
+  reason_code: string;
+  received_at: number;
+  subject_principal_id: string;
+  tenant_ref: string;
+}
+
 export interface MemoryEnterpriseEvidenceTransitionMemberships {
   created_at: number;
   snapshot_id: string;
@@ -1004,6 +1023,39 @@ export interface MemoryIdentityBindings {
   revoked_at: number | null;
   sender_lookup_hmac: string;
   verification_method: string;
+}
+
+export interface MemoryNativeChannelEvidence {
+  account_id: string;
+  adapter_evidence_revision: string;
+  adapter_id: string;
+  agent_id: string;
+  assurance: string;
+  channel: string;
+  conversation_principal_id: string;
+  conversation_ref: string;
+  created_at: number;
+  evidence_id: string;
+  evidence_revision: string;
+  expires_at: number;
+  native_channel_ref: string;
+  observed_at: number;
+  revoked_at: number | null;
+  verification_method: string;
+}
+
+export interface MemoryNativeChannelEvidenceDenials {
+  account_id: string;
+  agent_id: string;
+  channel: string;
+  conversation_principal_id: string;
+  conversation_ref: string;
+  event_id: string;
+  native_channel_ref: string;
+  occurred_at: number;
+  reason_code: string;
+  receipt_ref: string | null;
+  received_at: number;
 }
 
 export interface MemoryPairingIdentityReceipts {
@@ -1845,6 +1897,8 @@ export interface DB {
   meeting_transcript_utterances: MeetingTranscriptUtterances;
   memory_access_audit: MemoryAccessAudit;
   memory_enterprise_access_decisions: MemoryEnterpriseAccessDecisions;
+  memory_enterprise_audit_deletion_grants: MemoryEnterpriseAuditDeletionGrants;
+  memory_enterprise_evidence_denials: MemoryEnterpriseEvidenceDenials;
   memory_enterprise_evidence_transition_memberships: MemoryEnterpriseEvidenceTransitionMemberships;
   memory_enterprise_evidence_transition_profile_links: MemoryEnterpriseEvidenceTransitionProfileLinks;
   memory_enterprise_evidence_transitions: MemoryEnterpriseEvidenceTransitions;
@@ -1855,6 +1909,8 @@ export interface DB {
   memory_enterprise_profile_links: MemoryEnterpriseProfileLinks;
   memory_enterprise_role_policy_observations: MemoryEnterpriseRolePolicyObservations;
   memory_identity_bindings: MemoryIdentityBindings;
+  memory_native_channel_evidence: MemoryNativeChannelEvidence;
+  memory_native_channel_evidence_denials: MemoryNativeChannelEvidenceDenials;
   memory_pairing_identity_receipts: MemoryPairingIdentityReceipts;
   memory_principals: MemoryPrincipals;
   migration_runs: MigrationRuns;

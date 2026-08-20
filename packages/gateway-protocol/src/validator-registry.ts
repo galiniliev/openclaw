@@ -345,6 +345,9 @@ export const validateMemoryEnterpriseIdentityEvidenceTransitionListParams = comp
 export const validateMemoryEnterpriseIdentityAccessAuditExportParams = compile(
   S.MemoryEnterpriseIdentityAccessAuditExportParamsSchema,
 );
+export const validateMemoryEnterpriseIdentityAccessAuditDeleteParams = compile(
+  S.MemoryEnterpriseIdentityAccessAuditDeleteParamsSchema,
+);
 export const validateMemoryEnterpriseIdentityUnlinkParams = compile(
   S.MemoryEnterpriseIdentityUnlinkParamsSchema,
 );

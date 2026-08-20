@@ -357,7 +357,11 @@ function readSessionMemorySubject(params: {
   }
   if (session.subject.kind === "conversation") {
     const conversation = session.conversation;
-    if (!conversation) {
+    if (
+      !conversation ||
+      conversation.observedAt > nowMs ||
+      conversation.expiresAt <= nowMs
+    ) {
       return undefined;
     }
     // The subject owner is the persisted conversation principal. Sender fields never enter this
@@ -368,6 +372,9 @@ function readSessionMemorySubject(params: {
       conversationPrincipalId: session.principalId,
       channel: conversation.channel,
       accountId: conversation.accountId,
+      evidenceRevision: conversation.evidenceRevision,
+      observedAt: new Date(conversation.observedAt).toISOString(),
+      expiresAt: new Date(conversation.expiresAt).toISOString(),
     });
   }
   if (
@@ -575,10 +582,11 @@ export function materializeTrustedMemoryAccessContext(
   if (!conversation && session.subject.kind === "conversation") {
     return undefined;
   }
+  const currentFingerprint = fingerprint(session, facts);
   return Object.freeze({
     version: 1 as const,
-    contextId: `mctx1_${context.fingerprint}`,
-    contextFingerprint: context.fingerprint,
+    contextId: `mctx1_${currentFingerprint}`,
+    contextFingerprint: currentFingerprint,
     requestId: facts.requestId,
     runId: facts.runId,
     agentId: session.agentId,
@@ -595,7 +603,9 @@ export function materializeTrustedMemoryAccessContext(
             conversationPrincipalId: session.principalId,
             channel: conversation.channel,
             accountId: conversation.accountId,
-            evidenceRevision: session.authorityRevision,
+            evidenceRevision: conversation.evidenceRevision,
+            observedAt: new Date(conversation.observedAt).toISOString(),
+            expiresAt: new Date(conversation.expiresAt).toISOString(),
           }),
         }
       : {}),

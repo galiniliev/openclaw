@@ -2,6 +2,7 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { normalizeOptionalAgentRuntimeId } from "../agents/agent-runtime-id.js";
 import { createChannelMemoryIdentityAdmission } from "../channels/message-access/memory-identity-admission.js";
+import { createNativeChannelMemoryEvidenceAdmission } from "../channels/message-access/memory-native-channel-evidence-admission.js";
 import { createChannelIngressDrain } from "../channels/message/ingress-drain.js";
 import { createChannelIngressQueue } from "../channels/message/ingress-queue.js";
 import {
@@ -690,6 +691,24 @@ export function createPluginRuntimeResolver(state: PluginRegistryState) {
           scopedChannelRuntime = {
             ...channel,
             memoryIdentityAdmission: createChannelMemoryIdentityAdmission({
+              pluginId,
+              adapterId: `plugin:${pluginId}`,
+              ownsChannel: (channelId) =>
+                registry.channels.some(
+                  (entry) => entry.pluginId === pluginId && entry.plugin.id === channelId,
+                ),
+              isActive: () => {
+                const record =
+                  pluginRuntimeRecordById.get(pluginId) ??
+                  registry.plugins.find((entry) => entry.id === pluginId);
+                return (
+                  record?.status === "loaded" &&
+                  record.enabled &&
+                  (record.origin === "bundled" || record.trustedOfficialInstall === true)
+                );
+              },
+            }),
+            nativeChannelMemoryEvidenceAdmission: createNativeChannelMemoryEvidenceAdmission({
               pluginId,
               adapterId: `plugin:${pluginId}`,
               ownsChannel: (channelId) =>

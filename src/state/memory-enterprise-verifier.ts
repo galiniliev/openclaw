@@ -1,4 +1,4 @@
-import { createHash, createPublicKey, verify } from "node:crypto";
+import { createHash, createPublicKey, type webcrypto, verify } from "node:crypto";
 import type {
   EnterpriseIdentityProviderAdapter,
   EnterpriseIdentityProviderAuthority,
@@ -25,7 +25,7 @@ export function clearEnterpriseOidcJwksCacheForTest(): void {
 
 // Node's WebCrypto `JsonWebKey` intentionally omits JOSE's key-id extension;
 // the issuer's JWKS contract supplies it and we use it only for key selection.
-export type EnterpriseOidcJsonWebKey = JsonWebKey & Readonly<{ kid?: string }>;
+export type EnterpriseOidcJsonWebKey = webcrypto.JsonWebKey & Readonly<{ kid?: string }>;
 
 export type EnterpriseOidcJwks = Readonly<{ keys: readonly EnterpriseOidcJsonWebKey[] }>;
 

@@ -2,6 +2,7 @@
 import {
   ErrorCodes,
   errorShape,
+  validateMemoryEnterpriseIdentityAccessAuditDeleteParams,
   validateMemoryEnterpriseIdentityAccessAuditExportParams,
   validateMemoryEnterpriseIdentityAccessAuditListParams,
   validateMemoryEnterpriseIdentityEvidenceRevokeParams,
@@ -12,7 +13,9 @@ import {
   validateMemoryEnterpriseIdentityAuthorizationStartParams,
 } from "../../../packages/gateway-protocol/src/index.js";
 import {
+  deleteMemoryEnterpriseAuditForUserPrincipal,
   listMemoryEnterpriseAccessDecisionAudit,
+  listMemoryEnterpriseEvidenceDenialAudit,
   listMemoryEnterprisePolicyDriftAlerts,
 } from "../../state/memory-enterprise-access-audit.js";
 import {
@@ -20,7 +23,10 @@ import {
   unlinkMemoryEnterpriseProfile,
 } from "../../state/memory-enterprise-identity.js";
 import { listMemoryEnterpriseEvidenceTransitionImpactsForUserPrincipal } from "../../state/memory-enterprise-revocation-impact.js";
-import { resolveMemoryPrincipalForUserProfile } from "../../state/memory-identity.js";
+import {
+  ensureMemoryOperationalPrincipal,
+  resolveMemoryPrincipalForUserProfile,
+} from "../../state/memory-identity.js";
 import { resolveUserProfileId } from "../../state/user-profiles.js";
 import {
   completeGatewayEnterpriseIdentityAuthorization,
@@ -84,34 +90,75 @@ function resolveEnterpriseActionPrincipals(params: {
     return undefined;
   }
   const actorProfileId = params.client?.authenticatedUserProfile?.profileId;
-  if (!actorProfileId) {
-    params.respond(
-      false,
-      undefined,
-      errorShape(
-        ErrorCodes.FORBIDDEN,
-        "enterprise memory changes require an authenticated Gateway profile for audit attribution",
-      ),
-    );
-    return undefined;
-  }
-  const actor = resolveMemoryPrincipalForUserProfile({ userProfileId: actorProfileId });
   const target = resolveMemoryPrincipalForUserProfile({ userProfileId: params.userProfileId });
-  if (!actor || !target) {
+  if (!target) {
     params.respond(
       false,
       undefined,
       errorShape(
         ErrorCodes.UNAVAILABLE,
-        "enterprise memory changes require active memory principals for the actor and target profiles",
+        "enterprise memory changes require an active memory principal for the target profile",
       ),
     );
     return undefined;
   }
-  return Object.freeze({
-    actorPrincipalId: actor.principalId,
-    targetPrincipalId: target.principalId,
-  });
+  if (actorProfileId) {
+    const actor = resolveMemoryPrincipalForUserProfile({ userProfileId: actorProfileId });
+    if (!actor) {
+      params.respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.UNAVAILABLE,
+          "enterprise memory changes require an active memory principal for the actor profile",
+        ),
+      );
+      return undefined;
+    }
+    return Object.freeze({
+      actorPrincipalId: actor.principalId,
+      targetPrincipalId: target.principalId,
+    });
+  }
+  if (!params.client?.connect?.scopes?.includes(ADMIN_SCOPE)) {
+    params.respond(
+      false,
+      undefined,
+      errorShape(
+        ErrorCodes.FORBIDDEN,
+        "enterprise memory changes require an authenticated Gateway profile or operator.admin",
+      ),
+    );
+    return undefined;
+  }
+  const deviceId = params.client.connect.device?.id?.trim();
+  const clientId = params.client.connect.client?.id?.trim();
+  if (!deviceId && !clientId) {
+    params.respond(
+      false,
+      undefined,
+      errorShape(
+        ErrorCodes.UNAVAILABLE,
+        "profile-less operator.admin requires trusted Gateway client or device metadata for audit attribution",
+      ),
+    );
+    return undefined;
+  }
+  try {
+    const actor = ensureMemoryOperationalPrincipal({
+      kind: "system",
+      // Gateway authenticated these fields during connect. The identity store
+      // HMAC-reduces this stable source before it persists an actor principal.
+      stableRef: `gateway-enterprise-audit-admin:v1\u0000${clientId ?? ""}\u0000${deviceId ?? ""}`,
+    });
+    return Object.freeze({
+      actorPrincipalId: actor.principalId,
+      targetPrincipalId: target.principalId,
+    });
+  } catch (error) {
+    params.respond(false, undefined, authorizationError(error));
+    return undefined;
+  }
 }
 
 export const memoryEnterpriseIdentityHandlers: GatewayRequestHandlers = {
@@ -220,6 +267,19 @@ export const memoryEnterpriseIdentityHandlers: GatewayRequestHandlers = {
               }),
             )
           : [],
+        evidenceDenials: principal
+          ? listMemoryEnterpriseEvidenceDenialAudit({
+              subjectPrincipalId: principal.principalId,
+              ...(params.providerId ? { providerId: params.providerId } : {}),
+              ...(params.limit ? { limit: params.limit } : {}),
+            }).map((denial) =>
+              Object.freeze({
+                ...denial,
+                storeKind: "role" as const,
+                collaboration: "not-applicable" as const,
+              }),
+            )
+          : [],
       }),
     );
   },
@@ -257,6 +317,18 @@ export const memoryEnterpriseIdentityHandlers: GatewayRequestHandlers = {
               }),
             )
           : [],
+        evidenceDenials: principal
+          ? listMemoryEnterpriseEvidenceDenialAudit({
+              subjectPrincipalId: principal.principalId,
+              ...query,
+            }).map((denial) =>
+              Object.freeze({
+                ...denial,
+                storeKind: "role" as const,
+                collaboration: "not-applicable" as const,
+              }),
+            )
+          : [],
         alerts: principal
           ? listMemoryEnterprisePolicyDriftAlerts({
               subjectPrincipalId: principal.principalId,
@@ -277,6 +349,37 @@ export const memoryEnterpriseIdentityHandlers: GatewayRequestHandlers = {
           : [],
       }),
     );
+  },
+  "memory.enterpriseIdentity.accessAudit.delete": async ({ client, params, respond }) => {
+    if (
+      !assertValidParams(
+        params,
+        validateMemoryEnterpriseIdentityAccessAuditDeleteParams,
+        "memory.enterpriseIdentity.accessAudit.delete",
+        respond,
+      )
+    ) {
+      return;
+    }
+    const principals = resolveEnterpriseActionPrincipals({
+      client,
+      userProfileId: params.userProfileId,
+      respond,
+    });
+    if (!principals) {
+      return;
+    }
+    try {
+      const occurredAt = Date.now();
+      const result = deleteMemoryEnterpriseAuditForUserPrincipal({
+        userPrincipalId: principals.targetPrincipalId,
+        actorPrincipalId: principals.actorPrincipalId,
+        now: occurredAt,
+      });
+      respond(true, Object.freeze({ kind: "deleted" as const, ...result, occurredAt }));
+    } catch (error) {
+      respond(false, undefined, authorizationError(error));
+    }
   },
   "memory.enterpriseIdentity.unlink": async ({ client, params, respond }) => {
     if (

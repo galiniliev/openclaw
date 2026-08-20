@@ -42,6 +42,9 @@ export type SessionMemorySubject =
       conversationPrincipalId: string;
       channel: string;
       accountId: string;
+      evidenceRevision: string;
+      observedAt: string;
+      expiresAt: string;
     }>
   | Readonly<{
       version: 1;
@@ -124,6 +127,8 @@ export type MemoryAccessContext = DeepReadonly<{
     channel: string;
     accountId: string;
     evidenceRevision: string;
+    observedAt: string;
+    expiresAt: string;
   };
   delivery: {
     sinkKind: "private" | "channel" | "session" | "internal";

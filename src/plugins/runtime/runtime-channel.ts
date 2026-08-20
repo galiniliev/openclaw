@@ -211,6 +211,8 @@ export function createRuntimeChannel(): PluginRuntime["channel"] {
     // trusted channel adapter; global runtime state must never hold it.
     memoryIdentityAdmission:
       undefined as unknown as PluginRuntime["channel"]["memoryIdentityAdmission"],
+    nativeChannelMemoryEvidenceAdmission:
+      undefined as unknown as PluginRuntime["channel"]["nativeChannelMemoryEvidenceAdmission"],
     runtimeContexts: createChannelRuntimeContextRegistry(),
   } satisfies PluginRuntime["channel"];
 
