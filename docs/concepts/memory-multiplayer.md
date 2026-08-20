@@ -1831,19 +1831,20 @@ allow.
   confused deputy, and denial-of-service tests. The selected memory plugin,
   broker backend, Gateway, and operator remain in the trusted computing base.
 
-The concrete intended trusted computing base is the Gateway process, its local
-`memory-broker` child, the selected `memory-core` plugin and its SQLite/index/
-artifact state, and the deployment operator. The per-session Docker or Podman
-agent container is outside that boundary: it receives only the Gateway worker
-protocol and read-only virtual projections, never a broker socket, database
-handle, artifact root, encryption key, or reusable broker credential.
+The tested process-adversarial boundary is the package-backed Linux Docker or
+Podman agent-worker topology. Within that boundary, a compromised non-broker
+agent process or model-facing tool cannot cross its issued virtual view: it
+cannot read, write, enumerate, or infer another store. The trusted computing
+base is the Gateway process, its local `memory-broker` child, the selected
+`memory-core` plugin and its SQLite/index/artifact state, and the deployment
+operator. The per-session agent container is outside that boundary: it
+receives only the Gateway worker protocol and read-only virtual projections,
+never a broker socket, database handle, artifact root, encryption key, or
+reusable broker credential.
 
-This is the chosen topology, not a current deployment claim. Until the
-separate-process and OS-permission scenarios pass on the supported platforms,
-deployments remain at their previously tested cooperative or model-adversarial
-level. Separate Gateway/process/credential/storage cells remain mandatory for
-hostile tenants; a local broker does not turn one Gateway into a tenant
-boundary.
+This claim is limited to that tested topology; it does not make a single
+Gateway a tenant boundary. Separate Gateway/process/credential/storage cells
+remain mandatory for hostile tenants.
 
 A "compromised plugin" test at this stage means model-facing plugin or tool
 code running inside the constrained agent process. A malicious Gateway-hosted

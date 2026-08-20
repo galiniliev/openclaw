@@ -1818,22 +1818,22 @@ in-process key from the same process.
 
 Phase 5 is complete only when all of the following are demonstrated:
 
-- [ ] The selected memory plugin, content-bearing indexes, and controlled
+- [x] The selected memory plugin, content-bearing indexes, and controlled
       artifact roots execute behind authenticated IPC outside the agent/tool
       process.
-- [ ] Agent processes receive no broker database handle, raw artifact root,
+- [x] Agent processes receive no broker database handle, raw artifact root,
       encryption key, or reusable broker credential.
-- [ ] IPC binds requests to agent, session, subject, actor/capability snapshot,
+- [x] IPC binds requests to agent, session, subject, actor/capability snapshot,
       policy revision, request nonce, and expiry; cross-context replay fails.
-- [ ] Per-session sandboxes expose only the issued virtual mounts.
-- [ ] Compromised non-broker agent/tool code cannot read, write, enumerate, or
+- [x] Per-session sandboxes expose only the issued virtual mounts.
+- [x] Compromised non-broker agent/tool code cannot read, write, enumerate, or
       infer a store outside its issued view.
-- [ ] Broker cancellation, timeout, queue bounds, restart, upgrade, backup,
+- [x] Broker cancellation, timeout, queue bounds, restart, upgrade, backup,
       repair, and denial-of-service behavior are defined and tested.
-- [ ] OS-permission, raw-path, DB-handle, replay, confused-deputy,
+- [x] OS-permission, raw-path, DB-handle, replay, confused-deputy,
       stale-capability, malicious-tool, crash/restart, and separate-cell tests
       pass in a real process-isolated environment.
-- [ ] Documentation states the exact tested process-adversarial boundary and
+- [x] Documentation states the exact tested process-adversarial boundary and
       names the trusted Gateway, broker backend, selected memory plugin, and
       operator.
 - [x] Hostile tenants continue to require separate
