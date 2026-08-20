@@ -3,6 +3,7 @@ import type { Model } from "openclaw/plugin-sdk/llm";
  * Routes compaction through selected native agent harnesses when supported.
  */
 import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { isMemoryIsolationCutoverAgent } from "../../plugins/memory-cutover.js";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
 import { resolveUserPath } from "../../utils.js";
 import { isDefaultAgentRuntimeId, normalizeOptionalAgentRuntimeId } from "../agent-runtime-id.js";
@@ -379,6 +380,18 @@ export async function maybeCompactAgentHarnessSession(
   params: CompactEmbeddedAgentSessionParams,
   options: InternalAgentHarnessCompactionOptions = {},
 ): Promise<EmbeddedAgentCompactResult | undefined> {
+  const compactIdentity = resolveHarnessCompactIdentity(params);
+  // Native harnesses compact provider-owned histories and receive neither a sealed
+  // derive plan nor a lineage receipt. Do not fall through to another unsealed
+  // compactor when a cut-over transcript would otherwise reach a model.
+  if (isMemoryIsolationCutoverAgent(compactIdentity.agentId)) {
+    return {
+      ok: false,
+      compacted: false,
+      reason: "memory derivation authorization unavailable for native harness compaction",
+      failure: { reason: "memory_derivation_unavailable" },
+    };
+  }
   const selectedRuntime = normalizeOptionalAgentRuntimeId(params.agentHarnessId);
   const pinnedHarnessId =
     selectedRuntime && !isDefaultAgentRuntimeId(selectedRuntime) ? selectedRuntime : undefined;
@@ -463,7 +476,6 @@ export async function maybeCompactAgentHarnessSession(
     }
     return undefined;
   }
-  const compactIdentity = resolveHarnessCompactIdentity(params);
   let resolvedRuntimeAuthPlan = runtimeAuthPlan;
   const compactParams = {
     ...params,

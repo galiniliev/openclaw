@@ -62,6 +62,9 @@ const compactAuthMocks = vi.hoisted(() => ({
 const providerOwnerMocks = vi.hoisted(() => ({
   resolveProviderRefOwnership: vi.fn(),
 }));
+const memoryCutoverMocks = vi.hoisted(() => ({
+  isMemoryIsolationCutoverAgent: vi.fn(() => false),
+}));
 const contextEngineTurnAttemptMocks = vi.hoisted(() => ({
   drainPendingContextEngineTurnsBeforeRun: vi.fn(async (_params: unknown) => {}),
 }));
@@ -138,6 +141,9 @@ vi.mock("../runtime-plan/prepare-auth.js", async (importOriginal) => {
 vi.mock("../../plugins/providers.js", () => ({
   resolveProviderRefOwnership: providerOwnerMocks.resolveProviderRefOwnership,
 }));
+vi.mock("../../plugins/memory-cutover.js", () => ({
+  isMemoryIsolationCutoverAgent: memoryCutoverMocks.isMemoryIsolationCutoverAgent,
+}));
 vi.mock("./context-engine-turn-attempt.js", () => ({
   drainPendingContextEngineTurnsBeforeRun:
     contextEngineTurnAttemptMocks.drainPendingContextEngineTurnsBeforeRun,
@@ -177,6 +183,8 @@ beforeEach(async () => {
   compactAuthMocks.getApiKeyForModel.mockResolvedValue({ apiKey: "test-key" });
   providerOwnerMocks.resolveProviderRefOwnership.mockReset();
   providerOwnerMocks.resolveProviderRefOwnership.mockReturnValue({ status: "unowned" });
+  memoryCutoverMocks.isMemoryIsolationCutoverAgent.mockReset();
+  memoryCutoverMocks.isMemoryIsolationCutoverAgent.mockReturnValue(false);
   contextEngineTurnAttemptMocks.drainPendingContextEngineTurnsBeforeRun
     .mockReset()
     .mockResolvedValue(undefined);
@@ -2554,6 +2562,22 @@ describe("selectAgentHarness", () => {
         config: providerRuntimeConfig("claude-cli", "claude-cli"),
       }),
     ).resolves.toBeUndefined();
+  });
+
+  it("does not hand a cutover transcript to a native compactor", async () => {
+    const compact = registerTestCompactor();
+    memoryCutoverMocks.isMemoryIsolationCutoverAgent.mockReturnValue(true);
+
+    await expect(
+      maybeCompactAgentHarnessSession(createCompactionParams({ agentHarnessId: "codex" })),
+    ).resolves.toEqual({
+      ok: false,
+      compacted: false,
+      reason: "memory derivation authorization unavailable for native harness compaction",
+      failure: { reason: "memory_derivation_unavailable" },
+    });
+
+    expect(compact).not.toHaveBeenCalled();
   });
 
   it("keeps host auth on the built-in OpenClaw compaction fallback", async () => {
