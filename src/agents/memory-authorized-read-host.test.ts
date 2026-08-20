@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   createDeriveInvocation: vi.fn(),
+  commitDerivation: vi.fn(),
+  currentSession: vi.fn(),
   createWriteInvocation: vi.fn(),
   createTrustedContext: vi.fn(),
   readTranscriptDerivation: vi.fn(),
@@ -14,6 +16,7 @@ vi.mock("../plugins/memory-cutover.js", () => ({
 }));
 vi.mock("../plugins/memory-invocation.js", () => ({
   MEMORY_INVOCATION_UNAVAILABLE: { unavailable: true },
+  commitAuthorizedMemoryDerivationForInvocation: mocks.commitDerivation,
   createAuthorizedMemoryDeriveInvocation: mocks.createDeriveInvocation,
   createAuthorizedMemoryReadInvocation: vi.fn(),
   createAuthorizedMemoryWriteInvocation: mocks.createWriteInvocation,
@@ -37,18 +40,7 @@ vi.mock("../state/memory-identity.js", () => ({
   recheckMemoryIdentityBinding: () => true,
 }));
 vi.mock("../state/memory-session-subject.js", () => ({
-  createCurrentMemorySessionContext: () => ({
-    kind: "current",
-    context: {
-      agentId: "main",
-      fingerprint: "session-fingerprint",
-      principalId: "service:main",
-      sessionId: "session-1",
-      sessionKey: "agent:main:session-1",
-      authorityRevision: "authority-1",
-      subject: { kind: "service", principalId: "service:main" },
-    },
-  }),
+  createCurrentMemorySessionContext: mocks.currentSession,
 }));
 vi.mock("./memory-egress-admission.js", () => ({
   resolveMemoryEgressDeliveryFacts: () => ({
@@ -62,17 +54,32 @@ vi.mock("./memory-egress-admission.js", () => ({
 import {
   admitAuthorizedMemoryDerivation,
   createAuthorizedMemoryDerivationHost,
+  prepareAuthorizedMemoryBackgroundDerivationHost,
   prepareAuthorizedTranscriptDerivationHost,
 } from "./memory-authorized-read-host.js";
 
 describe("admitAuthorizedMemoryDerivation", () => {
   beforeEach(() => {
     mocks.createDeriveInvocation.mockReset();
+    mocks.commitDerivation.mockReset();
+    mocks.currentSession.mockReset();
     mocks.createWriteInvocation.mockReset();
     mocks.createTrustedContext.mockReset();
     mocks.readTranscriptDerivation.mockReset();
     mocks.search.mockReset();
     mocks.write.mockReset();
+    mocks.currentSession.mockReturnValue({
+      kind: "current",
+      context: {
+        agentId: "main",
+        fingerprint: "session-fingerprint",
+        principalId: "service:main",
+        sessionId: "session-1",
+        sessionKey: "agent:main:session-1",
+        authorityRevision: "authority-1",
+        subject: { kind: "service", principalId: "service:main" },
+      },
+    });
     mocks.createTrustedContext.mockReturnValue({ kind: "current", context: { trusted: true } });
   });
 
@@ -122,6 +129,58 @@ describe("admitAuthorizedMemoryDerivation", () => {
     await host?.search({ query: "compaction source" });
 
     expect(mocks.createDeriveInvocation).toHaveBeenCalledWith({ context: { trusted: true } });
+  });
+
+  it("binds background dreaming output to the same derive invocation that exposed its source", async () => {
+    const invocation = {};
+    mocks.createDeriveInvocation.mockResolvedValue(invocation);
+    mocks.search.mockResolvedValue({ results: [{ handleId: "source-1", snippet: "scoped source" }] });
+    mocks.commitDerivation.mockResolvedValue({ version: 1, mutationId: "dream", status: "committed" });
+
+    const host = await prepareAuthorizedMemoryBackgroundDerivationHost({
+      agentId: "main",
+      sessionKey: "agent:main:session-1",
+      sessionId: "session-1",
+      runId: "run-1",
+      purpose: "dreaming",
+    });
+
+    await host?.search({ query: "scoped source" });
+    await host?.commit({ content: "consolidated scoped source" });
+
+    expect(mocks.createDeriveInvocation).toHaveBeenCalledWith({ context: { trusted: true } });
+    expect(mocks.commitDerivation).toHaveBeenCalledWith({
+      invocation,
+      content: "consolidated scoped source",
+      contentType: "markdown",
+      purpose: "dreaming",
+    });
+  });
+
+  it("does not reconstruct private derivation authority for background work", async () => {
+    mocks.currentSession.mockReturnValue({
+      kind: "current",
+      context: {
+        agentId: "main",
+        fingerprint: "private-session-fingerprint",
+        principalId: "alice",
+        sessionId: "private-session",
+        sessionKey: "agent:main:direct:alice",
+        authorityRevision: "private-authority-1",
+        bindingId: "binding-alice",
+        subject: { kind: "user", principalId: "alice" },
+      },
+    });
+
+    await expect(
+      prepareAuthorizedMemoryBackgroundDerivationHost({
+        agentId: "main",
+        sessionKey: "agent:main:direct:alice",
+        sessionId: "private-session",
+        purpose: "dreaming",
+      }),
+    ).resolves.toBeUndefined();
+    expect(mocks.createDeriveInvocation).not.toHaveBeenCalled();
   });
 
   it("binds a flush mutation to the host-read transcript policy set before the model can write", async () => {

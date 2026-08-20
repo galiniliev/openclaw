@@ -1,7 +1,10 @@
 // Memory Core tests cover dreaming plugin behavior.
 import { expectDefined } from "@openclaw/normalization-core";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import { isLegacyMemorySurfaceDisabled } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
+import {
+  isLegacyMemorySurfaceDisabled,
+  prepareAuthorizedMemoryBackgroundDerivationHost,
+} from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import {
   DEFAULT_MEMORY_DEEP_DREAMING_LIMIT,
   DEFAULT_MEMORY_DEEP_DREAMING_MAX_PROMOTED_SNIPPET_TOKENS,
@@ -59,13 +62,19 @@ const constants = {
 };
 const { createTempWorkspace } = createMemoryCoreTestHarness();
 const isLegacyMemorySurfaceDisabledMock = vi.mocked(isLegacyMemorySurfaceDisabled);
+const prepareAuthorizedMemoryBackgroundDerivationHostMock = vi.mocked(
+  prepareAuthorizedMemoryBackgroundDerivationHost,
+);
 
 isLegacyMemorySurfaceDisabledMock.mockReturnValue(false);
+prepareAuthorizedMemoryBackgroundDerivationHostMock.mockResolvedValue(undefined);
 
 afterEach(() => {
   resetSystemEventsForTest();
   isLegacyMemorySurfaceDisabledMock.mockReset();
   isLegacyMemorySurfaceDisabledMock.mockReturnValue(false);
+  prepareAuthorizedMemoryBackgroundDerivationHostMock.mockReset();
+  prepareAuthorizedMemoryBackgroundDerivationHostMock.mockResolvedValue(undefined);
 });
 
 function clearInternalHooks(): void {}
@@ -1685,10 +1694,26 @@ describe("gateway startup reconciliation", () => {
     }
   });
 
-  it("does not reconcile or sweep legacy dreaming for a cut-over trigger", async () => {
+  it("derives one scoped artifact without entering the legacy workspace sweep for a cut-over trigger", async () => {
     clearInternalHooks();
     isLegacyMemorySurfaceDisabledMock.mockImplementation((agentId) => agentId === "main");
     runDreamingSweepPhasesMock.mockClear();
+    const collectSources = vi.fn().mockResolvedValue([
+      { text: "SCOPED_DREAMING_SOURCE_SENTINEL", path: "memory/scoped.md" },
+    ]);
+    const commit = vi.fn().mockResolvedValue({
+      version: 1,
+      mutationId: "scoped-dream",
+      status: "committed",
+      policyRevision: "policy-1",
+      committedAt: new Date().toISOString(),
+    });
+    prepareAuthorizedMemoryBackgroundDerivationHostMock.mockResolvedValue({
+      search: vi.fn(),
+      read: vi.fn(),
+      collectSources,
+      commit,
+    });
     const { api, harness, onMock } = createDreamingTestContext();
 
     try {
@@ -1706,10 +1731,17 @@ describe("gateway startup reconciliation", () => {
 
       expect(result).toEqual({
         handled: true,
-        reason: "memory-core: short-term dreaming unavailable for isolated memory",
+        reason: "memory-core: scoped dreaming completed",
       });
-      expect(harness.addCalls).toHaveLength(0);
-      expect(harness.listCalls).toBe(cronCallsBeforeTrigger);
+      expect(harness.listCalls).toBeGreaterThanOrEqual(cronCallsBeforeTrigger);
+      expect(prepareAuthorizedMemoryBackgroundDerivationHostMock).toHaveBeenCalledWith({
+        agentId: "main",
+        purpose: "dreaming",
+      });
+      expect(collectSources).toHaveBeenCalledOnce();
+      expect(commit).toHaveBeenCalledWith({
+        content: "# Dreaming consolidation\n\nSCOPED_DREAMING_SOURCE_SENTINEL",
+      });
       expect(runDreamingSweepPhasesMock).not.toHaveBeenCalled();
     } finally {
       await triggerGatewayStop(onMock).catch(() => undefined);

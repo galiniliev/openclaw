@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { logWarn } from "../logger.js";
 import type {
   AuthorizedMemoryVirtualView,
@@ -13,6 +14,7 @@ import type {
   MemoryWriteResult,
   AuthorizedMemoryRuntime,
   AuthorizedSealedCompactionArtifact,
+  AuthorizedResourceDerivationPurpose,
   AuthorizedTranscriptDerivationSource,
 } from "../memory-host-sdk/host/authorization.js";
 import type {
@@ -58,10 +60,20 @@ export const MEMORY_INVOCATION_UNAVAILABLE: MemoryInvocationUnavailable = Object
 });
 
 const memoryReadInvocationBrand: unique symbol = Symbol("openclaw.memory-read-invocation");
+const memoryDerivationInvocationBrand: unique symbol = Symbol("openclaw.memory-derivation-invocation");
 const memoryWriteInvocationBrand: unique symbol = Symbol("openclaw.memory-write-invocation");
 
 export type AuthorizedMemoryReadInvocation = Readonly<{
   readonly [memoryReadInvocationBrand]: true;
+}>;
+
+/**
+ * Opaque, single-plan resource derivation. Its source handles and destination
+ * are retained privately so a plugin cannot turn one authorized read into a
+ * differently scoped write.
+ */
+export type AuthorizedMemoryDerivationInvocation = Readonly<{
+  readonly [memoryDerivationInvocationBrand]: true;
 }>;
 
 /** Opaque host-owned write continuation; a caller cannot supply context or a selected runtime. */
@@ -87,6 +99,17 @@ type InvocationState = Readonly<{
   runExposureRevisions: Set<string>;
 }>;
 
+type DerivationInvocationState = Omit<InvocationState, "context" | "plan" | "runtime"> &
+  Readonly<{
+    context: MemoryContentAccessContext<"derive">;
+    plan: AuthorizedMemoryContentPlan<"derive">;
+    runtime: Readonly<AuthorizedMemoryRuntime>;
+    /** Every resource whose snippet or text reached the derivation model. */
+    observedSourceHandles: Map<string, AuthorizedResourceHandle>;
+  }>;
+
+type ContentInvocationState = InvocationState | DerivationInvocationState;
+
 type ReadInvocationState = Omit<InvocationState, "context" | "plan"> &
   Readonly<{
     context: MemoryContentAccessContext<"read">;
@@ -96,6 +119,7 @@ type ReadInvocationState = Omit<InvocationState, "context" | "plan"> &
 const VIRTUAL_ROOT_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 
 const invocationStates = new WeakMap<object, InvocationState>();
+const derivationInvocationStates = new WeakMap<object, DerivationInvocationState>();
 
 type WriteInvocationState = Readonly<{
   trustedContext: TrustedMemoryAccessContext;
@@ -171,9 +195,7 @@ function readCurrentWriteContext(state: WriteInvocationState): MemoryAccessConte
   return current;
 }
 
-function readCurrentContext(
-  state: InvocationState,
-): MemoryContentAccessContext | undefined {
+function readCurrentContext(state: ContentInvocationState): MemoryContentAccessContext | undefined {
   const current = materializeTrustedMemoryAccessContext(state.trustedContext);
   if (!current || (current.operation !== "read" && current.operation !== "derive")) {
     return undefined;
@@ -202,12 +224,18 @@ function isReadContentContext(
   return context.operation === "read";
 }
 
-function isReadInvocationState(state: InvocationState): state is ReadInvocationState {
+function isReadInvocationState(state: ContentInvocationState): state is ReadInvocationState {
   return state.context.operation === "read" && state.plan.operation === "read";
 }
 
+function isDerivationInvocationState(
+  state: ContentInvocationState,
+): state is DerivationInvocationState {
+  return state.context.operation === "derive" && state.plan.operation === "derive";
+}
+
 function validateEnvelope<T>(params: {
-  state: InvocationState;
+  state: ContentInvocationState;
   context: MemoryContentAccessContext;
   expectedRevisionHandles: readonly string[];
   envelope: AuthorizedMemoryResultEnvelope<T>;
@@ -260,7 +288,7 @@ function validateEnvelope<T>(params: {
 }
 
 function mergeEnvelope(
-  state: InvocationState,
+  state: ContentInvocationState,
   envelope: AuthorizedMemoryResultEnvelope<unknown>,
 ): void {
   const { exposureReceipt, egressReceipt } = envelope;
@@ -274,7 +302,7 @@ function mergeEnvelope(
 }
 
 function readTranscriptExposure(params: {
-  state: InvocationState;
+  state: ContentInvocationState;
   context: MemoryContentAccessContext;
   pendingEnvelope?: AuthorizedMemoryResultEnvelope<unknown>;
 }) {
@@ -318,7 +346,7 @@ function readTranscriptExposure(params: {
  * this broker. A recording failure leaves the invocation state unchanged and fails the read closed.
  */
 function recordEnvelopeExposure(params: {
-  state: InvocationState;
+  state: ContentInvocationState;
   context: MemoryContentAccessContext;
   envelope: AuthorizedMemoryResultEnvelope<unknown>;
 }): void {
@@ -344,8 +372,10 @@ function recordEnvelopeExposure(params: {
   mergeEnvelope(params.state, params.envelope);
 }
 
-function readState(invocation: AuthorizedMemoryReadInvocation): InvocationState | undefined {
-  return invocationStates.get(invocation);
+function readState(
+  invocation: AuthorizedMemoryReadInvocation | AuthorizedMemoryDerivationInvocation,
+): ContentInvocationState | undefined {
+  return invocationStates.get(invocation) ?? derivationInvocationStates.get(invocation);
 }
 
 function canonicalizeAuthorizedVirtualView(params: {
@@ -468,7 +498,7 @@ async function createAuthorizedMemoryContentInvocation(params: {
         runtime: admission.runtime,
         ...(admission.runtime.virtualView ? { virtualView: admission.runtime.virtualView } : {}),
         virtualViews: new Map(),
-        handles: new Map(),
+        handles: new Map(plan.bootstrapResourceHandles.map((handle) => [handle.handleId, handle])),
         sourcePolicySetIds: new Set<string>(),
         exposedRevisionHandles: new Set<string>(),
         exposureReceiptIds: new Set<string>(),
@@ -491,14 +521,60 @@ export async function createAuthorizedMemoryReadInvocation(params: {
 }
 
 /**
- * Creates an opaque content invocation for a derivation. Its content operations use the derive
- * plan end to end, rather than checking derive once and then falling back to a read-only view.
+ * Creates one opaque resource-derivation invocation. Search, exact reads, and
+ * the eventual write all retain this same plan, so a source handle cannot be
+ * replayed through a separately authorized destination plan.
  */
 export async function createAuthorizedMemoryDeriveInvocation(params: {
   context: TrustedMemoryAccessContext;
   capability?: MemoryPluginCapability;
-}): Promise<AuthorizedMemoryReadInvocation | MemoryInvocationUnavailable> {
-  return await createAuthorizedMemoryContentInvocation({ ...params, operation: "derive" });
+}): Promise<AuthorizedMemoryDerivationInvocation | MemoryInvocationUnavailable> {
+  const context = materializeTrustedMemoryAccessContext(params.context);
+  if (!context || context.operation !== "derive") {
+    logMemoryInvocationDiagnostic("materialization-rejected");
+    return MEMORY_INVOCATION_UNAVAILABLE;
+  }
+  const capability =
+    params.capability ??
+    resolveSelectedMemoryCapabilityRegistration(requireActivePluginRegistry())?.capability;
+  const admission = await admitMemoryAuthorizationRuntime(capability);
+  if (!admission.ok) {
+    logMemoryInvocationDiagnostic("admission-rejected");
+    return MEMORY_INVOCATION_UNAVAILABLE;
+  }
+  try {
+    const authorizationStartedAtMs = Date.now();
+    const plan = (await admission.runtime.authorize(context)) as AuthorizedMemoryContentPlan<"derive">;
+    // A derivation can have exactly one representable destination. Filtering a
+    // multi-store result after model exposure would still launder its context.
+    if (!isCurrentPlan({ context, plan, nowMs: Date.now() }) || plan.mounts.length !== 1) {
+      logMemoryInvocationDiagnostic("invalid-plan");
+      return MEMORY_INVOCATION_UNAVAILABLE;
+    }
+    const invocation = Object.freeze({}) as AuthorizedMemoryDerivationInvocation;
+    derivationInvocationStates.set(
+      invocation,
+      Object.freeze({
+        trustedContext: params.context,
+        context,
+        plan,
+        authorizationStartedAtMs,
+        runtime: admission.runtime,
+        virtualViews: new Map(),
+        handles: new Map(plan.bootstrapResourceHandles.map((handle) => [handle.handleId, handle])),
+        sourcePolicySetIds: new Set<string>(),
+        exposedRevisionHandles: new Set<string>(),
+        exposureReceiptIds: new Set<string>(),
+        egressReceiptIds: new Set<string>(),
+        runExposureRevisions: new Set<string>(),
+        observedSourceHandles: new Map(),
+      }),
+    );
+    return invocation;
+  } catch {
+    logMemoryInvocationDiagnostic("authorization-failed");
+    return MEMORY_INVOCATION_UNAVAILABLE;
+  }
 }
 
 /**
@@ -568,6 +644,115 @@ export async function writeAuthorizedMemoryForInvocation(params: {
     logMemoryInvocationDiagnostic("authorization-failed");
     return MEMORY_INVOCATION_UNAVAILABLE;
   }
+}
+
+function deriveMutationId(params: {
+  content: string;
+  purpose: AuthorizedResourceDerivationPurpose;
+  sourceHandles: readonly AuthorizedResourceHandle[];
+}): string {
+  const sourceRevisions = params.sourceHandles.map((handle) => handle.resourceRevision).toSorted();
+  return `mderive1_${createHash("sha256")
+    .update(params.purpose)
+    .update("\0")
+    .update(sourceRevisions.join("\0"))
+    .update("\0")
+    .update(params.content)
+    .digest("base64url")}`;
+}
+
+/**
+ * Commits a resource-derived revision from exactly the handles whose content
+ * this invocation exposed. The caller supplies only output bytes and a
+ * purpose fixed by its host; no store, audience, parent, or policy input can
+ * retarget the mutation.
+ */
+export async function commitAuthorizedMemoryDerivationForInvocation(params: {
+  invocation: AuthorizedMemoryDerivationInvocation;
+  content: string;
+  contentType?: "markdown" | "text" | "json";
+  purpose: AuthorizedResourceDerivationPurpose;
+}): Promise<MemoryWriteResult | MemoryInvocationUnavailable> {
+  const state = derivationInvocationStates.get(params.invocation);
+  const context = state ? readCurrentContext(state) : undefined;
+  const sourceHandles = state ? [...state.observedSourceHandles.values()] : [];
+  if (
+    !state ||
+    !context ||
+    context.operation !== "derive" ||
+    !isCurrentPlan({ context, plan: state.plan, nowMs: Date.now() }) ||
+    sourceHandles.length === 0
+  ) {
+    return MEMORY_INVOCATION_UNAVAILABLE;
+  }
+  try {
+    const mutationId = deriveMutationId({
+      content: params.content,
+      purpose: params.purpose,
+      sourceHandles,
+    });
+    return await state.runtime.writeAuthorized({
+      context,
+      plan: state.plan,
+      mutation: {
+        version: 1,
+        kind: "derive",
+        derivationPurpose: params.purpose,
+        mutationId,
+        idempotencyKey: mutationId,
+        content: params.content,
+        contentType: params.contentType ?? "markdown",
+        sourceHandles,
+      },
+    });
+  } catch {
+    logMemoryInvocationDiagnostic("authorization-failed");
+    return MEMORY_INVOCATION_UNAVAILABLE;
+  }
+}
+
+const MAXIMUM_DERIVATION_SOURCE_CHARACTERS = 32_000;
+
+/**
+ * Reads the selected runtime's bounded derive bootstrap through the same
+ * receipt-recording path as an interactive exact read. The bootstrap handles
+ * never leave this core-owned invocation, so a plugin cannot enumerate another
+ * store or retain a continuation beyond the plan lifetime.
+ */
+export async function collectAuthorizedMemoryDerivationSources(params: {
+  invocation: AuthorizedMemoryDerivationInvocation;
+  signal?: AbortSignal;
+}): Promise<readonly MemoryReadResult[] | MemoryInvocationUnavailable> {
+  const state = derivationInvocationStates.get(params.invocation);
+  const context = state ? readCurrentContext(state) : undefined;
+  if (
+    !state ||
+    !context ||
+    context.operation !== "derive" ||
+    !isCurrentPlan({ context, plan: state.plan, nowMs: Date.now() })
+  ) {
+    return MEMORY_INVOCATION_UNAVAILABLE;
+  }
+  const sources: MemoryReadResult[] = [];
+  let remainingCharacters = MAXIMUM_DERIVATION_SOURCE_CHARACTERS;
+  for (const handle of state.plan.bootstrapResourceHandles) {
+    if (params.signal?.aborted || remainingCharacters <= 0) {
+      break;
+    }
+    const result = await readAuthorizedMemoryForInvocation({
+      invocation: params.invocation,
+      handleId: handle.handleId,
+      from: 1,
+      lines: 200,
+    });
+    if ("unavailable" in result) {
+      return MEMORY_INVOCATION_UNAVAILABLE;
+    }
+    const text = result.text.slice(0, remainingCharacters);
+    remainingCharacters -= text.length;
+    sources.push(Object.freeze({ ...result, text }));
+  }
+  return Object.freeze(sources);
 }
 
 /**
@@ -692,7 +877,7 @@ export async function readAuthorizedMemoryVirtualFile(params: {
 }
 
 export async function searchAuthorizedMemoryForInvocation(params: {
-  invocation: AuthorizedMemoryReadInvocation;
+  invocation: AuthorizedMemoryReadInvocation | AuthorizedMemoryDerivationInvocation;
   query: string;
   sources?: readonly MemorySource[];
   limit?: number;
@@ -731,6 +916,11 @@ export async function searchAuthorizedMemoryForInvocation(params: {
     recordEnvelopeExposure({ state, context, envelope });
     const results = envelope.value.map((result) => {
       state.handles.set(result.resourceHandle.handleId, result.resourceHandle);
+      if (isDerivationInvocationState(state)) {
+        // A snippet is model-visible source material too, even when the model
+        // does not subsequently request its full text.
+        state.observedSourceHandles.set(result.resourceHandle.handleId, result.resourceHandle);
+      }
       const { resourceHandle: _resourceHandle, ...safe } = result;
       return Object.freeze({ ...safe, handleId: result.resourceHandle.handleId });
     });
@@ -742,7 +932,7 @@ export async function searchAuthorizedMemoryForInvocation(params: {
 }
 
 export async function readAuthorizedMemoryForInvocation(params: {
-  invocation: AuthorizedMemoryReadInvocation;
+  invocation: AuthorizedMemoryReadInvocation | AuthorizedMemoryDerivationInvocation;
   handleId: string;
   from?: number;
   lines?: number;
@@ -777,6 +967,9 @@ export async function readAuthorizedMemoryForInvocation(params: {
       return MEMORY_INVOCATION_UNAVAILABLE;
     }
     recordEnvelopeExposure({ state, context, envelope });
+    if (isDerivationInvocationState(state)) {
+      state.observedSourceHandles.set(handle.handleId, handle);
+    }
     return Object.freeze({ ...envelope.value });
   } catch {
     return MEMORY_INVOCATION_UNAVAILABLE;

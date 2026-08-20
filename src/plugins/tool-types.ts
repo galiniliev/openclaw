@@ -64,6 +64,24 @@ export type AuthorizedMemoryWriteHost = Readonly<{
   }) => Promise<MemoryWriteResult | AuthorizedMemoryReadUnavailable>;
 }>;
 
+/**
+ * Host-owned source-and-output capability for a single scoped derivation.
+ * `commit` can retain only material this exact host already exposed; callers
+ * never select a store, audience, immutable parent, or policy set.
+ */
+export type AuthorizedMemoryResourceDerivationHost = AuthorizedMemoryReadHost &
+  Readonly<{
+    /** Bounded, same-store source material whose reads are recorded before release. */
+    collectSources: (params?: { signal?: AbortSignal }) => Promise<
+      readonly MemoryReadResult[] | AuthorizedMemoryReadUnavailable
+    >;
+    commit: (params: {
+      content: string;
+      contentType?: "markdown" | "text" | "json";
+      signal?: AbortSignal;
+    }) => Promise<MemoryWriteResult | AuthorizedMemoryReadUnavailable>;
+  }>;
+
 /** Trusted execution context passed to plugin-owned agent tool factories. */
 export type OpenClawPluginToolContext = {
   config?: OpenClawConfig;

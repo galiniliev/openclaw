@@ -543,13 +543,12 @@ describe("builtin scoped authorized runtime", () => {
       mutation: {
         version: 1,
         kind: "derive",
-        derivationPurpose: "flush",
+        derivationPurpose: "dreaming",
         mutationId: "derive-output",
         idempotencyKey: "derive-output-request",
         content: "DERIVED_OUTPUT_SENTINEL",
         contentType: "markdown",
         sourceHandles: [source.resourceHandle],
-        sourcePolicySetId: searched.exposureReceipt.sourcePolicySetId,
       },
     });
     const derivedRevisionId = derived.resourceHandle?.resourceRevision;
@@ -567,7 +566,7 @@ describe("builtin scoped authorized runtime", () => {
         {
           parent_kind: "resource-revision",
           parent_id: source.resourceHandle.resourceRevision,
-          relation_kind: "derived-from",
+          relation_kind: "dreamed-from",
         },
       ]);
       expect(
@@ -591,6 +590,262 @@ describe("builtin scoped authorized runtime", () => {
       }),
     ).toBeUndefined();
     expect(plan.mounts[0]?.capabilities).toEqual(["retrieve", "read", "derive"]);
+  });
+
+  it("keeps derived output out of the next dreaming bootstrap and records promotion lineage", async () => {
+    const principalId = "promotion-owner";
+    const store = createBuiltinScopedMemoryStore({
+      agentId: "main",
+      scopeKind: "user",
+      audienceKind: "user",
+      audienceId: principalId,
+      authorityKind: "user",
+      authorityOwnerId: principalId,
+      defaultCapabilities: ["retrieve", "read", "derive"],
+      actor: { kind: "human", id: principalId },
+      reason: "promotion source fixture",
+    });
+    const source = createBuiltinScopedMemoryResource({
+      agentId: "main",
+      store,
+      logicalLocator: "source.md",
+      content: "PROMOTION_SOURCE_SENTINEL",
+      actor: { kind: "human", id: principalId },
+    });
+    const context = {
+      ...createContext(principalId),
+      operation: "derive" as const,
+    } satisfies MemoryContentAccessContext<"derive">;
+    const plan = await builtinScopedMemoryAuthorizedRuntime.authorize(context);
+    const searched = await builtinScopedMemoryAuthorizedRuntime.searchAuthorized({
+      context,
+      plan,
+      query: "PROMOTION_SOURCE_SENTINEL",
+      limit: 1,
+    });
+    const sourceHit = searched.value[0];
+    if (!sourceHit) {
+      throw new Error("fixture expected a promotion source");
+    }
+    const promoted = await builtinScopedMemoryAuthorizedRuntime.writeAuthorized({
+      context,
+      plan,
+      mutation: {
+        version: 1,
+        kind: "derive",
+        derivationPurpose: "promotion",
+        mutationId: "promotion-output",
+        idempotencyKey: "promotion-output-request",
+        content: "PROMOTED_OUTPUT_SENTINEL",
+        contentType: "markdown",
+        sourceHandles: [sourceHit.resourceHandle],
+      },
+    });
+    const promotedRevisionId = promoted.resourceHandle?.resourceRevision;
+    if (!promotedRevisionId) {
+      throw new Error("fixture expected a promoted revision");
+    }
+
+    withScopedMemoryDatabase("main", (database) => {
+      expect(
+        database
+          .prepare(
+            "SELECT parent_kind, parent_id, relation_kind FROM memory_lineage_edges WHERE child_revision_id = ?",
+          )
+          .all(promotedRevisionId),
+      ).toEqual([
+        {
+          parent_kind: "resource-revision",
+          parent_id: source.revisionId,
+          relation_kind: "promoted-from",
+        },
+      ]);
+    });
+
+    const nextPlan = await builtinScopedMemoryAuthorizedRuntime.authorize(context);
+    const bootstrapRevisionIds = nextPlan.bootstrapResourceHandles.map(
+      (handle) => handle.resourceRevision,
+    );
+    expect(bootstrapRevisionIds).toContain(source.revisionId);
+    expect(bootstrapRevisionIds).not.toContain(promotedRevisionId);
+  });
+
+  it("does not activate a derivation after its source tombstones during finalization", async () => {
+    const principalId = "activation-race-owner";
+    const store = createBuiltinScopedMemoryStore({
+      agentId: "main",
+      scopeKind: "user",
+      audienceKind: "user",
+      audienceId: principalId,
+      authorityKind: "user",
+      authorityOwnerId: principalId,
+      defaultCapabilities: ["retrieve", "read", "derive"],
+      actor: { kind: "human", id: principalId },
+      reason: "activation race source fixture",
+    });
+    const source = createBuiltinScopedMemoryResource({
+      agentId: "main",
+      store,
+      logicalLocator: "source.md",
+      content: "ACTIVATION_RACE_SOURCE_SENTINEL",
+      actor: { kind: "human", id: principalId },
+    });
+    const context = {
+      ...createContext(principalId),
+      operation: "derive" as const,
+    } satisfies MemoryContentAccessContext<"derive">;
+    const plan = await builtinScopedMemoryAuthorizedRuntime.authorize(context);
+    const searched = await builtinScopedMemoryAuthorizedRuntime.searchAuthorized({
+      context,
+      plan,
+      query: "ACTIVATION_RACE_SOURCE_SENTINEL",
+      limit: 1,
+    });
+    const sourceHit = searched.value[0];
+    if (!sourceHit) {
+      throw new Error("fixture expected an activation-race source");
+    }
+    const originalRenameSync = fs.renameSync;
+    const renameSpy = vi.spyOn(fs, "renameSync").mockImplementation((oldPath, newPath) => {
+      originalRenameSync(oldPath, newPath);
+      setBuiltinScopedMemoryRevisionLifecycle({
+        agentId: "main",
+        revisionId: source.revisionId,
+        lifecycleState: "tombstoned",
+      });
+    });
+    try {
+      await expect(
+        builtinScopedMemoryAuthorizedRuntime.writeAuthorized({
+          context,
+          plan,
+          mutation: {
+            version: 1,
+            kind: "derive",
+            derivationPurpose: "dreaming",
+            mutationId: "activation-race-output",
+            idempotencyKey: "activation-race-output-request",
+            content: "ACTIVATION_RACE_OUTPUT_SENTINEL",
+            contentType: "markdown",
+            sourceHandles: [sourceHit.resourceHandle],
+          },
+        }),
+      ).rejects.toThrow("unavailable");
+    } finally {
+      renameSpy.mockRestore();
+    }
+
+    const recoveredPlan = await builtinScopedMemoryAuthorizedRuntime.authorize(context);
+    const recovered = await builtinScopedMemoryAuthorizedRuntime.searchAuthorized({
+      context,
+      plan: recoveredPlan,
+      query: "ACTIVATION_RACE_OUTPUT_SENTINEL",
+      limit: 1,
+    });
+    expect(recovered.value).toEqual([]);
+  });
+
+  it("admits one scoped derivation store for each private or group subject", async () => {
+    const aliceStore = createBuiltinScopedMemoryStore({
+      agentId: "main",
+      scopeKind: "user",
+      audienceKind: "user",
+      audienceId: "alice",
+      authorityKind: "user",
+      authorityOwnerId: "alice",
+      defaultCapabilities: ["retrieve", "read", "derive"],
+      actor: { kind: "human", id: "alice" },
+      reason: "Alice derivation fixture",
+    });
+    const bobStore = createBuiltinScopedMemoryStore({
+      agentId: "main",
+      scopeKind: "user",
+      audienceKind: "user",
+      audienceId: "bob",
+      authorityKind: "user",
+      authorityOwnerId: "bob",
+      defaultCapabilities: ["retrieve", "read", "derive"],
+      actor: { kind: "human", id: "bob" },
+      reason: "Bob derivation fixture",
+    });
+    const groupStore = createBuiltinScopedMemoryStore({
+      agentId: "main",
+      scopeKind: "conversation",
+      audienceKind: "conversation",
+      audienceId: "telegram-group-derive",
+      authorityKind: "conversation",
+      authorityOwnerId: "telegram-group-derive",
+      defaultCapabilities: ["retrieve", "read", "derive"],
+      actor: { kind: "unattributed" },
+      reason: "group derivation fixture",
+    });
+    const alice = createBuiltinScopedMemoryResource({
+      agentId: "main",
+      store: aliceStore,
+      logicalLocator: "alice.md",
+      content: "ALICE_DERIVE_ONLY",
+      actor: { kind: "human", id: "alice" },
+    });
+    const bob = createBuiltinScopedMemoryResource({
+      agentId: "main",
+      store: bobStore,
+      logicalLocator: "bob.md",
+      content: "BOB_DERIVE_ONLY",
+      actor: { kind: "human", id: "bob" },
+    });
+    const group = createBuiltinScopedMemoryResource({
+      agentId: "main",
+      store: groupStore,
+      logicalLocator: "group.md",
+      content: "GROUP_DERIVE_ONLY",
+      actor: { kind: "unattributed" },
+    });
+    const aliceContext = {
+      ...createContext("alice"),
+      operation: "derive" as const,
+    } satisfies MemoryContentAccessContext<"derive">;
+    const bobContext = {
+      ...createContext("bob"),
+      operation: "derive" as const,
+    } satisfies MemoryContentAccessContext<"derive">;
+    const groupContext = {
+      ...createContext("group-sender"),
+      sessionKey: "agent:main:telegram:group:derive",
+      sessionId: "group-derive-session",
+      subject: {
+        version: 1 as const,
+        kind: "conversation" as const,
+        conversationPrincipalId: "telegram-group-derive",
+        channel: "telegram",
+        accountId: "default",
+      },
+      actor: {
+        kind: "unattributed" as const,
+        transportAuditRef: "group-derive-audit",
+        evidenceRevision: "group-derive-revision",
+      },
+      verifiedPrincipals: [],
+      delivery: {
+        sinkKind: "channel" as const,
+        audiences: [{ kind: "conversation" as const, id: "telegram-group-derive" }],
+        egressCapabilityIds: ["reply.final"],
+        egressRegistryRevision: "egress-group-derive",
+        deliveryRevision: "delivery-group-derive",
+      },
+      operation: "derive" as const,
+    } satisfies MemoryContentAccessContext<"derive">;
+
+    for (const [context, source] of [
+      [aliceContext, alice],
+      [bobContext, bob],
+      [groupContext, group],
+    ] as const) {
+      const plan = await builtinScopedMemoryAuthorizedRuntime.authorize(context);
+      expect(plan.mounts).toHaveLength(1);
+      expect(plan.bootstrapResourceHandles).toEqual([
+        expect.objectContaining({ resourceRevision: source.revisionId }),
+      ]);
+    }
   });
 
   it("records transcript policy-set lineage for an authorized compaction derivation", async () => {

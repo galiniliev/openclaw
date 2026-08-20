@@ -418,6 +418,9 @@ export type AuthorizedTranscriptDerivationSource = Readonly<{
   deliveryAudiencesJson: string;
 }>;
 
+/** The immutable resource-parent edge names the durable artifact it produced. */
+export type AuthorizedResourceDerivationPurpose = "dreaming" | "promotion";
+
 /** The immutable transcript-policy edge names the durable artifact it produced. */
 export type AuthorizedTranscriptDerivationPurpose = "flush" | "compaction";
 
@@ -460,18 +463,17 @@ export type AuthorizedMemoryMutation =
   | (AuthorizedMemoryContentMutation &
       Readonly<{
         kind: "derive";
+        /** Internal broker data; an opaque derivation host, never plugin/model input, supplies it. */
+        sourceHandles: readonly AuthorizedResourceHandle[];
+        derivationPurpose: AuthorizedResourceDerivationPurpose;
+      }>)
+  | (AuthorizedMemoryContentMutation &
+      Readonly<{
+        kind: "derive";
+        transcriptSource: AuthorizedTranscriptDerivationSource;
+        sourcePolicySetId: string;
         derivationPurpose: AuthorizedTranscriptDerivationPurpose;
-      }> &
-      (
-        | Readonly<{
-            sourceHandles: readonly AuthorizedResourceHandle[];
-            sourcePolicySetId: string;
-          }>
-        | Readonly<{
-            transcriptSource: AuthorizedTranscriptDerivationSource;
-            sourcePolicySetId: string;
-          }>
-      ))
+      }>)
   | (AuthorizedMemoryContentMutation &
       Readonly<{
         kind: "project" | "publish";

@@ -1528,27 +1528,38 @@ Focused existing tests:
 
 Phase 2C is complete only when all of the following are demonstrated:
 
-- [x] Every compaction, checkpoint, memory flush, dreaming output, promotion,
+- [ ] Every compaction, checkpoint, memory flush, dreaming output, promotion,
       export, and child-produced durable artifact identifies immutable parents
       and records lineage.
-- [x] `derive` authority is checked before source content enters a model
+- [ ] `derive` authority is checked before source content enters a model
       context.
-- [x] No unlabeled or policy-unrepresentable derived artifact is readable.
-- [x] Group compaction and flush remain channel-scoped; private compaction and
+- [ ] No unlabeled or policy-unrepresentable derived artifact is readable.
+- [ ] Group compaction and flush remain channel-scoped; private compaction and
       flush remain user-scoped; autonomous work remains agent-scoped or writes
       nothing.
-- [x] Mixed audiences are partitioned or denied and can never be widened by
+- [ ] Mixed audiences are partitioned or denied and can never be widened by
       model wording.
-- [x] Tombstoning/revoking an ancestor denies descendants immediately; any
+- [ ] Tombstoning/revoking an ancestor denies descendants immediately; any
       recomputation creates a new reviewed immutable revision.
-- [x] Dreaming and promotion run one authorized store at a time, and postbox or
+- [ ] Dreaming and promotion run one authorized store at a time, and postbox or
       quarantine content cannot auto-promote.
-- [x] Child agents receive only the intersection of parent view, task
+- [ ] Child agents receive only the intersection of parent view, task
       capability, session visibility, and current authority; cron, heartbeat,
       webhook, and system runs cannot recover private access from a session key.
-- [x] Compaction, flush, dreaming, lineage, revocation, delegation, and
+- [ ] Compaction, flush, dreaming, lineage, revocation, delegation, and
       interruption tests pass, including any dependency-specific contract
       checks required by the selected harness.
+
+#### Phase 2C current status
+
+Phase 2C is not complete. The earlier checkmarks were reset after source audit:
+cut-over agents deliberately disabled the legacy workspace dreaming path rather
+than replacing its Light/REM, daily-ingestion, promotion, consolidation, and
+repair behavior with an authorized scoped flow. The current repair establishes
+the missing narrow boundary for one-store background resource derivation, with
+opaque source handles, lineage, activation-time policy rechecks, and a refusal
+to recover a user subject for cron or heartbeat work. It is not evidence that
+every Phase 2C producer and interruption path above is complete.
 
 ### Phase 2C rollback
 

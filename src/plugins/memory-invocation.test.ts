@@ -36,6 +36,8 @@ vi.mock("../logger.js", () => ({
 
 const {
   MEMORY_INVOCATION_UNAVAILABLE,
+  collectAuthorizedMemoryDerivationSources,
+  commitAuthorizedMemoryDerivationForInvocation,
   createAuthorizedMemoryDeriveInvocation,
   createAuthorizedMemoryReadInvocation,
   createAuthorizedMemoryWriteInvocation,
@@ -773,6 +775,15 @@ describe("authorized memory read invocation", () => {
     const plan = {
       ...createPlan(),
       operation: "derive" as const,
+      mounts: [
+        {
+          version: 1 as const,
+          agentId: "main",
+          mountHandle: "derive-mount",
+          capabilities: ["retrieve", "read", "derive"] as const,
+          audienceRevision: "derive-audience",
+        },
+      ],
     };
     mocks.materialize.mockReturnValue(context);
     mocks.admit.mockResolvedValue({
@@ -977,6 +988,159 @@ describe("authorized memory read invocation", () => {
     });
     expect(admitted.materializeAuthorizedVirtualView).toHaveBeenCalledOnce();
     expect(replacement.materializeAuthorizedVirtualView).not.toHaveBeenCalled();
+  });
+});
+
+describe("authorized resource derivation invocation", () => {
+  afterEach(() => {
+    clearMemoryRunExposureForTest();
+    receiptSequence = 0;
+    mocks.admit.mockReset();
+    mocks.hydrateExposure.mockReset();
+    mocks.hydrateExposure.mockReturnValue(true);
+    mocks.materialize.mockReset();
+    mocks.persistExposure.mockReset();
+    mocks.persistExposure.mockReturnValue(true);
+  });
+
+  function createDeriveContext(): MemoryAccessContext & Readonly<{ operation: "derive" }> {
+    return { ...createContext(), operation: "derive" };
+  }
+
+  function createDerivePlan(
+    bootstrapResourceHandles: AuthorizedMemoryPlan["bootstrapResourceHandles"] = [],
+  ): AuthorizedMemoryPlan & Readonly<{ operation: "derive" }> {
+    return {
+      ...createPlan(),
+      operation: "derive",
+      mounts: [
+        {
+          version: 1,
+          agentId: "main",
+          mountHandle: "mount-derive",
+          capabilities: ["retrieve", "read", "derive"] as const,
+          audienceRevision: "audience-derive",
+        },
+      ],
+      bootstrapResourceHandles,
+    };
+  }
+
+  function createSourceHandle() {
+    return {
+      version: 1 as const,
+      handleId: "derive-source-1",
+      planId: "plan-1",
+      contextFingerprint: "fingerprint-1",
+      resourceRevision: "revision-1",
+      policyRevision: "policy-1",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+  }
+
+  it("rejects a multi-store derive plan before any source operation", async () => {
+    const plan = {
+      ...createDerivePlan(),
+      mounts: [
+        ...createDerivePlan().mounts,
+        {
+          version: 1 as const,
+          agentId: "main",
+          mountHandle: "mount-second",
+          capabilities: ["retrieve", "read", "derive"] as const,
+          audienceRevision: "audience-second",
+        },
+      ],
+    };
+    const runtime = {
+      authorize: vi.fn().mockResolvedValue(plan),
+      readAuthorized: vi.fn(),
+      searchAuthorized: vi.fn(),
+      writeAuthorized: vi.fn(),
+    };
+    mocks.materialize.mockReturnValue(createDeriveContext());
+    mocks.admit.mockResolvedValue({ ok: true, runtime });
+
+    await expect(
+      createAuthorizedMemoryDeriveInvocation({ context: {} as never }),
+    ).resolves.toBe(MEMORY_INVOCATION_UNAVAILABLE);
+    expect(runtime.readAuthorized).not.toHaveBeenCalled();
+    expect(runtime.searchAuthorized).not.toHaveBeenCalled();
+    expect(runtime.writeAuthorized).not.toHaveBeenCalled();
+  });
+
+  it("commits exactly the receipt-recorded bootstrap sources without caller policy input", async () => {
+    const handle = createSourceHandle();
+    const runtime = {
+      authorize: vi.fn().mockResolvedValue(createDerivePlan([handle])),
+      readAuthorized: vi
+        .fn()
+        .mockImplementation(async () => createEnvelope({ text: "scoped source", path: "memory/a.md" })),
+      searchAuthorized: vi.fn(),
+      writeAuthorized: vi.fn().mockResolvedValue({
+        version: 1,
+        mutationId: "committed-derive",
+        status: "committed",
+        policyRevision: "policy-1",
+        committedAt: new Date().toISOString(),
+      }),
+    };
+    mocks.materialize.mockReturnValue(createDeriveContext());
+    mocks.admit.mockResolvedValue({ ok: true, runtime });
+
+    const invocation = await createAuthorizedMemoryDeriveInvocation({ context: {} as never });
+    if (invocation === MEMORY_INVOCATION_UNAVAILABLE) {
+      throw new Error("fixture failed to create a derive invocation");
+    }
+    await expect(collectAuthorizedMemoryDerivationSources({ invocation })).resolves.toEqual([
+      { text: "scoped source", path: "memory/a.md" },
+    ]);
+    await expect(
+      commitAuthorizedMemoryDerivationForInvocation({
+        invocation,
+        content: "scoped consolidation",
+        purpose: "dreaming",
+      }),
+    ).resolves.toMatchObject({ status: "committed" });
+
+    expect(runtime.writeAuthorized).toHaveBeenCalledWith(
+      expect.objectContaining({
+        context: expect.objectContaining({ operation: "derive" }),
+        plan: expect.objectContaining({ planId: "plan-1" }),
+        mutation: expect.objectContaining({
+          kind: "derive",
+          derivationPurpose: "dreaming",
+          sourceHandles: [handle],
+        }),
+      }),
+    );
+    expect(runtime.writeAuthorized.mock.calls[0]?.[0].mutation).not.toHaveProperty(
+      "sourcePolicySetId",
+    );
+  });
+
+  it("does not write when this derive invocation has exposed no source content", async () => {
+    const runtime = {
+      authorize: vi.fn().mockResolvedValue(createDerivePlan()),
+      readAuthorized: vi.fn(),
+      searchAuthorized: vi.fn(),
+      writeAuthorized: vi.fn(),
+    };
+    mocks.materialize.mockReturnValue(createDeriveContext());
+    mocks.admit.mockResolvedValue({ ok: true, runtime });
+
+    const invocation = await createAuthorizedMemoryDeriveInvocation({ context: {} as never });
+    if (invocation === MEMORY_INVOCATION_UNAVAILABLE) {
+      throw new Error("fixture failed to create a derive invocation");
+    }
+    await expect(
+      commitAuthorizedMemoryDerivationForInvocation({
+        invocation,
+        content: "must not write",
+        purpose: "promotion",
+      }),
+    ).resolves.toBe(MEMORY_INVOCATION_UNAVAILABLE);
+    expect(runtime.writeAuthorized).not.toHaveBeenCalled();
   });
 });
 

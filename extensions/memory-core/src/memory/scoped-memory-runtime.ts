@@ -49,6 +49,7 @@ import { createScopedMemorySourcePolicySetId } from "./scoped-memory-store.js";
 
 const PLAN_TTL_MS = 60_000;
 const MAXIMUM_CANDIDATES_PER_RESULT = 12;
+const MAXIMUM_DERIVATION_BOOTSTRAP_RESOURCES = 24;
 
 type AuthorizedStore = Readonly<{
   storeId: string;
@@ -202,6 +203,55 @@ function listAuthorizedStores(params: {
   });
 }
 
+/**
+ * Derivation bootstrap is an internal, bounded inventory for one already
+ * authorized store. It carries opaque handles only; source bytes still cross
+ * the broker through `readAuthorized`, with an exposure receipt, one at a time.
+ */
+function listDerivationBootstrapRevisions(params: {
+  agentId: string;
+  stores: readonly AuthorizedStore[];
+}): readonly Readonly<{ revisionId: string; policyRevision: string }>[] {
+  if (params.stores.length !== 1) {
+    return [];
+  }
+  return withScopedMemoryDatabase(params.agentId, (database) => {
+    const db = getNodeSqliteKysely<ScopedMemoryDatabase>(database);
+    const nowMs = Date.now();
+    const rows = executeSqliteQuerySync(
+      database,
+      db
+        .selectFrom("memory_resource_revisions as revision")
+        .innerJoin("memory_resources as resource", "resource.resource_id", "revision.resource_id")
+        .leftJoin("memory_write_intents as derive_intent", (join) =>
+          join
+            .onRef("derive_intent.pending_revision_id", "=", "revision.revision_id")
+            .on("derive_intent.state", "=", "active")
+            .on("derive_intent.mutation_kind", "=", "derive"),
+        )
+        .select(["revision.revision_id", "revision.policy_revision_id"])
+        .where("resource.agent_id", "=", params.agentId)
+        .where("resource.store_id", "=", params.stores[0]!.storeId)
+        .where("revision.lifecycle_state", "=", "active")
+        .where((expressionBuilder) =>
+          expressionBuilder.or([
+            expressionBuilder("revision.expires_at", "is", null),
+            expressionBuilder("revision.expires_at", ">", nowMs),
+          ]),
+        )
+        .where("derive_intent.intent_id", "is", null)
+        .orderBy("revision.created_at", "desc")
+        .orderBy("revision.revision_id")
+        .limit(MAXIMUM_DERIVATION_BOOTSTRAP_RESOURCES),
+    ).rows;
+    return Object.freeze(
+      rows.map((row) =>
+        Object.freeze({ revisionId: row.revision_id, policyRevision: row.policy_revision_id }),
+      ),
+    );
+  });
+}
+
 function deleteExpiredPlans(nowMs: number): void {
   for (const [planId, state] of plans) {
     if (state.expiresAtMs <= nowMs) {
@@ -213,10 +263,31 @@ function deleteExpiredPlans(nowMs: number): void {
 function createPlan(context: MemoryAccessContext): PlanState {
   const nowMs = Date.now();
   deleteExpiredPlans(nowMs);
-  const stores = listAuthorizedStores({ context, nowMs });
+  const authorizedStores = listAuthorizedStores({ context, nowMs });
+  // A derivation model gets one representable audience/store, never a
+  // post-admission filtered subset of a multi-store authorized view.
+  const stores =
+    context.operation === "derive" && authorizedStores.length !== 1 ? [] : authorizedStores;
   const expiresAtMs = nowMs + PLAN_TTL_MS;
   const planId = `mplan1_${randomUUID()}`;
   const policyRevision = `mpr1_${hash(stores.map((store) => store.policyRevisionId))}`;
+  const bootstrapRevisions =
+    context.operation === "derive"
+      ? listDerivationBootstrapRevisions({ agentId: context.agentId, stores })
+      : [];
+  const bootstrapResourceHandles = Object.freeze(
+    bootstrapRevisions.map((revision) =>
+      Object.freeze({
+        version: 1 as const,
+        handleId: `mhandle1_${randomUUID()}`,
+        planId,
+        contextFingerprint: context.contextFingerprint,
+        resourceRevision: revision.revisionId,
+        policyRevision: revision.policyRevision,
+        expiresAt: new Date(expiresAtMs).toISOString(),
+      }),
+    ),
+  );
   const plan = Object.freeze({
     version: 1 as const,
     planId,
@@ -246,7 +317,7 @@ function createPlan(context: MemoryAccessContext): PlanState {
         }),
       ),
     ),
-    bootstrapResourceHandles: Object.freeze([]),
+    bootstrapResourceHandles,
     allowedEgressAudiences: Object.freeze([...context.delivery.audiences]),
     expiresAt: new Date(expiresAtMs).toISOString(),
   }) satisfies AuthorizedMemoryPlan;
@@ -256,7 +327,7 @@ function createPlan(context: MemoryAccessContext): PlanState {
     expiresAtMs,
     plan,
     stores,
-    handles: new Map(),
+    handles: new Map(bootstrapResourceHandles.map((handle) => [handle.handleId, handle])),
     exposureRevision: 0,
   });
 }
@@ -763,9 +834,8 @@ function resolveDerivationSources(params: {
   state: PlanState;
   targetAudience: AudienceRef;
   sourceHandles: readonly AuthorizedResourceHandle[];
-  sourcePolicySetId: string;
 }): readonly DerivationSource[] {
-  if (params.sourceHandles.length === 0 || !params.sourcePolicySetId.trim()) {
+  if (params.sourceHandles.length === 0) {
     throw new Error("authorized memory derivation is unavailable");
   }
   const db = getNodeSqliteKysely<ScopedMemoryDatabase>(params.database);
@@ -831,12 +901,6 @@ function resolveDerivationSources(params: {
     );
   }
   if (new Set(sources.map((source) => source.revisionId)).size !== sources.length) {
-    throw new Error("authorized memory derivation is unavailable");
-  }
-  const expectedPolicySetId = `mpset1_${hash(
-    sources.map((source) => `mps1_${source.policyRevisionId}`).toSorted(),
-  )}`;
-  if (params.sourcePolicySetId !== expectedPolicySetId) {
     throw new Error("authorized memory derivation is unavailable");
   }
   return Object.freeze(sources);
@@ -1550,9 +1614,12 @@ async function writeAuthorizedMutation(params: {
             state,
             targetAudience: store.audience,
             sourceHandles: params.mutation.sourceHandles,
-            sourcePolicySetId: params.mutation.sourcePolicySetId,
           })
         : [];
+    const resourceDerivationPurpose =
+      params.mutation.kind === "derive" && "sourceHandles" in params.mutation
+        ? params.mutation.derivationPurpose
+        : undefined;
     const transcriptDerivationSource =
       params.mutation.kind === "derive" && "transcriptSource" in params.mutation
         ? resolveTranscriptDerivationSource({
@@ -1872,7 +1939,8 @@ async function writeAuthorizedMutation(params: {
               child_revision_id: revisionId,
               parent_kind: "resource-revision",
               parent_id: source.revisionId,
-              relation_kind: "derived-from",
+              relation_kind:
+                resourceDerivationPurpose === "dreaming" ? "dreamed-from" : "promoted-from",
               created_at: nowMs,
             }),
           );
@@ -2004,7 +2072,6 @@ async function writeAuthorizedMutation(params: {
             state,
             targetAudience: currentStore.audience,
             sourceHandles: params.mutation.sourceHandles,
-            sourcePolicySetId: params.mutation.sourcePolicySetId,
           });
         } else if ("transcriptSource" in params.mutation) {
           resolveTranscriptDerivationSource({

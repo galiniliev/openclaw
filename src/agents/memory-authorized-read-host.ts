@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type {
   AuthorizedMemoryVirtualView,
   AuthorizedSealedCompactionArtifact,
+  AuthorizedResourceDerivationPurpose,
   AuthorizedTranscriptDerivationSource,
   AuthorizedTranscriptDerivationPurpose,
   MemoryAccessContext,
@@ -11,6 +12,8 @@ import { readAuthorizedTranscriptDerivation } from "../config/sessions/session-t
 import { isMemoryIsolationCutoverAgent } from "../plugins/memory-cutover.js";
 import {
   MEMORY_INVOCATION_UNAVAILABLE,
+  commitAuthorizedMemoryDerivationForInvocation,
+  collectAuthorizedMemoryDerivationSources,
   createAuthorizedMemoryDeriveInvocation,
   createAuthorizedMemoryReadInvocation,
   createAuthorizedMemoryWriteInvocation,
@@ -20,9 +23,14 @@ import {
   searchAuthorizedMemoryForInvocation,
   stageAuthorizedMemorySealedCompactionForInvocation,
   writeAuthorizedMemoryForInvocation,
+  type AuthorizedMemoryDerivationInvocation,
   type AuthorizedMemoryReadInvocation,
 } from "../plugins/memory-invocation.js";
-import type { AuthorizedMemoryReadHost, AuthorizedMemoryWriteHost } from "../plugins/tool-types.js";
+import type {
+  AuthorizedMemoryReadHost,
+  AuthorizedMemoryResourceDerivationHost,
+  AuthorizedMemoryWriteHost,
+} from "../plugins/tool-types.js";
 import {
   captureTrustedMemoryAccessFacts,
   createTrustedMemoryAccessContext,
@@ -109,6 +117,8 @@ type AuthorizedMemoryHostParams = {
   deliveryContext?: DeliveryContext;
   messageChannel?: string;
   agentAccountId?: string;
+  /** Background derivation can use only an active operational subject, never a remembered user session. */
+  background?: true;
 };
 
 /** Reissues identity and delivery evidence for each operation; read authority never implies write. */
@@ -131,6 +141,14 @@ function createTrustedMemoryHostContext(
     return undefined;
   }
   const { context } = session;
+  if (
+    params.background === true &&
+    context.subject.kind !== "agent" &&
+    context.subject.kind !== "service" &&
+    context.subject.kind !== "system"
+  ) {
+    return undefined;
+  }
   const delivery = deliveryFacts({
     context,
     deliveryContext: params.deliveryContext,
@@ -242,7 +260,11 @@ function createAuthorizedMemoryContentHost(
     return undefined;
   }
   let invocation:
-    | Promise<AuthorizedMemoryReadInvocation | typeof MEMORY_INVOCATION_UNAVAILABLE>
+    | Promise<
+        | AuthorizedMemoryReadInvocation
+        | AuthorizedMemoryDerivationInvocation
+        | typeof MEMORY_INVOCATION_UNAVAILABLE
+      >
     | undefined;
   const getInvocation = () =>
     (invocation ??=
@@ -307,6 +329,60 @@ export function createAuthorizedMemoryDerivationHost(
   params: AuthorizedMemoryHostParams,
 ): AuthorizedMemoryReadHost | undefined {
   return createAuthorizedMemoryContentHost(params, "derive");
+}
+
+/**
+ * Prepares one background resource derivation before any source bytes enter a
+ * model context. The durable work item is rechecked as an operational subject,
+ * so a cron/heartbeat cannot recover private memory merely by retaining a
+ * session key.
+ */
+export async function prepareAuthorizedMemoryBackgroundDerivationHost(
+  params: Omit<AuthorizedMemoryHostParams, "background"> & Readonly<{
+      purpose: AuthorizedResourceDerivationPurpose;
+    }>,
+): Promise<AuthorizedMemoryResourceDerivationHost | undefined> {
+  const trusted = createTrustedMemoryHostContext({
+    ...params,
+    background: true,
+    operation: "derive",
+  });
+  if (!trusted) {
+    return undefined;
+  }
+  const invocation = await createAuthorizedMemoryDeriveInvocation({ context: trusted });
+  if ("unavailable" in invocation) {
+    return undefined;
+  }
+  return Object.freeze({
+    async search(search) {
+      const result = await searchAuthorizedMemoryForInvocation({ invocation, ...search });
+      return "unavailable" in result ? MEMORY_INVOCATION_UNAVAILABLE : result;
+    },
+    async read(read) {
+      const result = await readAuthorizedMemoryForInvocation({ invocation, ...read });
+      return "unavailable" in result ? MEMORY_INVOCATION_UNAVAILABLE : result;
+    },
+    async collectSources(params) {
+      const result = await collectAuthorizedMemoryDerivationSources({
+        invocation,
+        ...(params?.signal ? { signal: params.signal } : {}),
+      });
+      return "unavailable" in result ? MEMORY_INVOCATION_UNAVAILABLE : result;
+    },
+    async commit({ content, contentType = "markdown", signal }) {
+      if (signal?.aborted) {
+        return MEMORY_INVOCATION_UNAVAILABLE;
+      }
+      const result = await commitAuthorizedMemoryDerivationForInvocation({
+        invocation,
+        content,
+        contentType,
+        purpose: params.purpose,
+      });
+      return "unavailable" in result ? MEMORY_INVOCATION_UNAVAILABLE : result;
+    },
+  });
 }
 
 /**
