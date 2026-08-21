@@ -220,6 +220,39 @@ and policy-drift alerts deny future role access; they do not physically delete
 memory or audit data. Owners use the explicit audit-deletion control above and
 postbox purge remains an explicit owner action.
 
+## Run live provider proof
+
+The adapter suites include opt-in official-provider probes. Run them only in a
+disposable tenant through a credential-injecting remote runner; never put an ID
+token, nonce, or Google service-account JSON in a shell command, config file,
+or committed test artifact.
+
+Set `OPENCLAW_LIVE_TEST=1` and `MEMORY_ENTERPRISE_IDENTITY_LIVE_TEST=1`, then
+provide the provider's public test-tenant configuration under
+`OPENCLAW_LIVE_MEMORY_{ENTRA|GOOGLE_WORKSPACE|OKTA}_...`:
+
+| Provider | Required public test-tenant variables |
+| --- | --- |
+| Entra ID | `OPENCLAW_LIVE_MEMORY_ENTRA_TENANT_ID`, `OPENCLAW_LIVE_MEMORY_ENTRA_CLIENT_ID`, `OPENCLAW_LIVE_MEMORY_ENTRA_ROLE_GROUP_ID` |
+| Google Workspace | `OPENCLAW_LIVE_MEMORY_GOOGLE_WORKSPACE_HOSTED_DOMAIN`, `OPENCLAW_LIVE_MEMORY_GOOGLE_WORKSPACE_CLIENT_ID`, `OPENCLAW_LIVE_MEMORY_GOOGLE_WORKSPACE_DELEGATED_ADMIN_EMAIL`, `OPENCLAW_LIVE_MEMORY_GOOGLE_WORKSPACE_ROLE_GROUP_RESOURCE_NAME` |
+| Okta | `OPENCLAW_LIVE_MEMORY_OKTA_ISSUER`, `OPENCLAW_LIVE_MEMORY_OKTA_CLIENT_ID`, `OPENCLAW_LIVE_MEMORY_OKTA_GROUP_IDS_CLAIM`, `OPENCLAW_LIVE_MEMORY_OKTA_ROLE_GROUP_ID` |
+
+To prove core verification and group removal, inject a fresh ID token from the
+same nonce- and `max_age`-bound authorization-code flow under
+`{PREFIX}_ID_TOKEN` and its nonce under `{PREFIX}_NONCE`, then set
+`{PREFIX}_EXPECT_ROLE_MEMBERSHIP` to `present` or `absent`. The Google token
+probe additionally needs
+`OPENCLAW_LIVE_MEMORY_GOOGLE_WORKSPACE_DIRECTORY_SERVICE_ACCOUNT` supplied by
+the runner's secret store.
+
+Run the three `adapter.live.test.ts` files on Testbox. The probe verifies the
+official discovery and JWKS documents without emitting response bodies, then
+passes an optional fresh token through the core verifier. Repeat the token
+probe after removing the disposable user from the configured role group with
+`EXPECT_ROLE_MEMBERSHIP=absent`; this proves refreshed provider evidence no
+longer contains that role. Deterministic verifier and lifecycle tests separately
+cover snapshot expiry and provider-outage denial.
+
 Each evidence-transition result also reports a count-only revocation impact:
 the number of prior content exposures associated with the superseded snapshots.
 `complete: false` means at least one registered agent database could not be
