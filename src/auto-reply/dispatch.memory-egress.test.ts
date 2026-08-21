@@ -57,7 +57,6 @@ function allowedFinalAdmission(): MemoryEgressAdmission {
       capabilityId: "reply.final",
       agentId: "memory-agent",
       sessionId: "session-1",
-      sessionKey: "agent:memory-agent:direct:alice",
       runId: "run-1",
       deliveryRevision: "delivery-1",
       egressRegistryRevision: "registry-1",
@@ -72,7 +71,6 @@ describe("memory egress at final dispatch", () => {
     const dispatcher = createReplyDispatcher({ deliver: delivered });
     const ctx = buildTestCtx({
       AgentId: "memory-agent",
-      SessionId: "session-1",
       SessionKey: "agent:memory-agent:direct:alice",
       Surface: "telegram",
       OriginatingChannel: "telegram",

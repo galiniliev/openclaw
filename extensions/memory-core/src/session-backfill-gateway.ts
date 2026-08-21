@@ -14,6 +14,7 @@ import { resolveMemoryRemDreamingConfig } from "openclaw/plugin-sdk/memory-core-
 import { resolvePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-runtime";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import { normalizeAgentId } from "openclaw/plugin-sdk/routing";
+import { admitLegacyMemoryWorkspace } from "./legacy-memory-workspace-admission.js";
 import type { SessionBackfillResult } from "./session-backfill-contract.js";
 import { normalizeSessionBackfillSelection } from "./session-backfill-selection.js";
 
@@ -103,13 +104,16 @@ function resolveExecutionContext(api: OpenClawPluginApi, agentId: string) {
   if (isLegacyMemorySurfaceDisabled(agentId)) {
     throw new Error("Session backfill is unavailable after scoped-memory cutover.");
   }
-  const workspaceDir = api.runtime.agent.resolveAgentWorkspaceDir(config, agentId);
+  const admission = admitLegacyMemoryWorkspace({ cfg: config, agentId });
+  if (!admission) {
+    throw new Error("Session backfill is unavailable after scoped-memory cutover.");
+  }
   const remConfig = resolveMemoryRemDreamingConfig({
     cfg: config,
     pluginConfig: resolvePluginConfigObject(config, "memory-core"),
   });
   return {
-    workspaceDir,
+    admission,
     ...(remConfig.timezone !== undefined ? { timezone: remConfig.timezone } : {}),
   };
 }

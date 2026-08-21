@@ -148,6 +148,42 @@ describe("memory authorization capability inspection", () => {
     expect(runtime.writeAuthorized).not.toHaveBeenCalled();
   });
 
+  it("binds optional child lifecycle methods only through full admission", async () => {
+    let issueReceiver: unknown;
+    let revokeReceiver: unknown;
+    const runtime = {
+      ...createRuntime(),
+      async issueChildDelegation() {
+        issueReceiver = this;
+        return { version: 1, storeCapToken: "opaque", parentMemoryPlanId: "plan-1" };
+      },
+      async revokeChildDelegation() {
+        revokeReceiver = this;
+      },
+    };
+    const full = await admitMemoryAuthorizationRuntime({
+      authorization: COMPLETE_MEMORY_AUTHORIZATION_CAPABILITIES,
+      authorizationConformance: referenceMemoryAuthorizationConformanceAdapter,
+      runtime,
+    });
+    const read = await admitMemoryAuthorizationReadRuntime({
+      authorization: COMPLETE_MEMORY_AUTHORIZATION_CAPABILITIES,
+      authorizationConformance: referenceMemoryAuthorizationConformanceAdapter,
+      runtime,
+    });
+    if (!full.ok || !read.ok) {
+      throw new Error("fixture failed to admit the complete runtime");
+    }
+
+    await full.runtime.issueChildDelegation?.({} as never);
+    await full.runtime.revokeChildDelegation?.({} as never);
+
+    expect(issueReceiver).toBe(runtime);
+    expect(revokeReceiver).toBe(runtime);
+    expect("issueChildDelegation" in read.runtime).toBe(false);
+    expect("revokeChildDelegation" in read.runtime).toBe(false);
+  });
+
   it("reports all-false and incomplete declarations as nonconforming", () => {
     const legacy = inspectMemoryAuthorizationCapability({
       authorization: LEGACY_MEMORY_AUTHORIZATION_CAPABILITIES,

@@ -14,7 +14,7 @@ vi.mock("openclaw/plugin-sdk/memory-host-events", () => ({
   appendMemoryHostEvent: vi.fn(async () => {}),
 }));
 
-import { runDreamingSweepPhases } from "./dreaming-phases.js";
+import { issueLegacyDreamingWorkspaceLease, runDreamingSweepPhases } from "./dreaming-phases.js";
 import { applyShortTermPromotions, type PromotionCandidate } from "./short-term-promotion.js";
 import { createMemoryCoreTestHarness } from "./test-helpers.js";
 
@@ -139,10 +139,16 @@ describe("memory-core redaction product boundaries", () => {
       },
     };
 
+    const lease = issueLegacyDreamingWorkspaceLease({
+      agentId: "main",
+      cfg,
+    });
+    if (!lease) {
+      throw new Error("expected legacy dreaming workspace lease");
+    }
     await expect(
       runDreamingSweepPhases({
-        agentId: "main",
-        workspaceDir,
+        lease,
         cfg,
         pluginConfig: resolveMemoryDreamingPluginConfig(cfg) ?? {},
         logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },

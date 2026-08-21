@@ -13,6 +13,7 @@ const auditShortTermPromotionArtifactsImpl = vi.hoisted(() => vi.fn());
 const repairDreamingArtifactsImpl = vi.hoisted(() => vi.fn());
 const repairShortTermPromotionArtifactsImpl = vi.hoisted(() => vi.fn());
 const previewGroundedRemMarkdownImpl = vi.hoisted(() => vi.fn());
+const dedupeDreamDiaryEntriesImpl = vi.hoisted(() => vi.fn());
 const writeBackfillDiaryEntriesImpl = vi.hoisted(() => vi.fn());
 const removeBackfillDiaryEntriesImpl = vi.hoisted(() => vi.fn());
 const filterRecallEntriesWithinLookbackImpl = vi.hoisted(() => vi.fn());
@@ -37,6 +38,7 @@ describe("plugin-sdk memory-core bundled runtime", () => {
     repairDreamingArtifactsImpl.mockReset().mockResolvedValue({ changed: false });
     repairShortTermPromotionArtifactsImpl.mockReset().mockResolvedValue({ changed: false });
     previewGroundedRemMarkdownImpl.mockReset().mockResolvedValue({ files: [] });
+    dedupeDreamDiaryEntriesImpl.mockReset().mockResolvedValue({ removed: 0, kept: 1 });
     writeBackfillDiaryEntriesImpl.mockReset().mockResolvedValue({ writtenCount: 1 });
     removeBackfillDiaryEntriesImpl.mockReset().mockResolvedValue({ removedCount: 1 });
     filterRecallEntriesWithinLookbackImpl.mockReset().mockReturnValue([]);
@@ -54,14 +56,15 @@ describe("plugin-sdk memory-core bundled runtime", () => {
             auditShortTermPromotionArtifacts: auditShortTermPromotionArtifactsImpl,
             repairDreamingArtifacts: repairDreamingArtifactsImpl,
             repairShortTermPromotionArtifacts: repairShortTermPromotionArtifactsImpl,
+            dedupeDreamDiaryEntries: dedupeDreamDiaryEntriesImpl,
+            writeBackfillDiaryEntries: writeBackfillDiaryEntriesImpl,
+            removeBackfillDiaryEntries: removeBackfillDiaryEntriesImpl,
           };
         }
         if (artifactBasename === "api.js") {
           return {
             configureMemoryCoreDreamingState: configureMemoryCoreDreamingStateImpl,
             previewGroundedRemMarkdown: previewGroundedRemMarkdownImpl,
-            writeBackfillDiaryEntries: writeBackfillDiaryEntriesImpl,
-            removeBackfillDiaryEntries: removeBackfillDiaryEntriesImpl,
             filterRecallEntriesWithinLookback: filterRecallEntriesWithinLookbackImpl,
             previewRemHarness: previewRemHarnessImpl,
           };

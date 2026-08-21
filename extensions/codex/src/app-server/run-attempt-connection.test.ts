@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { initializeGlobalHookRunner } from "openclaw/plugin-sdk/hook-runtime";
 import { createMockPluginRegistry } from "openclaw/plugin-sdk/plugin-test-runtime";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as appServerPolicy from "./app-server-policy.js";
 import * as bindingConnection from "./binding-connection.js";
 import * as codexConfig from "./config.js";
@@ -14,7 +14,18 @@ import {
   writeCodexAppServerBinding,
 } from "./session-binding.test-helpers.js";
 
+const isLegacyMemorySurfaceDisabled = vi.hoisted(() => vi.fn(() => false));
+
+vi.mock("openclaw/plugin-sdk/memory-core-host-runtime-core", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("openclaw/plugin-sdk/memory-core-host-runtime-core")>()),
+  isLegacyMemorySurfaceDisabled,
+}));
+
 setupRunAttemptTestHooks();
+
+afterEach(() => {
+  isLegacyMemorySurfaceDisabled.mockReset().mockReturnValue(false);
+});
 
 describe("prepareCodexAttemptConnection", () => {
   it.each([
@@ -98,6 +109,48 @@ describe("prepareCodexAttemptConnection", () => {
     expect(connection.mutable.startupBinding).toBeUndefined();
     expect(resolveConnection).toHaveBeenCalledTimes(2);
     expect(resolveModelPolicy).toHaveBeenCalledTimes(2);
+  });
+
+  it("refuses a cutover that begins while an oversized thread is rebinding", async () => {
+    isLegacyMemorySurfaceDisabled.mockReset().mockReturnValueOnce(false).mockReturnValueOnce(true);
+    const sessionFile = path.join(tempDir, "cutover-during-rebind.jsonl");
+    const workspaceDir = path.join(tempDir, "cutover-during-rebind-workspace");
+    const agentDir = path.join(tempDir, "cutover-during-rebind-agent");
+    const params = createParams(sessionFile, workspaceDir);
+    params.agentDir = agentDir;
+    params.config = {
+      agents: {
+        defaults: {
+          compaction: {
+            maxActiveTranscriptBytes: "1mb",
+          },
+        },
+      },
+    };
+    registerCodexTestSessionIdentity(sessionFile, params.sessionId, params.sessionKey);
+    await writeCodexAppServerBinding(sessionFile, {
+      threadId: "thread-existing",
+      cwd: workspaceDir,
+      model: params.modelId,
+      modelProvider: "openai",
+    });
+    const rolloutDir = path.join(agentDir, "codex-home", "sessions");
+    await fs.mkdir(rolloutDir, { recursive: true });
+    await fs.writeFile(
+      path.join(rolloutDir, "rollout-thread-existing.jsonl"),
+      "x".repeat(1_048_577),
+    );
+    const resolveModelPolicy = vi.spyOn(appServerPolicy, "resolveCodexAppServerForModelProvider");
+
+    await expect(
+      prepareCodexAttemptConnection({
+        params,
+        options: { bindingStore: testCodexAppServerBindingStore },
+      }),
+    ).rejects.toThrow("Codex is unavailable for this memory-isolated agent");
+
+    expect(isLegacyMemorySurfaceDisabled).toHaveBeenCalledTimes(2);
+    expect(resolveModelPolicy).toHaveBeenCalledTimes(1);
   });
 
   it("still checks enterprise requirements before promoting tool approvals", async () => {

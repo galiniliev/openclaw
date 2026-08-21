@@ -6,12 +6,7 @@ import {
 import { formatByteSize } from "@openclaw/normalization-core";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { note } from "../../packages/terminal-core/src/note.js";
-import {
-  listAgentIds,
-  resolveAgentDir,
-  resolveAgentWorkspaceDir,
-  tryResolveDefaultAgentId,
-} from "../agents/agent-scope.js";
+import { listAgentIds, resolveAgentDir, tryResolveDefaultAgentId } from "../agents/agent-scope.js";
 import {
   hasAnyAuthProfileStoreSource,
   hasAuthProfileStoreSourceForProvider,
@@ -30,6 +25,7 @@ import { formatErrorMessage } from "../infra/errors.js";
 import {
   resolveMemoryDreamingConfig,
   resolveMemoryDreamingPluginConfig,
+  resolveMemoryDreamingWorkspaces,
 } from "../memory-host-sdk/dreaming.js";
 import { resolveRememberAcrossConversations } from "../memory-host-sdk/host/config-utils.js";
 import { hasConfiguredMemorySecretInput } from "../memory-host-sdk/secret.js";
@@ -42,10 +38,8 @@ import {
   type ShortTermAuditSummary,
 } from "../plugin-sdk/memory-core-bundled-runtime.js";
 import { normalizePluginsConfig } from "../plugins/config-state.js";
-import {
-  getActiveMemorySearchManager,
-  resolveActiveMemoryBackendConfig,
-} from "../plugins/memory-runtime.js";
+import { isMemoryIsolationCutoverAgent } from "../plugins/memory-cutover.js";
+import { resolveActiveMemoryBackendConfig } from "../plugins/memory-runtime.js";
 import { defaultSlotIdForKey } from "../plugins/slots.js";
 import { getProviderEnvVars } from "../secrets/provider-env-vars.js";
 import { resolveUserPath } from "../utils.js";
@@ -53,21 +47,15 @@ import type { DoctorPrompter } from "./doctor-prompter.js";
 import { maybeRepairWorkspaceMemoryHealth, noteWorkspaceMemoryHealth } from "./doctor-workspace.js";
 import { isRecord } from "./doctor/shared/legacy-config-record-shared.js";
 
-type RuntimeMemoryAuditContext = {
-  workspaceDir?: string;
-};
-
 type MemoryDoctorAgentScope = {
   agentId: string;
   agentDir: string;
-  workspaceDir: string;
 };
 
 function resolveMemoryDoctorAgentScopes(cfg: OpenClawConfig): MemoryDoctorAgentScope[] {
   return listAgentIds(cfg).map((agentId) => ({
     agentId,
     agentDir: resolveAgentDir(cfg, agentId),
-    workspaceDir: resolveAgentWorkspaceDir(cfg, agentId),
   }));
 }
 
@@ -254,29 +242,6 @@ function isKeyOptionalMemoryProvider(providerId: string, cfg: OpenClawConfig): b
   );
 }
 
-async function resolveRuntimeMemoryAuditContext(
-  cfg: OpenClawConfig,
-  agentId: string,
-): Promise<RuntimeMemoryAuditContext | null> {
-  const result = await getActiveMemorySearchManager({
-    cfg,
-    agentId,
-    purpose: "status",
-  });
-  const manager = result.manager;
-  if (!manager) {
-    return null;
-  }
-  try {
-    const status = manager.status();
-    return {
-      workspaceDir: status.workspaceDir?.trim(),
-    };
-  } finally {
-    await manager.close?.().catch(() => undefined);
-  }
-}
-
 function buildMemoryRecallIssueNote(audit: ShortTermAuditSummary): string | null {
   if (audit.issues.length === 0) {
     return null;
@@ -310,6 +275,33 @@ function buildDreamingArtifactIssueNote(audit: DreamingArtifactsAuditSummary): s
   ].join("\n");
 }
 
+function noteLegacyMemoryMaintenanceUnavailable(agentId: string, labelAgent: boolean): void {
+  note(
+    formatAgentMessage(
+      agentId,
+      labelAgent,
+      "Legacy workspace memory maintenance is unavailable after scoped-memory cutover.",
+    ),
+    "Memory search",
+  );
+}
+
+function resolveLegacyMemoryMaintenanceWorkspace(
+  cfg: OpenClawConfig,
+  agentId: string,
+): { workspaceDir: string } | null {
+  const workspace = resolveMemoryDreamingWorkspaces(cfg).find((entry) =>
+    entry.agentIds.includes(agentId),
+  );
+  if (
+    !workspace ||
+    workspace.agentIds.some((ownerAgentId) => isMemoryIsolationCutoverAgent(ownerAgentId))
+  ) {
+    return null;
+  }
+  return { workspaceDir: workspace.workspaceDir };
+}
+
 export async function noteMemoryRecallHealth(cfg: OpenClawConfig): Promise<void> {
   const scopes = resolveMemoryDoctorAgentScopes(cfg);
   const labelAgents = scopes.length > 1;
@@ -318,18 +310,17 @@ export async function noteMemoryRecallHealth(cfg: OpenClawConfig): Promise<void>
     pluginConfig: resolveMemoryDreamingPluginConfig(cfg),
   });
   for (const scope of scopes) {
+    if (!resolveLegacyMemoryMaintenanceWorkspace(cfg, scope.agentId)) {
+      noteLegacyMemoryMaintenanceUnavailable(scope.agentId, labelAgents);
+      continue;
+    }
     try {
-      const context = await resolveRuntimeMemoryAuditContext(cfg, scope.agentId);
-      const workspaceDir = context?.workspaceDir?.trim();
-      if (!workspaceDir) {
-        continue;
-      }
-      const audit = await auditShortTermPromotionArtifacts({ workspaceDir });
+      const audit = await auditShortTermPromotionArtifacts({ cfg, agentId: scope.agentId });
       const message = buildMemoryRecallIssueNote(audit);
       if (message) {
         note(formatAgentMessage(scope.agentId, labelAgents, message), "Memory search");
       }
-      const dreamingAudit = await auditDreamingArtifacts({ workspaceDir });
+      const dreamingAudit = await auditDreamingArtifacts({ cfg, agentId: scope.agentId });
       const dreamingMessage = buildDreamingArtifactIssueNote(dreamingAudit);
       if (dreamingMessage) {
         note(formatAgentMessage(scope.agentId, labelAgents, dreamingMessage), "Memory search");
@@ -363,21 +354,24 @@ export async function maybeRepairMemoryRecallHealth(params: {
   const scopes = resolveMemoryDoctorAgentScopes(params.cfg);
   const labelAgents = scopes.length > 1;
   for (const scope of scopes) {
+    const workspace = resolveLegacyMemoryMaintenanceWorkspace(params.cfg, scope.agentId);
+    if (!workspace) {
+      noteLegacyMemoryMaintenanceUnavailable(scope.agentId, labelAgents);
+      continue;
+    }
     await maybeRepairWorkspaceMemoryHealth({
       ...params,
       scope: {
         agentId: scope.agentId,
-        workspaceDir: scope.workspaceDir,
+        workspaceDir: workspace.workspaceDir,
         labelAgent: labelAgents,
       },
     });
     try {
-      const context = await resolveRuntimeMemoryAuditContext(params.cfg, scope.agentId);
-      const workspaceDir = context?.workspaceDir?.trim();
-      if (!workspaceDir) {
-        continue;
-      }
-      const audit = await auditShortTermPromotionArtifacts({ workspaceDir });
+      const audit = await auditShortTermPromotionArtifacts({
+        cfg: params.cfg,
+        agentId: scope.agentId,
+      });
       const hasFixableRecallIssue = audit.issues.some((issue) => issue.fixable);
       if (hasFixableRecallIssue) {
         const approved = await params.prompter.confirmRuntimeRepair({
@@ -389,7 +383,10 @@ export async function maybeRepairMemoryRecallHealth(params: {
           initialValue: true,
         });
         if (approved) {
-          const repair = await repairShortTermPromotionArtifacts({ workspaceDir });
+          const repair = await repairShortTermPromotionArtifacts({
+            cfg: params.cfg,
+            agentId: scope.agentId,
+          });
           if (repair.changed) {
             const removedOverflowEntries = repair.removedOverflowEntries ?? 0;
             const details = [
@@ -419,7 +416,10 @@ export async function maybeRepairMemoryRecallHealth(params: {
         }
       }
 
-      const dreamingAudit = await auditDreamingArtifacts({ workspaceDir });
+      const dreamingAudit = await auditDreamingArtifacts({
+        cfg: params.cfg,
+        agentId: scope.agentId,
+      });
       const hasFixableDreamingIssue = dreamingAudit.issues.some((issue) => issue.fixable);
       if (!hasFixableDreamingIssue) {
         continue;
@@ -435,7 +435,10 @@ export async function maybeRepairMemoryRecallHealth(params: {
       if (!approvedDreamingRepair) {
         continue;
       }
-      const dreamingRepair = await repairDreamingArtifacts({ workspaceDir });
+      const dreamingRepair = await repairDreamingArtifacts({
+        cfg: params.cfg,
+        agentId: scope.agentId,
+      });
       if (!dreamingRepair.changed) {
         continue;
       }
@@ -580,11 +583,16 @@ export async function noteMemorySearchHealth(
   const labelAgents = scopes.length > 1;
   for (const scope of scopes) {
     if (opts?.includeWorkspaceMemoryHealth !== false) {
-      await noteWorkspaceMemoryHealth(cfg, {
-        agentId: scope.agentId,
-        workspaceDir: scope.workspaceDir,
-        labelAgent: labelAgents,
-      });
+      const workspace = resolveLegacyMemoryMaintenanceWorkspace(cfg, scope.agentId);
+      if (!workspace) {
+        noteLegacyMemoryMaintenanceUnavailable(scope.agentId, labelAgents);
+      } else {
+        await noteWorkspaceMemoryHealth(cfg, {
+          agentId: scope.agentId,
+          workspaceDir: workspace.workspaceDir,
+          labelAgent: labelAgents,
+        });
+      }
     }
     const outputNote = opts?.noteFn ?? note;
     const noteFn: typeof note = (message, title) =>

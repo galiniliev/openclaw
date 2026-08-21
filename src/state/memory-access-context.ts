@@ -30,6 +30,9 @@ type StoredFacts = Readonly<{
   verifiedMemberships: readonly MemoryVerifiedMembership[];
   delivery: MemoryAccessContext["delivery"];
   delegation?: MemoryAccessContext["delegation"];
+  /** Parent subject is usable only while the core-owned durable grant rechecks. */
+  delegationSubject?: SessionMemorySubject;
+  delegationRecheck?: () => boolean;
   operation: MemoryOperation;
   hostFactsRevision: string;
 }>;
@@ -299,6 +302,14 @@ function readSessionMemorySubject(params: {
 }): SessionMemorySubject | undefined {
   const { session } = params;
   const nowMs = Date.now();
+  if (params.facts.delegation) {
+    // A child never inherits a session subject. This is a separately rechecked,
+    // host-captured parent view; task text and the child session row cannot forge it.
+    if (!params.facts.delegationSubject || !params.facts.delegationRecheck?.()) {
+      return undefined;
+    }
+    return params.facts.delegationSubject;
+  }
   if (
     params.facts.actor.kind === "principal" &&
     !isCurrentEvidenceExpiry(params.facts.actor.expiresAt, nowMs)
@@ -395,6 +406,9 @@ export function captureTrustedMemoryAccessFacts(params: {
     egressRegistryRevision: string;
   };
   delegation?: MemoryAccessContext["delegation"];
+  /** Internal-only parent subject and durable recheck for a spawned child grant. */
+  delegationSubject?: SessionMemorySubject;
+  delegationRecheck?: () => boolean;
   operation: MemoryOperation;
   hostFactsRevision: string;
 }): TrustedMemoryAccessFacts {
@@ -429,7 +443,13 @@ export function captureTrustedMemoryAccessFacts(params: {
       ),
       deliveryRevision: requireText(params.delivery.routeRevision, "delivery.routeRevision"),
     }),
-    ...(params.delegation ? { delegation: normalizeDelegation(params.delegation) } : {}),
+    ...(params.delegation
+      ? {
+          delegation: normalizeDelegation(params.delegation),
+          delegationSubject: params.delegationSubject,
+          delegationRecheck: params.delegationRecheck,
+        }
+      : {}),
     operation: params.operation,
     hostFactsRevision: requireText(params.hostFactsRevision, "hostFactsRevision"),
   });

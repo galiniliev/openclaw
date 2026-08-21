@@ -4,8 +4,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProviderRuntimePluginHandle } from "../../../plugins/provider-hook-runtime.js";
 import type { EmbeddedRunAttemptParams } from "./types.js";
 
+type ResolveSandboxContext = typeof import("../../sandbox.js").resolveSandboxContext;
+
 const resolveProviderRuntimePluginHandle = vi.hoisted(() => vi.fn());
-const resolveSandboxContext = vi.hoisted(() => vi.fn(async () => null));
+const resolveSandboxContext = vi.hoisted(() => vi.fn<ResolveSandboxContext>(async () => null));
 const createAuthorizedMemoryReadHost = vi.hoisted(() => vi.fn());
 const resolveAuthorizedMemoryVirtualFileBroker = vi.hoisted(() => vi.fn());
 const stageAuthorizedVirtualProjectionMountPlan = vi.hoisted(() => vi.fn());
@@ -185,7 +187,7 @@ describe("prepareEmbeddedAttemptSetup", () => {
         workspaceAccess: "ro",
         workspaceDir: path.join(sandboxRoot, "workspace"),
         disposeAuthorizedVirtualProjectionMountPlan: dispose,
-      };
+      } as never;
     });
 
     const setup = await resolveAttemptWorkspaceSandbox({
@@ -224,7 +226,7 @@ describe("prepareEmbeddedAttemptSetup", () => {
       workspaceAccess: "ro",
       workspaceDir: "/sandbox/workspace",
       disposeAuthorizedVirtualProjectionMountPlan: dispose,
-    });
+    } as never);
 
     await expect(
       resolveAttemptWorkspaceSandbox({

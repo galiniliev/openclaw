@@ -64,6 +64,12 @@ export type AuthorizedMemoryWriteHost = Readonly<{
   }) => Promise<MemoryWriteResult | AuthorizedMemoryReadUnavailable>;
 }>;
 
+/** A transcript-derived write host must revalidate its exact source before provider dispatch. */
+export type AuthorizedMemoryTranscriptDerivationHost = AuthorizedMemoryWriteHost &
+  Readonly<{
+    recheckBeforeModel: () => Promise<boolean>;
+  }>;
+
 /**
  * Host-owned source-and-output capability for a single scoped derivation.
  * `commit` can retain only material this exact host already exposed; callers
@@ -72,9 +78,11 @@ export type AuthorizedMemoryWriteHost = Readonly<{
 export type AuthorizedMemoryResourceDerivationHost = AuthorizedMemoryReadHost &
   Readonly<{
     /** Bounded, same-store source material whose reads are recorded before release. */
-    collectSources: (params?: { signal?: AbortSignal }) => Promise<
-      readonly MemoryReadResult[] | AuthorizedMemoryReadUnavailable
-    >;
+    collectSources: (params?: {
+      signal?: AbortSignal;
+    }) => Promise<readonly MemoryReadResult[] | AuthorizedMemoryReadUnavailable>;
+    /** Revalidates every already-exposed source without releasing source bytes again. */
+    recheckSources: () => Promise<boolean>;
     commit: (params: {
       content: string;
       contentType?: "markdown" | "text" | "json";

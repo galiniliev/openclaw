@@ -2,6 +2,13 @@
  * Test harness mocks for embedded-agent compaction hook coverage.
  */
 import { vi, type Mock } from "vitest";
+import {
+  listSessionEntries,
+  loadSessionEntry,
+} from "../../config/sessions/session-accessor.js";
+import {
+  resolveAgentRunSessionTarget as resolveSeededAgentRunSessionTarget,
+} from "../run-session-target.js";
 import type { PluginMetadataSnapshot } from "../../plugins/plugin-metadata-snapshot.js";
 import type { AuthProfileStore } from "../auth-profiles/types.js";
 import { clearAgentHarnesses } from "../harness/registry.js";
@@ -41,11 +48,17 @@ export const contextEngineCompactMock = vi.fn(async () => ({
     | undefined,
 }));
 
-export const isMemoryIsolationCutoverAgentMock = vi.fn(() => false);
-export const readAuthorizedTranscriptDerivationMock = vi.fn(() => undefined);
+export const isMemoryIsolationCutoverAgentMock: Mock<(agentId: string) => boolean> = vi.fn(
+  () => false,
+);
+export const readAuthorizedTranscriptDerivationMock: Mock<
+  typeof import("../../config/sessions/session-transcript-memory-policy.js").readAuthorizedTranscriptDerivation
+> = vi.fn(() => undefined);
 export const admitAuthorizedMemoryDerivationMock = vi.fn(async () => true);
 export const createAuthorizedMemoryDerivationHostMock = vi.fn(() => undefined);
-export const prepareAuthorizedSealedCompactionHostMock = vi.fn(async () => undefined);
+export const prepareAuthorizedSealedCompactionHostMock: Mock<
+  typeof import("../memory-authorized-read-host.js").prepareAuthorizedSealedCompactionHost
+> = vi.fn(async () => undefined);
 
 export const hookRunner = {
   hasHooks: vi.fn<(hookName?: string) => boolean>(),
@@ -758,10 +771,26 @@ export async function loadCompactHooksHarness(): Promise<{
     commitSealedSqliteTranscriptCompaction: commitSealedSqliteTranscriptCompactionMock,
   }));
 
-  vi.doMock("../../state/openclaw-agent-db.js", () => ({
-    isIncognitoOpenClawAgentSqlitePath: vi.fn(() => false),
-    openOpenClawAgentDatabase: vi.fn(() => ({ db: {} })),
-  }));
+  vi.doMock("../../state/openclaw-agent-db.js", async () => {
+    const actual = await vi.importActual<typeof import("../../state/openclaw-agent-db.js")>(
+      "../../state/openclaw-agent-db.js",
+    );
+    return {
+      ...actual,
+      isIncognitoOpenClawAgentSqlitePath: vi.fn(() => false),
+      openOpenClawAgentDatabase: vi.fn(() => ({ db: {} })),
+    };
+  });
+
+  vi.doMock("../../config/sessions/session-accessor.js", async () => {
+    const actual = await vi.importActual<typeof import("../../config/sessions/session-accessor.js")>(
+      "../../config/sessions/session-accessor.js",
+    );
+    // This suite's compaction host uses an inert agent DB, while successor
+    // assertions seed the real canonical session store before module reset.
+    // Preserve those entry readers so legacy successor checks observe the seed.
+    return { ...actual, listSessionEntries, loadSessionEntry };
+  });
 
   vi.doMock("../run-session-target.js", async () => {
     const actual = await vi.importActual<typeof import("../run-session-target.js")>(
@@ -773,12 +802,17 @@ export async function loadCompactHooksHarness(): Promise<{
       // this harness on the runner boundary instead of opening its fake DB
       // through the real legacy/session-key resolution path.
       resolveAgentRunSessionTarget: vi.fn(
-        async (params: Parameters<typeof actual.resolveAgentRunSessionTarget>[0]) => ({
-        agentId: params.sessionTarget?.agentId ?? params.agentId ?? "main",
-        sessionId: params.sessionTarget?.sessionId ?? params.sessionId,
-        sessionKey: params.sessionTarget?.sessionKey ?? params.sessionKey ?? "session-1",
-        storePath: params.sessionTarget?.storePath ?? "/tmp/sessions.json",
-        }),
+        async (params: Parameters<typeof actual.resolveAgentRunSessionTarget>[0]) => {
+          if (!params.sessionTarget && !params.sessionKey?.trim()) {
+            return await resolveSeededAgentRunSessionTarget(params);
+          }
+          return {
+            agentId: params.sessionTarget?.agentId ?? params.agentId ?? "main",
+            sessionId: params.sessionTarget?.sessionId ?? params.sessionId,
+            sessionKey: params.sessionTarget?.sessionKey ?? params.sessionKey ?? "session-1",
+            storePath: params.sessionTarget?.storePath ?? "/tmp/sessions.json",
+          };
+        },
       ),
     };
   });
@@ -950,7 +984,10 @@ export async function loadCompactHooksHarness(): Promise<{
     ensureContextEnginesInitialized: vi.fn(),
   }));
 
-  vi.doMock("../../context-engine/registry.js", () => ({
+  vi.doMock("../../context-engine/registry.js", async () => ({
+    ...(await vi.importActual<typeof import("../../context-engine/registry.js")>(
+      "../../context-engine/registry.js",
+    )),
     resolveContextEngine: resolveContextEngineMock,
     resolveContextEngineOwnerPluginId: vi.fn(() => "lossless-claw"),
     resolveLogicalTurnContextEngines: async () => {

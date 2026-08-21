@@ -368,7 +368,9 @@ describe("runMemoryFlushIfNeeded", () => {
     ensureSelectedAgentHarnessPluginMock.mockReset().mockResolvedValue(undefined);
     emitAgentEventMock.mockReset();
     registerAgentRunContextMock.mockReset();
-    memoryHostMocks.prepareAuthorizedTranscriptDerivationHost.mockReset().mockResolvedValue(undefined);
+    memoryHostMocks.prepareAuthorizedTranscriptDerivationHost
+      .mockReset()
+      .mockResolvedValue(undefined);
     incrementCompactionCountMock.mockReset().mockImplementation(async (params) => {
       const sessionKey = String(params.sessionKey ?? "");
       if (!sessionKey || !params.sessionStore?.[sessionKey]) {
@@ -456,11 +458,14 @@ describe("runMemoryFlushIfNeeded", () => {
     });
   });
 
-  it("routes a cut-over flush through its admitted transcript mutation without a workspace path", async () => {
+  it("runs a cut-over flush in a read-only sandbox through memory_remember only", async () => {
     markAgentCutOver("main");
     const authorizedMemoryWrite = { remember: vi.fn() };
-    memoryHostMocks.prepareAuthorizedTranscriptDerivationHost.mockResolvedValue(authorizedMemoryWrite);
+    memoryHostMocks.prepareAuthorizedTranscriptDerivationHost.mockResolvedValue(
+      authorizedMemoryWrite,
+    );
     const sessionKey = "agent:main:authorized-flush";
+    const targetPath = path.join(rootDir, "memory", "2023-11-14.md");
     const sessionEntry: SessionEntry = {
       sessionId: "session",
       updatedAt: Date.now(),
@@ -474,8 +479,15 @@ describe("runMemoryFlushIfNeeded", () => {
     followupRun.run.sessionKey = sessionKey;
     followupRun.run.workspaceDir = rootDir;
 
-    await runMemoryFlushIfNeeded({
-      cfg: { agents: { defaults: { compaction: { memoryFlush: {} } } } },
+    const result = await runMemoryFlushIfNeeded({
+      cfg: {
+        agents: {
+          defaults: {
+            sandbox: { mode: "non-main", scope: "agent", workspaceAccess: "ro" },
+            compaction: { memoryFlush: {} },
+          },
+        },
+      },
       followupRun,
       sessionCtx: { Provider: "whatsapp" } as unknown as TemplateContext,
       defaultModel: "anthropic/claude-opus-4-6",
@@ -489,6 +501,7 @@ describe("runMemoryFlushIfNeeded", () => {
       replyOperation: createReplyOperation(),
     });
 
+    expect(result.outcome).toBe("completed");
     expect(memoryHostMocks.prepareAuthorizedTranscriptDerivationHost).toHaveBeenCalledWith(
       expect.objectContaining({ agentId: "main", sessionId: "session" }),
     );
@@ -498,6 +511,7 @@ describe("runMemoryFlushIfNeeded", () => {
     expect(flushCall.prompt).toContain("memory_remember");
     expect(flushCall.extraSystemPrompt).toContain("Never use a workspace file");
     expect(ensureMemoryFlushTargetFileMock).not.toHaveBeenCalled();
+    await expect(fs.access(targetPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("runs a memory flush turn, rotates after compaction, and persists metadata", async () => {
@@ -1671,7 +1685,7 @@ describe("runMemoryFlushIfNeeded", () => {
     expect(runEmbeddedAgentMock).not.toHaveBeenCalled();
   });
 
-  it("uses runtime policy session key when checking memory-flush sandbox writability", async () => {
+  it("keeps a legacy memory flush skipped in a read-only sandbox", async () => {
     const sessionEntry: SessionEntry = {
       sessionId: "session",
       updatedAt: Date.now(),

@@ -10,10 +10,14 @@ import type { AgentCompactionMode } from "../../config/types.agent-defaults.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { buildGenericCliContextEngineHostSupport } from "../../context-engine/host-compat.js";
 import { ensureContextEnginesInitialized as ensureContextEnginesInitializedImpl } from "../../context-engine/init.js";
-import { resolveContextEngine as resolveContextEngineImpl } from "../../context-engine/registry.js";
+import {
+  isCoreLegacyContextEngine,
+  resolveContextEngine as resolveContextEngineImpl,
+} from "../../context-engine/registry.js";
 import { buildContextEngineRuntimeSettings } from "../../context-engine/runtime-settings.js";
 import type { ContextEngine } from "../../context-engine/types.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { isMemoryIsolationCutoverAgent } from "../../plugins/memory-cutover.js";
 import { withPluginRuntimeRegistryScope } from "../../plugins/runtime/gateway-request-scope.js";
 import type { SkillSnapshot } from "../../skills/types.js";
 import { createPreparedEmbeddedAgentSettingsManager as createPreparedEmbeddedAgentSettingsManagerImpl } from "../agent-project-settings.js";
@@ -282,6 +286,17 @@ async function compactCliTranscript(params: {
   extraSystemPrompt?: string;
   bestEffortMaintenance?: boolean;
 }): Promise<CliTranscriptCompactionOutcome> {
+  // The registry proves that core legacy delegates to the sealed compaction host;
+  // plugin-authored engine info cannot authorize any other cutover engine.
+  if (
+    isMemoryIsolationCutoverAgent(params.agentId) &&
+    !isCoreLegacyContextEngine(params.contextEngine)
+  ) {
+    return {
+      compacted: false,
+      failureReason: "memory derivation authorization unavailable for context-engine compaction",
+    };
+  }
   const runtimeContext = buildCliCompactionRuntimeContext({
     sessionKey: params.sessionKey,
     messageChannel: params.messageChannel,

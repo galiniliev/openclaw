@@ -15,6 +15,24 @@ export function normalizeSubagentRunState(entry: SubagentRunRecord): SubagentRun
     requesterTurnRunId && entry.requesterTurnYielded === true ? true : undefined;
   entry.retireAfterRequesterTurn =
     requesterTurnRunId && entry.retireAfterRequesterTurn === true ? true : undefined;
+  const childSessionGeneration = entry.childSessionGeneration;
+  if (
+    !childSessionGeneration ||
+    typeof childSessionGeneration.agentId !== "string" ||
+    !childSessionGeneration.agentId.trim() ||
+    typeof childSessionGeneration.sessionId !== "string" ||
+    !childSessionGeneration.sessionId.trim() ||
+    typeof childSessionGeneration.lifecycleRevision !== "string" ||
+    !childSessionGeneration.lifecycleRevision.trim()
+  ) {
+    delete entry.childSessionGeneration;
+  } else {
+    entry.childSessionGeneration = {
+      agentId: childSessionGeneration.agentId.trim(),
+      sessionId: childSessionGeneration.sessionId.trim(),
+      lifecycleRevision: childSessionGeneration.lifecycleRevision.trim(),
+    };
+  }
   entry.generation =
     typeof entry.generation === "number" &&
     Number.isSafeInteger(entry.generation) &&

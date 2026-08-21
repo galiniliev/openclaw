@@ -38,6 +38,7 @@ import {
   trimSqliteTranscriptForManualCompact,
 } from "./session-accessor.sqlite-transcript-write.js";
 import {
+  captureAuthorizedTranscriptExportSource,
   persistSealedCompactionMemoryPolicyInTransaction,
   readAuthorizedTranscriptDerivation,
   preserveTranscriptMemoryPolicyTransitionInTransaction,
@@ -343,9 +344,7 @@ describe("transcript memory policy companions", () => {
       ),
     ).toThrow("source policy is unavailable");
     expect(
-      database.db
-        .prepare("SELECT count(*) AS count FROM memory_compaction_policies")
-        .get(),
+      database.db.prepare("SELECT count(*) AS count FROM memory_compaction_policies").get(),
     ).toEqual({ count: 1 });
   });
 
@@ -371,7 +370,7 @@ describe("transcript memory policy companions", () => {
              ON detail.session_id = policy.session_id AND detail.event_seq = policy.event_seq
           WHERE policy.session_id = ? AND policy.event_seq = ?`,
       )
-      .get(SESSION_ID, source.eventSeqs[0]);
+      .get(SESSION_ID, source.eventSeqs[0]!);
     let committed: { eventSeq: number; policyId: string } | undefined;
     const commit = async () =>
       await withOwnedSessionTranscriptWrites(
@@ -420,16 +419,20 @@ describe("transcript memory policy companions", () => {
     await expect(commit()).resolves.toMatchObject({
       compactionPolicy: { compactionPolicyId: "sealed-compaction-policy" },
     });
-    expect(committed).toEqual({ eventSeq: expect.any(Number), policyId: "sealed-compaction-policy" });
+    expect(committed).toEqual({
+      eventSeq: expect.any(Number),
+      policyId: "sealed-compaction-policy",
+    });
+    if (!committed) {
+      throw new Error("fixture expected sealed compaction derived state");
+    }
     expect(
       readSessionEntryRow(database, SESSION_KEY)?.entry.compactionCheckpoints?.map(
         (checkpoint) => checkpoint.checkpointId,
       ),
     ).toEqual(["sealed-compaction-checkpoint"]);
     expect(
-      database.db
-        .prepare("SELECT count(*) AS count FROM memory_compaction_policies")
-        .get(),
+      database.db.prepare("SELECT count(*) AS count FROM memory_compaction_policies").get(),
     ).toEqual({ count: 1 });
     expect(
       database.db
@@ -456,7 +459,7 @@ describe("transcript memory policy companions", () => {
                ON detail.session_id = policy.session_id AND detail.event_seq = policy.event_seq
             WHERE policy.session_id = ? AND policy.event_seq = ?`,
         )
-        .get(SESSION_ID, committed?.eventSeq),
+        .get(SESSION_ID, committed.eventSeq),
     ).toEqual(sourceCompanion);
     expect(
       loadSqliteTranscriptEventsSync(scope(env)).some(
@@ -504,9 +507,7 @@ describe("transcript memory policy companions", () => {
       ),
     ).rejects.toThrow("derived state failed");
     expect(
-      database.db
-        .prepare("SELECT count(*) AS count FROM memory_compaction_policies")
-        .get(),
+      database.db.prepare("SELECT count(*) AS count FROM memory_compaction_policies").get(),
     ).toEqual({ count: 1 });
     expect(
       loadSqliteTranscriptEventsSync(scope(env)).some(
@@ -575,12 +576,12 @@ describe("transcript memory policy companions", () => {
     expect(readSessionEntryRow(database, SESSION_KEY)?.entry.compactionCheckpoints).toHaveLength(
       25,
     );
-    expect(readSessionEntryRow(database, SESSION_KEY)?.entry.compactionCheckpoints?.[0]).toMatchObject(
-      { checkpointId: "retained-checkpoint-1" },
-    );
-    expect(readSessionEntryRow(database, SESSION_KEY)?.entry.compactionCheckpoints?.at(-1)).toMatchObject(
-      { checkpointId: "checkpoint-cap-newest" },
-    );
+    expect(
+      readSessionEntryRow(database, SESSION_KEY)?.entry.compactionCheckpoints?.[0],
+    ).toMatchObject({ checkpointId: "retained-checkpoint-1" });
+    expect(
+      readSessionEntryRow(database, SESSION_KEY)?.entry.compactionCheckpoints?.at(-1),
+    ).toMatchObject({ checkpointId: "checkpoint-cap-newest" });
   });
 
   it("enforces Doctor shadow-read-only companion persistence for only its bound subject", async () => {
@@ -842,7 +843,7 @@ describe("transcript memory policy companions", () => {
     expect(readActiveTranscriptAppendParentId(database, SESSION_ID)).not.toBe(pending.messageId);
   });
 
-  it("does not pass a pending transcript event to manual compaction", async () => {
+  it("rejects manual raw archival for pending transcript rows after cutover", async () => {
     const env = createEnv();
     const database = markCutOver(env);
     await appendSqliteTranscriptMessage(scope(env), {
@@ -852,7 +853,9 @@ describe("transcript memory policy companions", () => {
 
     await expect(
       trimSqliteTranscriptForManualCompact(scope(env), selectRetainedLines),
-    ).resolves.toEqual({ trimmed: false });
+    ).rejects.toThrow(
+      "Manual transcript compaction is unavailable after scoped-memory cutover. Scoped transcript archival with lineage is not available yet.",
+    );
 
     expect(selectRetainedLines).not.toHaveBeenCalled();
     expect(
@@ -860,6 +863,44 @@ describe("transcript memory policy companions", () => {
         .prepare("SELECT authorization_status FROM transcript_event_memory_policies")
         .all(),
     ).toEqual([{ authorization_status: "pending" }, { authorization_status: "pending" }]);
+  });
+
+  it("rejects manual raw archival for fully authorized transcript rows before output", async () => {
+    const env = createEnv();
+    const database = markCutOver(env);
+    const runId = "manual-compact-archive-run";
+    writeSessionEntry(database, SESSION_KEY, { sessionId: SESSION_ID, updatedAt: 1 });
+    persistExposure(database, { runId });
+    await withOwnedSessionTranscriptWrites(
+      {
+        sessionTarget: {
+          agentId: AGENT_ID,
+          expectedWriterRunId: runId,
+          sessionId: SESSION_ID,
+          sessionKey: SESSION_KEY,
+        },
+        withTranscriptWrite: async (run) => await run(),
+      },
+      async () => {
+        for (const text of ["one", "two", "three"]) {
+          await appendSqliteTranscriptMessage(scope(env), {
+            message: { role: "assistant", content: [{ type: "text", text }] },
+          });
+        }
+      },
+    );
+    expect(readAuthorizedTranscriptEventSeqs(database.db, SESSION_ID)?.size).toBe(4);
+    const selectRetainedLines = vi.fn((lines: readonly string[]) => lines.slice(0, 2));
+    const archiveDirectory = path.join(env.OPENCLAW_STATE_DIR!, "agents", AGENT_ID, "sessions");
+
+    await expect(
+      trimSqliteTranscriptForManualCompact(scope(env), selectRetainedLines),
+    ).rejects.toThrow(
+      "Manual transcript compaction is unavailable after scoped-memory cutover. Scoped transcript archival with lineage is not available yet.",
+    );
+
+    expect(selectRetainedLines).not.toHaveBeenCalled();
+    expect(fs.existsSync(archiveDirectory)).toBe(false);
   });
 
   it("rolls the event and every companion row back when companion persistence fails", async () => {
@@ -1029,9 +1070,9 @@ describe("transcript memory policy companions", () => {
     expect(() => readSessionTranscriptMessageEvents(scope(env))).toThrow(
       /projection is rebuilding/i,
     );
-    await expect(trimSqliteTranscriptForManualCompact(scope(env), vi.fn())).resolves.toEqual({
-      trimmed: false,
-    });
+    await expect(trimSqliteTranscriptForManualCompact(scope(env), vi.fn())).rejects.toThrow(
+      "Manual transcript compaction is unavailable after scoped-memory cutover. Scoped transcript archival with lineage is not available yet.",
+    );
 
     const plan = planSqliteSessionStateDeleteIfUnreferenced({
       archiveDirectory: path.join(roots.at(-1) ?? "", "archives"),
@@ -1126,6 +1167,41 @@ describe("transcript memory policy companions", () => {
     expect(readAuthorizedTranscriptDerivation(database.db, SESSION_ID)).toMatchObject({
       eventSeqs: [0, 1, 2, 3, 4, 5, 6],
     });
+  });
+
+  it("captures exact export bytes and durable source receipts only while policy remains current", async () => {
+    const env = createEnv();
+    const database = markCutOver(env);
+    persistExposure(database, { runId: "export-capture-run" });
+    await appendWithRun({ env, runId: "export-capture-run", text: "exported transcript" });
+
+    const captured = captureAuthorizedTranscriptExportSource(database.db, SESSION_ID);
+    expect(captured).toEqual(
+      expect.objectContaining({
+        sourcePolicySetId: expect.stringMatching(/^mpset2_/u),
+        deliveryAudiencesJson: '[{"kind":"user","id":"alice"}]',
+      }),
+    );
+    expect(captured?.eventJsons).toHaveLength(captured?.eventSeqs.length ?? 0);
+    expect(captured?.eventHashes).toHaveLength(captured?.eventSeqs.length ?? 0);
+    expect(captured?.eventHashes.every((hash) => /^[A-Za-z0-9_-]{43}$/u.test(hash))).toBe(true);
+    expect(captured?.sourceEvidence).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          actorEvidenceJson: expect.stringContaining('"principalId":"alice"'),
+          egressReceiptIdsJson: '["egress-receipt-1"]',
+          exposureReceiptIdsJson: '["exposure-receipt-1"]',
+          sourceSessionId: SESSION_ID,
+        }),
+      ]),
+    );
+
+    database.db
+      .prepare(
+        "UPDATE transcript_event_memory_policies SET run_exposure_revision = ? WHERE session_id = ?",
+      )
+      .run(999, SESSION_ID);
+    expect(captureAuthorizedTranscriptExportSource(database.db, SESSION_ID)).toBeUndefined();
   });
 
   it("uses the captured trusted actor and token-free delegation rather than reconstructing session facts", async () => {

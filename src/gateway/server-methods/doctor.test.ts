@@ -28,6 +28,7 @@ const removeBackfillDiaryEntries = vi.hoisted(() => vi.fn());
 const removeGroundedShortTermCandidates = vi.hoisted(() => vi.fn());
 const repairDreamingArtifacts = vi.hoisted(() => vi.fn());
 const loadShortTermPromotionDreamingStats = vi.hoisted(() => vi.fn());
+const isMemoryIsolationCutoverAgent = vi.hoisted(() => vi.fn<(agentId: string) => boolean>(() => false));
 
 vi.mock("../../config/config.js", () => ({
   getRuntimeConfig,
@@ -55,6 +56,10 @@ vi.mock("../../agents/memory-search.js", () => ({
 
 vi.mock("../../plugins/memory-runtime.js", () => ({
   getActiveMemorySearchManager: getMemorySearchManager,
+}));
+
+vi.mock("../../plugins/memory-cutover.js", () => ({
+  isMemoryIsolationCutoverAgent,
 }));
 
 vi.mock("./doctor.memory-core-runtime.js", () => ({
@@ -709,8 +714,8 @@ describe("doctor.memory.status", () => {
       return mainWorkspaceDir;
     });
     loadShortTermPromotionDreamingStats.mockImplementation(
-      async ({ workspaceDir }: { workspaceDir: string }) =>
-        workspaceDir === alphaWorkspaceDir
+      async ({ agentId }: { agentId: string }) =>
+        agentId === "alpha"
           ? makeDreamingStats({
               shortTermCount: 0,
               promotedTotal: 2,
@@ -890,13 +895,12 @@ describe("doctor.memory.status", () => {
     await writeStore(mainWorkspaceDir, "main agent memory");
     await writeStore(alphaWorkspaceDir, "alpha agent memory");
     loadShortTermPromotionDreamingStats.mockImplementation(
-      async ({ workspaceDir }: { workspaceDir: string }) =>
+      async ({ agentId }: { agentId: string }) =>
         makeDreamingStats({
           promotedTotal: 1,
           promotedEntries: [
             makeDreamingEntry("memory/2026-04-04.md", {
-              snippet:
-                workspaceDir === alphaWorkspaceDir ? "alpha agent memory" : "main agent memory",
+              snippet: agentId === "alpha" ? "alpha agent memory" : "main agent memory",
               promotedAt: "2026-04-04T00:00:00.000Z",
             }),
           ],
@@ -1135,7 +1139,141 @@ describe("doctor.memory.status", () => {
   });
 });
 
+describe("doctor.memory legacy workspace admission", () => {
+  it.each(["doctor.memory.status", "doctor.memory.dreamDiary"] as const)(
+    "rejects %s before acquiring a cut-over agent's legacy state",
+    async (method) => {
+      const lstat = vi.spyOn(fs, "lstat");
+      const readFile = vi.spyOn(fs, "readFile");
+      resolveAgentWorkspaceDir.mockClear();
+      getMemorySearchManager.mockClear();
+      isMemoryIsolationCutoverAgent.mockReturnValueOnce(true);
+      const respond = vi.fn();
+
+      try {
+        await invokeDoctorMemory(method, respond);
+
+        expect(resolveAgentWorkspaceDir).not.toHaveBeenCalled();
+        expect(getMemorySearchManager).not.toHaveBeenCalled();
+        expect(lstat).not.toHaveBeenCalled();
+        expect(readFile).not.toHaveBeenCalled();
+        expect(respond).toHaveBeenCalledWith(
+          false,
+          undefined,
+          errorShape(
+            ErrorCodes.UNAVAILABLE,
+            "Legacy dreaming maintenance is unavailable after scoped-memory cutover.",
+          ),
+        );
+      } finally {
+        lstat.mockRestore();
+        readFile.mockRestore();
+        isMemoryIsolationCutoverAgent.mockReset().mockReturnValue(false);
+      }
+    },
+  );
+});
+
 describe("doctor.memory dream actions", () => {
+  it.each([
+    "doctor.memory.backfillDreamDiary",
+    "doctor.memory.resetDreamDiary",
+    "doctor.memory.resetGroundedShortTerm",
+    "doctor.memory.repairDreamingArtifacts",
+    "doctor.memory.dedupeDreamDiary",
+  ] as const)("rejects %s before resolving a cut-over workspace", async (method) => {
+    resolveAgentWorkspaceDir.mockClear();
+    previewGroundedRemMarkdown.mockClear();
+    writeBackfillDiaryEntries.mockClear();
+    removeBackfillDiaryEntries.mockClear();
+    removeGroundedShortTermCandidates.mockClear();
+    repairDreamingArtifacts.mockClear();
+    dedupeDreamDiaryEntries.mockClear();
+    isMemoryIsolationCutoverAgent.mockReturnValueOnce(true);
+    const respond = vi.fn();
+
+    await invokeDoctorMemory(method, respond);
+
+    expect(resolveAgentWorkspaceDir).not.toHaveBeenCalled();
+    expect(previewGroundedRemMarkdown).not.toHaveBeenCalled();
+    expect(writeBackfillDiaryEntries).not.toHaveBeenCalled();
+    expect(removeBackfillDiaryEntries).not.toHaveBeenCalled();
+    expect(removeGroundedShortTermCandidates).not.toHaveBeenCalled();
+    expect(repairDreamingArtifacts).not.toHaveBeenCalled();
+    expect(dedupeDreamDiaryEntries).not.toHaveBeenCalled();
+    expect(respond).toHaveBeenCalledWith(
+      false,
+      undefined,
+      errorShape(
+        ErrorCodes.UNAVAILABLE,
+        "Legacy dreaming maintenance is unavailable after scoped-memory cutover.",
+      ),
+    );
+  });
+
+  it.each(DOCTOR_MEMORY_TARGET_METHODS)(
+    "%s rejects a shared legacy workspace when any configured co-owner has cut over",
+    async (method) => {
+      const sharedWorkspaceDir = "/tmp/doctor-memory-shared-workspace";
+      const cfg = {
+        agents: {
+          list: [
+            { id: "alpha", workspace: sharedWorkspaceDir },
+            { id: "beta", workspace: sharedWorkspaceDir },
+          ],
+        },
+      } as OpenClawConfig;
+      const readFile = vi.spyOn(fs, "readFile");
+      getMemorySearchManager.mockClear();
+      previewGroundedRemMarkdown.mockClear();
+      writeBackfillDiaryEntries.mockClear();
+      removeBackfillDiaryEntries.mockClear();
+      removeGroundedShortTermCandidates.mockClear();
+      repairDreamingArtifacts.mockClear();
+      dedupeDreamDiaryEntries.mockClear();
+      readFile.mockClear();
+      isMemoryIsolationCutoverAgent
+        .mockReset()
+        .mockImplementation((agentId: string) => agentId === "alpha");
+      resolveAgentWorkspaceDir.mockImplementation((_cfg: OpenClawConfig, agentId: string) =>
+        agentId === "alpha" || agentId === "beta" ? sharedWorkspaceDir : "/tmp/openclaw",
+      );
+      getRuntimeConfig.mockReturnValueOnce(cfg);
+      listAgentIds.mockReturnValueOnce(["alpha", "beta"]);
+      const respond = vi.fn();
+
+      try {
+        await invokeDoctorMemory(method, respond, {
+          params: { agentId: "beta" },
+          includeCron: true,
+        });
+
+        expect(getMemorySearchManager).not.toHaveBeenCalled();
+        expect(readFile).not.toHaveBeenCalled();
+        expect(previewGroundedRemMarkdown).not.toHaveBeenCalled();
+        expect(writeBackfillDiaryEntries).not.toHaveBeenCalled();
+        expect(removeBackfillDiaryEntries).not.toHaveBeenCalled();
+        expect(removeGroundedShortTermCandidates).not.toHaveBeenCalled();
+        expect(repairDreamingArtifacts).not.toHaveBeenCalled();
+        expect(dedupeDreamDiaryEntries).not.toHaveBeenCalled();
+        expect(respond).toHaveBeenCalledWith(
+          false,
+          undefined,
+          errorShape(
+            ErrorCodes.UNAVAILABLE,
+            "Legacy dreaming maintenance is unavailable after scoped-memory cutover.",
+          ),
+        );
+      } finally {
+        readFile.mockRestore();
+        getRuntimeConfig.mockReset().mockReturnValue({} as OpenClawConfig);
+        listAgentIds.mockReset().mockReturnValue(["main", "research-analyst", "alpha"]);
+        resolveAgentWorkspaceDir.mockReset().mockReturnValue("/tmp/openclaw");
+        isMemoryIsolationCutoverAgent.mockReset().mockReturnValue(false);
+      }
+    },
+  );
+
   it("clears grounded-only staged short-term entries without touching the diary", async () => {
     resolveAgentWorkspaceDir.mockReturnValue("/tmp/openclaw");
     removeGroundedShortTermCandidates.mockResolvedValue({
@@ -1147,7 +1285,8 @@ describe("doctor.memory dream actions", () => {
     await invokeDoctorMemory("doctor.memory.resetGroundedShortTerm", respond);
 
     expect(removeGroundedShortTermCandidates).toHaveBeenCalledWith({
-      workspaceDir: "/tmp/openclaw",
+      cfg: expect.any(Object),
+      agentId: "main",
     });
     expect(respond).toHaveBeenCalledWith(
       true,
@@ -1176,7 +1315,8 @@ describe("doctor.memory dream actions", () => {
     await invokeDoctorMemory("doctor.memory.repairDreamingArtifacts", respond);
 
     expect(repairDreamingArtifacts).toHaveBeenCalledWith({
-      workspaceDir: "/tmp/openclaw",
+      cfg: expect.any(Object),
+      agentId: "main",
     });
     expect(respond).toHaveBeenCalledWith(
       true,
@@ -1206,7 +1346,8 @@ describe("doctor.memory dream actions", () => {
     await invokeDoctorMemory("doctor.memory.dedupeDreamDiary", respond);
 
     expect(dedupeDreamDiaryEntries).toHaveBeenCalledWith({
-      workspaceDir: "/tmp/openclaw",
+      cfg: expect.any(Object),
+      agentId: "main",
     });
     expect(respond).toHaveBeenCalledWith(
       true,
@@ -1398,7 +1539,10 @@ describe("doctor.memory.dreamDiary", () => {
         inputPaths: [sourcePath],
       });
       const writeInput = mockCallArg(writeBackfillDiaryEntries);
-      expect(writeInput.workspaceDir).toBe(workspaceDir);
+      expect(writeInput).toMatchObject({
+        cfg: expect.any(Object),
+        agentId: "main",
+      });
       const entry = expectDefined(
         (writeInput.entries as Array<Record<string, unknown>>)[0],
         "(writeInput.entries as Array<Record<string, unknown>>)[0] test invariant",
@@ -1454,7 +1598,10 @@ describe("doctor.memory.dreamDiary", () => {
 
     try {
       await invokeDoctorMemory("doctor.memory.resetDreamDiary", respond);
-      expect(removeBackfillDiaryEntries).toHaveBeenCalledWith({ workspaceDir });
+      expect(removeBackfillDiaryEntries).toHaveBeenCalledWith({
+        cfg: expect.any(Object),
+        agentId: "main",
+      });
       expectRecordFields(respondPayload(respond), {
         agentId: "main",
         action: "reset",

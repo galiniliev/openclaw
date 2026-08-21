@@ -2,6 +2,7 @@
 import { createConfiguredProviderLocalServiceAcquirer } from "../agents/provider-local-service.js";
 import { getRuntimeConfig } from "../config/config.js";
 import { createPluginStateKeyedStore } from "../plugin-state/plugin-state-store.js";
+import type { OpenClawConfig } from "./config-contracts.js";
 // Memory core bundled runtime helpers load the internal memory plugin through SDK facades.
 import { loadBundledPluginPublicSurfaceModuleSync } from "./facade-loader.js";
 import type {
@@ -91,27 +92,52 @@ type RuntimeFacadeModule = {
     },
   ) => Promise<EmbeddingProviderResult>;
   removeGroundedShortTermCandidates: (params: {
-    workspaceDir: string;
+    cfg: OpenClawConfig;
+    agentId: string;
   }) => Promise<{ removed: number; storePath: string }>;
   loadShortTermPromotionDreamingStats: (params: {
-    workspaceDir: string;
+    cfg: OpenClawConfig;
+    agentId: string;
     nowMs: number;
     timezone?: string;
   }) => Promise<ShortTermDreamingStats>;
   auditDreamingArtifacts: (params: {
-    workspaceDir: string;
+    cfg: OpenClawConfig;
+    agentId: string;
   }) => Promise<DreamingArtifactsAuditSummary>;
   auditShortTermPromotionArtifacts: (params: {
-    workspaceDir: string;
+    cfg: OpenClawConfig;
+    agentId: string;
   }) => Promise<ShortTermAuditSummary>;
   repairDreamingArtifacts: (params: {
-    workspaceDir: string;
+    cfg: OpenClawConfig;
+    agentId: string;
     archiveDiary?: boolean;
     now?: Date;
   }) => Promise<RepairDreamingArtifactsResult>;
   repairShortTermPromotionArtifacts: (params: {
-    workspaceDir: string;
+    cfg: OpenClawConfig;
+    agentId: string;
   }) => Promise<RepairShortTermPromotionArtifactsResult>;
+  dedupeDreamDiaryEntries: (params: {
+    cfg: OpenClawConfig;
+    agentId: string;
+  }) => Promise<{ dreamsPath: string; removed: number; kept: number }>;
+  writeBackfillDiaryEntries: (params: {
+    cfg: OpenClawConfig;
+    agentId: string;
+    entries: Array<{
+      isoDay: string;
+      bodyLines: string[];
+      sourcePath?: string;
+    }>;
+    preserveExisting?: boolean;
+    timezone?: string;
+  }) => Promise<{ dreamsPath: string; written: number; replaced: number }>;
+  removeBackfillDiaryEntries: (params: {
+    cfg: OpenClawConfig;
+    agentId: string;
+  }) => Promise<{ dreamsPath: string; removed: number }>;
 };
 
 type GroundedRemPreviewItem = {
@@ -240,21 +266,6 @@ type ApiFacadeModule = {
     workspaceDir: string;
     inputPaths: string[];
   }) => Promise<GroundedRemPreviewResult>;
-  dedupeDreamDiaryEntries: (params: {
-    workspaceDir: string;
-  }) => Promise<{ dreamsPath: string; removed: number; kept: number }>;
-  writeBackfillDiaryEntries: (params: {
-    workspaceDir: string;
-    entries: Array<{
-      isoDay: string;
-      bodyLines: string[];
-      sourcePath?: string;
-    }>;
-    timezone?: string;
-  }) => Promise<{ dreamsPath: string; written: number; replaced: number }>;
-  removeBackfillDiaryEntries: (params: {
-    workspaceDir: string;
-  }) => Promise<{ dreamsPath: string; removed: number }>;
   filterRecallEntriesWithinLookback: (params: {
     entries: readonly unknown[];
     nowMs: number;
@@ -363,24 +374,26 @@ export const previewGroundedRemMarkdown: ApiFacadeModule["previewGroundedRemMark
   )) as ApiFacadeModule["previewGroundedRemMarkdown"];
 
 /** Remove duplicate dreaming diary entries while preserving canonical records. */
-export const dedupeDreamDiaryEntries: ApiFacadeModule["dedupeDreamDiaryEntries"] = ((...args) =>
-  loadApiFacadeModule().dedupeDreamDiaryEntries(
+export const dedupeDreamDiaryEntries: RuntimeFacadeModule["dedupeDreamDiaryEntries"] = ((...args) =>
+  loadRuntimeFacadeModule().dedupeDreamDiaryEntries(
     ...args,
-  )) as ApiFacadeModule["dedupeDreamDiaryEntries"];
+  )) as RuntimeFacadeModule["dedupeDreamDiaryEntries"];
 
 /** Write synthetic/backfill dreaming diary entries for harness or migration use. */
-export const writeBackfillDiaryEntries: ApiFacadeModule["writeBackfillDiaryEntries"] = ((...args) =>
-  loadApiFacadeModule().writeBackfillDiaryEntries(
-    ...args,
-  )) as ApiFacadeModule["writeBackfillDiaryEntries"];
-
-/** Remove dreaming diary entries previously written by the backfill helper. */
-export const removeBackfillDiaryEntries: ApiFacadeModule["removeBackfillDiaryEntries"] = ((
+export const writeBackfillDiaryEntries: RuntimeFacadeModule["writeBackfillDiaryEntries"] = ((
   ...args
 ) =>
-  loadApiFacadeModule().removeBackfillDiaryEntries(
+  loadRuntimeFacadeModule().writeBackfillDiaryEntries(
     ...args,
-  )) as ApiFacadeModule["removeBackfillDiaryEntries"];
+  )) as RuntimeFacadeModule["writeBackfillDiaryEntries"];
+
+/** Remove dreaming diary entries previously written by the backfill helper. */
+export const removeBackfillDiaryEntries: RuntimeFacadeModule["removeBackfillDiaryEntries"] = ((
+  ...args
+) =>
+  loadRuntimeFacadeModule().removeBackfillDiaryEntries(
+    ...args,
+  )) as RuntimeFacadeModule["removeBackfillDiaryEntries"];
 
 /** Filter recall entries to the configured REM lookback window. */
 export const filterRecallEntriesWithinLookback: ApiFacadeModule["filterRecallEntriesWithinLookback"] =

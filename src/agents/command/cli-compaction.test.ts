@@ -7,14 +7,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { replaceSessionEntry } from "../../config/sessions/session-accessor.js";
 import { SESSION_TOTAL_TOKENS_VERSION, type SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import {
+  registerContextEngineInRegistry,
+  resolveContextEngine as resolveContextEngineImpl,
+} from "../../context-engine/registry.js";
 import type { ContextEngine } from "../../context-engine/types.js";
 import { createEmptyPluginRegistry } from "../../plugins/registry-empty.js";
+import { withPluginRuntimeRegistryScope } from "../../plugins/runtime/gateway-request-scope.js";
 import {
   resetCliCompactionTestDeps,
   runCliTurnCompactionLifecycle,
   setCliCompactionTestDeps,
 } from "./cli-compaction.js";
 import { recordCliCompactionInStore as recordCliCompactionInStoreImpl } from "./session-store.js";
+
+const memoryCutover = vi.hoisted(() => ({
+  isMemoryIsolationCutoverAgent: vi.fn(() => false),
+}));
+
+vi.mock("../../plugins/memory-cutover.js", () => ({
+  isMemoryIsolationCutoverAgent: memoryCutover.isMemoryIsolationCutoverAgent,
+}));
 
 function buildContextEngine(params: {
   compactCalls: Array<Parameters<ContextEngine["compact"]>[0]>;
@@ -227,6 +240,8 @@ describe("runCliTurnCompactionLifecycle", () => {
   let tmpDir: string;
 
   beforeEach(async () => {
+    memoryCutover.isMemoryIsolationCutoverAgent.mockReset();
+    memoryCutover.isMemoryIsolationCutoverAgent.mockReturnValue(false);
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-cli-compaction-"));
     setCliCompactionTestDeps({
       resolveCliBackendConfig: () => null,
@@ -349,6 +364,62 @@ describe("runCliTurnCompactionLifecycle", () => {
     expect(updatedEntry?.cliSessionBindings?.["claude-cli"]).toBeUndefined();
     expect(updatedEntry?.cliSessionIds?.["claude-cli"]).toBeUndefined();
     expect(updatedEntry?.claudeCliSessionId).toBeUndefined();
+  });
+
+  it.each([false, true])(
+    "fails closed before a cutover CLI transcript reaches a context engine that reports ownsCompaction=%s",
+    async (ownsCompaction) => {
+      memoryCutover.isMemoryIsolationCutoverAgent.mockReturnValue(true);
+      const scenario = await prepareCompactionScenario({
+        suffix: `cutover-context-engine-${String(ownsCompaction)}`,
+        tmpDir,
+        contextEngine: (compactCalls) => ({
+          ...buildContextEngine({ compactCalls }),
+          info: {
+            id: "context-engine",
+            name: "Context Engine",
+            ownsCompaction,
+          },
+        }),
+      });
+
+      await expect(scenario.run()).rejects.toThrow(
+        "CLI transcript compaction failed for claude-cli/opus: memory derivation authorization unavailable for context-engine compaction",
+      );
+      expect(memoryCutover.isMemoryIsolationCutoverAgent).toHaveBeenCalledWith("main");
+      expect(scenario.compactCalls).toHaveLength(0);
+      expect(scenario.maintenance).not.toHaveBeenCalled();
+      expect(scenario.recordCliCompactionInStore).not.toHaveBeenCalled();
+    },
+  );
+
+  it("allows the registry-wrapped core legacy engine to compact a cutover CLI transcript", async () => {
+    memoryCutover.isMemoryIsolationCutoverAgent.mockReturnValue(true);
+    const compactCalls: CompactParams[] = [];
+    const pluginRegistry = createEmptyPluginRegistry();
+    expect(
+      registerContextEngineInRegistry(
+        pluginRegistry,
+        "legacy",
+        async () => buildContextEngine({ compactCalls }),
+        "core",
+      ),
+    ).toEqual({ ok: true });
+
+    const scenario = await prepareCompactionScenario({
+      suffix: "cutover-core-legacy",
+      tmpDir,
+      deps: {
+        ensureContextEnginesInitialized: () => {},
+        loadAgentRuntimePluginRegistryHandle: () => pluginRegistry,
+        resolveContextEngine: async () => await resolveContextEngineImpl(),
+      },
+    });
+
+    await expect(
+      withPluginRuntimeRegistryScope(pluginRegistry, async () => await scenario.run()),
+    ).resolves.toBeDefined();
+    expect(compactCalls).toHaveLength(1);
   });
 
   it("records context-engine compaction successor session targets", async () => {

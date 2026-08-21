@@ -12,6 +12,7 @@ import {
   createAuthorizedMemoryReadHost,
   createAuthorizedMemoryWriteHost,
   resolveAuthorizedMemoryVirtualFileBroker,
+  stageAuthorizedMemoryChildDelegation,
 } from "../../../../src/agents/memory-authorized-read-host.js";
 import { prepareMemoryEgressAuthorization } from "../../../../src/agents/memory-egress-admission.js";
 import { createReplyDispatcher } from "../../../../src/auto-reply/reply/reply-dispatcher.js";
@@ -21,7 +22,10 @@ import {
   createChannelMemoryIdentityAdmission,
 } from "../../../../src/channels/message-access/memory-identity-admission.js";
 import { writeSessionEntry } from "../../../../src/config/sessions/session-accessor.sqlite-entry-store.js";
-import { appendSqliteTranscriptMessage } from "../../../../src/config/sessions/session-accessor.sqlite-transcript-write.js";
+import {
+  appendSqliteTranscriptMessage,
+  commitSealedSqliteTranscriptCompaction,
+} from "../../../../src/config/sessions/session-accessor.sqlite-transcript-write.js";
 import { readAuthorizedTranscriptDerivation } from "../../../../src/config/sessions/session-transcript-memory-policy.js";
 import { withOwnedSessionTranscriptWrites } from "../../../../src/config/sessions/transcript-write-context.js";
 import {
@@ -40,6 +44,7 @@ import {
   resetPluginRuntimeStateForTest,
   setActivePluginRegistry,
 } from "../../../../src/plugins/runtime.js";
+import { readMemoryChildTaskCapabilitySnapshot } from "../../../../src/state/memory-child-delegation.js";
 import {
   adminLinkAdmittedMemoryIdentity,
   ensureMemoryOperationalPrincipal,
@@ -884,7 +889,7 @@ describe("builtin scoped authorized runtime", () => {
     }
   });
 
-  it("records transcript policy-set lineage for an authorized compaction derivation", async () => {
+  it("records transcript policy-set lineage and reads a committed sealed compaction", async () => {
     const principalId = "compaction-owner";
     const sourceStore = createBuiltinScopedMemoryStore({
       agentId: "main",
@@ -992,6 +997,33 @@ describe("builtin scoped authorized runtime", () => {
       throw new Error("fixture expected an authorized transcript derivation");
     }
 
+    await expect(
+      builtinScopedMemoryAuthorizedRuntime.writeAuthorized({
+        context,
+        plan,
+        mutation: {
+          version: 1,
+          kind: "derive",
+          derivationPurpose: "flush",
+          mutationId: "mixed-audience-flush-output",
+          idempotencyKey: "mixed-audience-flush-output-request",
+          content: "MIXED_AUDIENCE_FLUSH_OUTPUT_SENTINEL",
+          contentType: "markdown",
+          sourcePolicySetId: transcript.sourcePolicySetId,
+          transcriptSource: {
+            kind: "transcript",
+            sessionId: context.sessionId,
+            eventSeqs: transcript.eventSeqs,
+            sourcePolicySetId: transcript.sourcePolicySetId,
+            deliveryAudiencesJson: JSON.stringify([
+              { kind: "user", id: principalId },
+              { kind: "conversation", id: "telegram-group" },
+            ]),
+          },
+        },
+      }),
+    ).rejects.toThrow("authorized memory derivation has no representable audience");
+
     const derived = await builtinScopedMemoryAuthorizedRuntime.writeAuthorized({
       context,
       plan,
@@ -1040,6 +1072,106 @@ describe("builtin scoped authorized runtime", () => {
         },
       ]);
     });
+
+    const staged = await builtinScopedMemoryAuthorizedRuntime.stageSealedCompaction({
+      context,
+      plan,
+      content: "SEALED_COMPACTION_DERIVED_OUTPUT_SENTINEL",
+      transcriptSource: {
+        kind: "transcript",
+        sessionId: context.sessionId,
+        eventSeqs: transcript.eventSeqs,
+        sourcePolicySetId: transcript.sourcePolicySetId,
+        deliveryAudiencesJson: transcript.deliveryAudiencesJson,
+      },
+    });
+    const compactionPolicyId = randomUUID();
+    await withOwnedSessionTranscriptWrites(
+      {
+        sessionTarget: {
+          agentId: context.agentId,
+          expectedWriterRunId: context.runId,
+          sessionId: context.sessionId,
+          sessionKey: context.sessionKey,
+        },
+        withTranscriptWrite: async (run) => await run(),
+      },
+      async () =>
+        await commitSealedSqliteTranscriptCompaction({
+          scope: {
+            agentId: context.agentId,
+            sessionId: context.sessionId,
+            sessionKey: context.sessionKey,
+          },
+          event: {
+            type: "compaction",
+            id: "sealed-compaction-entry",
+            parentId: null,
+            timestamp: new Date().toISOString(),
+            summary: "sealed summary",
+            firstKeptEntryId: "source-message",
+          },
+          compactionPolicyId,
+          source: transcript,
+          commitDerivedState({ database, eventSeq }) {
+            staged.commitInTransaction({
+              database: database.db,
+              compactionPolicyId,
+              eventSeq,
+            });
+          },
+        }),
+    );
+
+    expect(
+      readBuiltinScopedMemoryRevisionSnapshot({
+        agentId: "main",
+        storeIds: [sourceStore.storeId],
+        revisionId: staged.resourceRevisionId,
+      }),
+    ).toMatchObject({ content: "SEALED_COMPACTION_DERIVED_OUTPUT_SENTINEL" });
+    withScopedMemoryDatabase("main", (scopedDatabase) => {
+      expect(
+        scopedDatabase
+          .prepare(
+            `SELECT parent_kind, parent_id, relation_kind
+               FROM memory_lineage_edges
+              WHERE child_revision_id = ?
+              ORDER BY parent_kind, parent_id, relation_kind`,
+          )
+          .all(staged.resourceRevisionId),
+      ).toEqual(
+        expect.arrayContaining([
+          {
+            parent_kind: "compaction-policy",
+            parent_id: compactionPolicyId,
+            relation_kind: "compacted-from",
+          },
+          {
+            parent_kind: "resource-revision",
+            parent_id: source.revisionId,
+            relation_kind: "derived-from",
+          },
+          {
+            parent_kind: "transcript-policy-set",
+            parent_id: transcript.sourcePolicySetId,
+            relation_kind: "compacted-from",
+          },
+        ]),
+      );
+    });
+    setBuiltinScopedMemoryRevisionLifecycle({
+      agentId: "main",
+      revisionId: source.revisionId,
+      lifecycleState: "tombstoned",
+    });
+    expect(
+      readBuiltinScopedMemoryRevisionSnapshot({
+        agentId: "main",
+        storeIds: [sourceStore.storeId],
+        revisionId: staged.resourceRevisionId,
+      }),
+    ).toBeUndefined();
   });
 
   it("keeps verified private stores isolated through the actual host and selected runtime", async () => {
@@ -1126,6 +1258,241 @@ describe("builtin scoped authorized runtime", () => {
         deliveryContext: { channel: "telegram", accountId: "default", to: "alice" },
       }),
     ).toBeUndefined();
+  });
+
+  it("mounts only Alice's authorized view for an active spawned child delegation", async () => {
+    const parentSession = { sessionKey: "agent:main:direct:alice", sessionId: "alice-session" };
+    const alicePrincipalId = createVerifiedDirectSession({ name: "alice", ...parentSession });
+    const bobSession = { sessionKey: "agent:main:direct:bob", sessionId: "bob-session" };
+    const bobPrincipalId = createVerifiedDirectSession({ name: "bob", ...bobSession });
+    createPrivateResource(alicePrincipalId, "ALICE_CHILD_DELEGATION_SENTINEL");
+    createPrivateResource(bobPrincipalId, "BOB_CHILD_DELEGATION_SENTINEL");
+    const childSession = {
+      sessionKey: "agent:main:subagent:alice-child",
+      sessionId: "alice-child-session",
+    };
+    const child = createSpawnedChildSession({
+      ...childSession,
+      spawnedBy: parentSession.sessionKey,
+    });
+
+    markCutOver();
+    installBuiltinSelectedRuntime();
+    await expect(
+      admitMemoryAuthorizationReadRuntime({
+        authorization: MEMORY_CORE_AUTHORIZATION_CAPABILITIES,
+        authorizationConformance: builtinScopedMemoryConformanceAdapter,
+        runtime: builtinScopedMemoryAuthorizedRuntime,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    const parentHost = createAuthorizedMemoryReadHost({
+      agentId: "main",
+      ...parentSession,
+      deliveryContext: { channel: "telegram", accountId: "default", to: "alice" },
+    });
+    if (!parentHost) {
+      throw new Error("fixture failed to build the parent memory host");
+    }
+    await expect(
+      parentHost.search({ query: "ALICE_CHILD_DELEGATION_SENTINEL", limit: 10 }),
+    ).resolves.toMatchObject({ results: [{ snippet: "ALICE_CHILD_DELEGATION_SENTINEL" }] });
+    expect(
+      readMemoryChildTaskCapabilitySnapshot({ child, options: { agentId: "main" } }),
+    ).toBeDefined();
+    expect(
+      openOpenClawAgentDatabase({ agentId: "main" })
+        .db.prepare("SELECT spawned_by FROM session_nodes WHERE session_key = ?")
+        .get(childSession.sessionKey),
+    ).toEqual({ spawned_by: parentSession.sessionKey });
+    const reloadedParent = createCurrentMemorySessionContext({
+      ...parentSession,
+      options: { agentId: "main" },
+    });
+    const reloadedChild = createCurrentMemorySessionContext({
+      ...childSession,
+      options: { agentId: "main" },
+    });
+    expect(reloadedParent.kind).toBe("current");
+    expect(reloadedChild).toMatchObject({
+      kind: "current",
+      context: {
+        isChildSession: true,
+        sessionIdentityRevision: child.sessionIdentityRevision,
+      },
+    });
+    const lease = await stageAuthorizedMemoryChildDelegation({
+      agentId: "main",
+      parentSessionKey: parentSession.sessionKey,
+      parentSessionId: parentSession.sessionId,
+      childSessionKey: childSession.sessionKey,
+      childSessionId: childSession.sessionId,
+      childSessionIdentityRevision: child.sessionIdentityRevision,
+      expiresAt: Date.now() + 60_000,
+      deliveryContext: { channel: "telegram", accountId: "default", to: "alice" },
+    });
+    expect(lease).toBeDefined();
+    await expect(lease?.activate()).resolves.toBe(true);
+
+    const childHost = createAuthorizedMemoryReadHost({
+      agentId: "main",
+      ...childSession,
+      // The child cannot replace the parent-authorized recipient with Bob.
+      deliveryContext: { channel: "telegram", accountId: "default", to: "bob" },
+    });
+    if (!childHost) {
+      throw new Error("fixture failed to build the delegated child memory host");
+    }
+
+    await expect(
+      childHost.search({ query: "ALICE_CHILD_DELEGATION_SENTINEL", limit: 10 }),
+    ).resolves.toMatchObject({ results: [{ snippet: "ALICE_CHILD_DELEGATION_SENTINEL" }] });
+    await expect(
+      childHost.search({ query: "BOB_CHILD_DELEGATION_SENTINEL", limit: 10 }),
+    ).resolves.toEqual({
+      results: [],
+    });
+    expect(
+      createAuthorizedMemoryWriteHost({
+        agentId: "main",
+        ...childSession,
+        deliveryContext: { channel: "telegram", accountId: "default", to: "alice" },
+      }),
+    ).toBeUndefined();
+
+    await lease.revoke();
+    // The host has already cached an invocation. Its next use must recheck the
+    // durable child grant instead of treating the original mount as authority.
+    await expect(
+      childHost.search({ query: "ALICE_CHILD_DELEGATION_SENTINEL", limit: 10 }),
+    ).resolves.toMatchObject({ unavailable: true });
+    expect(
+      createAuthorizedMemoryReadHost({
+        agentId: "main",
+        ...childSession,
+        deliveryContext: { channel: "telegram", accountId: "default", to: "alice" },
+      }),
+    ).toBeUndefined();
+  });
+
+  it("rejects forged, replayed, expired, revoked, rebound, and cross-agent child capabilities", async () => {
+    createPrivateResource("alice", "ALICE_CHILD_CAPABILITY_SENTINEL");
+    const parent = createContext("alice");
+    const child = {
+      agentId: "main",
+      sessionId: "child-session",
+      sessionIdentityRevision: "child-generation",
+      subjectRevision: "child-subject",
+      capabilitySnapshotId: "mcap1_child-tools",
+    };
+    const issued = await builtinScopedMemoryAuthorizedRuntime.issueChildDelegation({
+      version: 1,
+      delegationId: "child-delegation",
+      parentContext: parent,
+      child,
+      allowedOperations: ["read"],
+      maximumAudiences: parent.delivery.audiences,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const delegated: MemoryContentAccessContext<"read"> = {
+      ...parent,
+      contextId: "child-context",
+      contextFingerprint: "child-fingerprint",
+      runId: "child-run",
+      sessionKey: "agent:main:subagent:child",
+      sessionId: child.sessionId,
+      sessionIdentityRevision: child.sessionIdentityRevision,
+      subjectRevision: child.subjectRevision,
+      delegation: {
+        rootPrincipalId: "alice",
+        rootContextId: parent.contextId,
+        parentContextId: parent.contextId,
+        parentMemoryPlanId: issued.parentMemoryPlanId,
+        capabilitySnapshotId: child.capabilitySnapshotId,
+        allowedOperations: ["read"],
+        maximumAudiences: parent.delivery.audiences,
+        storeCapToken: issued.storeCapToken,
+        depth: 1,
+      },
+    };
+
+    const authorizedPlan = await builtinScopedMemoryAuthorizedRuntime.authorize(delegated);
+    await expect(
+      builtinScopedMemoryAuthorizedRuntime.searchAuthorized({
+        context: delegated,
+        plan: authorizedPlan,
+        query: "ALICE_CHILD_CAPABILITY_SENTINEL",
+        limit: 10,
+      }),
+    ).resolves.toMatchObject({
+      value: [{ snippet: "ALICE_CHILD_CAPABILITY_SENTINEL" }],
+    });
+
+    const deniedContexts = [
+      {
+        ...delegated,
+        delegation: { ...delegated.delegation!, storeCapToken: "mchildcap1_forged" },
+      },
+      { ...delegated, sessionId: "other-child-session" },
+      { ...delegated, sessionIdentityRevision: "rebound-child-generation" },
+      { ...delegated, agentId: "other-agent" },
+    ];
+    for (const denied of deniedContexts) {
+      const plan = await builtinScopedMemoryAuthorizedRuntime.authorize(denied);
+      await expect(
+        builtinScopedMemoryAuthorizedRuntime.searchAuthorized({
+          context: denied,
+          plan,
+          query: "ALICE_CHILD_CAPABILITY_SENTINEL",
+          limit: 10,
+        }),
+      ).resolves.toMatchObject({ value: [] });
+    }
+
+    await builtinScopedMemoryAuthorizedRuntime.revokeChildDelegation({
+      agentId: "main",
+      storeCapToken: issued.storeCapToken,
+    });
+    const revokedPlan = await builtinScopedMemoryAuthorizedRuntime.authorize(delegated);
+    await expect(
+      builtinScopedMemoryAuthorizedRuntime.searchAuthorized({
+        context: delegated,
+        plan: revokedPlan,
+        query: "ALICE_CHILD_CAPABILITY_SENTINEL",
+        limit: 10,
+      }),
+    ).resolves.toMatchObject({ value: [] });
+
+    vi.useFakeTimers();
+    try {
+      const expiresAt = Date.now() + 1_000;
+      const expiredIssue = await builtinScopedMemoryAuthorizedRuntime.issueChildDelegation({
+        version: 1,
+        delegationId: "expiring-child-delegation",
+        parentContext: parent,
+        child: { ...child, sessionId: "expiring-child-session" },
+        allowedOperations: ["read"],
+        maximumAudiences: parent.delivery.audiences,
+        expiresAt: new Date(expiresAt).toISOString(),
+      });
+      const expiring = {
+        ...delegated,
+        sessionId: "expiring-child-session",
+        delegation: {
+          ...delegated.delegation!,
+          parentMemoryPlanId: expiredIssue.parentMemoryPlanId,
+          storeCapToken: expiredIssue.storeCapToken,
+        },
+      };
+      expect(
+        (await builtinScopedMemoryAuthorizedRuntime.authorize(expiring)).mounts,
+      ).not.toHaveLength(0);
+      vi.advanceTimersByTime(1_001);
+      expect((await builtinScopedMemoryAuthorizedRuntime.authorize(expiring)).mounts).toHaveLength(
+        0,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("invalidates materialized virtual views after binding revocation and plan expiry", async () => {

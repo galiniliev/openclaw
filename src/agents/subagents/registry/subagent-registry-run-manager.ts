@@ -230,6 +230,11 @@ export type RegisterSubagentRunParams = {
   runId: string;
   requesterTurnRunId?: string;
   childSessionKey: string;
+  childSessionGeneration?: {
+    agentId: string;
+    sessionId: string;
+    lifecycleRevision: string;
+  };
   controllerSessionKey?: string;
   requesterSessionKey: string;
   requesterOrigin?: DeliveryContext;
@@ -1200,6 +1205,7 @@ export function createSubagentRunManager(params: {
         ? { requesterTurnRunId }
         : {}),
       childSessionKey,
+      childSessionGeneration: registerParams.childSessionGeneration,
       controllerSessionKey,
       requesterSessionKey,
       requesterOrigin,

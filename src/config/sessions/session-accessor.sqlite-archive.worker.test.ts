@@ -950,7 +950,7 @@ function createTestTrajectoryEvent(sessionId: string): TrajectoryEvent {
   };
 }
 
-function readArchiveLines(archivePath: string | undefined): string[] {
+function readArchiveLines(archivePath: string | null | undefined): string[] {
   expect(archivePath).toBeTruthy();
   return readSessionArchiveContentSync(archivePath ?? "")
     .trim()

@@ -7,12 +7,17 @@ const mocks = vi.hoisted(() => ({
   exportTrajectoryForCommand: vi.fn(),
   formatTrajectoryCommandExportSummary: vi.fn(),
   getRuntimeConfig: vi.fn(),
+  isMemoryIsolationCutoverAgent: vi.fn(),
   loadSessionEntryReadOnly: vi.fn(),
   resolveStorePath: vi.fn(),
 }));
 
 vi.mock("../config/config.js", () => ({
   getRuntimeConfig: mocks.getRuntimeConfig,
+}));
+
+vi.mock("../plugins/memory-cutover.js", () => ({
+  isMemoryIsolationCutoverAgent: mocks.isMemoryIsolationCutoverAgent,
 }));
 
 vi.mock("../config/sessions/session-accessor.js", async (importOriginal) => {
@@ -48,6 +53,7 @@ describe("exportTrajectoryCommand", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getRuntimeConfig.mockReturnValue({});
+    mocks.isMemoryIsolationCutoverAgent.mockReturnValue(false);
     mocks.resolveStorePath.mockReturnValue("/tmp/openclaw/sessions.json");
     mocks.loadSessionEntryReadOnly.mockReturnValue(undefined);
     mocks.exportTrajectoryForCommand.mockResolvedValue({
@@ -259,5 +265,31 @@ describe("exportTrajectoryCommand", () => {
     expect(runtime.error).not.toHaveBeenCalled();
     expect(runtime.exit).not.toHaveBeenCalled();
     expect(runtime.log).toHaveBeenCalledWith("trajectory exported");
+  });
+
+  it("blocks a cutover session before store reads or trajectory export side effects", async () => {
+    const runtime = createRuntime();
+    mocks.isMemoryIsolationCutoverAgent.mockImplementation(
+      (agentId: string) => agentId === "target",
+    );
+
+    await exportTrajectoryCommand(
+      {
+        sessionKey: "agent:target:telegram:direct:123",
+        // An explicit legacy store target must not relabel the selected cutover session.
+        agent: "legacy",
+        output: "sensitive-bundle",
+      },
+      runtime,
+    );
+
+    expect(runtime.error).toHaveBeenCalledWith(
+      "Trajectory export is unavailable after scoped-memory cutover. Scoped transcript export with lineage is not available yet.",
+    );
+    expect(runtime.exit).toHaveBeenCalledWith(1);
+    expect(mocks.getRuntimeConfig).not.toHaveBeenCalled();
+    expect(mocks.resolveStorePath).not.toHaveBeenCalled();
+    expect(mocks.loadSessionEntryReadOnly).not.toHaveBeenCalled();
+    expect(mocks.exportTrajectoryForCommand).not.toHaveBeenCalled();
   });
 });

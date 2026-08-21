@@ -5,7 +5,10 @@ import type { ExecToolDetails } from "../../agents/bash-tools.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import type { ExecApprovalRequest } from "../../infra/exec-approvals.js";
 import type { ReplyPayload } from "../types.js";
-import { parseExportCommandOutputPath } from "./commands-export-common.js";
+import {
+  parseExportCommandOutputPath,
+  rejectLegacyTranscriptExportAfterMemoryCutover,
+} from "./commands-export-common.js";
 import {
   buildCurrentOpenClawCliArgv,
   buildCurrentOpenClawCliCommand,
@@ -53,6 +56,10 @@ export async function buildExportTrajectoryCommandReply(
   params: HandleCommandsParams,
   deps: Partial<ExportTrajectoryCommandDeps> = {},
 ): Promise<ReplyPayload> {
+  const cutoverDenial = rejectLegacyTranscriptExportAfterMemoryCutover(params);
+  if (cutoverDenial) {
+    return cutoverDenial;
+  }
   const resolvedDeps: ExportTrajectoryCommandDeps = {
     ...defaultExportTrajectoryCommandDeps,
     ...deps,

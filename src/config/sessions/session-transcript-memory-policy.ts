@@ -19,6 +19,7 @@ type TranscriptMemoryPolicyDatabase = Pick<
   | "memory_policy_set_members"
   | "memory_policy_sets"
   | "memory_compaction_policies"
+  | "memory_compaction_policy_sources"
   | "memory_resource_revisions"
   | "memory_run_exposure_resources"
   | "memory_run_exposures"
@@ -78,6 +79,35 @@ export type AuthorizedTranscriptDerivation = Readonly<{
   eventSeqs: readonly number[];
   sourcePolicySetId: string;
   deliveryAudiencesJson: string;
+}>;
+
+/**
+ * Host-owned transcript bytes captured only after the complete source set has
+ * passed the derivation policy. Export callers cannot choose rows or replace
+ * this snapshot with a later transcript read.
+ */
+export type AuthorizedTranscriptExportSource = AuthorizedTranscriptDerivation &
+  Readonly<{
+    eventJsons: readonly string[];
+    eventHashes: readonly string[];
+    sourceEvidence: readonly AuthorizedTranscriptExportEventEvidence[];
+    contentHash: string;
+  }>;
+
+/** Immutable source-policy facts copied into an export manifest, never inferred from JSON. */
+export type AuthorizedTranscriptExportEventEvidence = Readonly<{
+  eventSeq: number;
+  sourceEventSeq: number;
+  sourceSessionId: string;
+  sessionIdentityRevision: string;
+  subjectRevision: string;
+  runExposureRevision: number;
+  runExposureSetId: string;
+  actorEvidenceJson: string;
+  delegationSnapshotJson: string;
+  exposedResourceRevisionsJson: string;
+  exposureReceiptIdsJson: string;
+  egressReceiptIdsJson: string;
 }>;
 
 /** Immutable policy evidence for one sealed compaction output. */
@@ -1141,6 +1171,114 @@ export function readAuthorizedTranscriptDerivation(
   }
 }
 
+function transcriptExportHash(parts: readonly string[]): string {
+  return createHash("sha256").update(parts.join("\u0000")).digest("base64url");
+}
+
+/**
+ * Captures the exact canonical event bytes behind one currently-authorized
+ * transcript source. This is intentionally separate from the derivation
+ * descriptor: compaction needs only lineage identifiers, while an export must
+ * bind its manifest to immutable bytes before it can be published.
+ */
+export function captureAuthorizedTranscriptExportSource(
+  db: DatabaseSync,
+  sessionId: string,
+): AuthorizedTranscriptExportSource | undefined {
+  const derivation = readAuthorizedTranscriptDerivation(db, sessionId);
+  if (!derivation) {
+    return undefined;
+  }
+  try {
+    const rows = executeSqliteQuerySync(
+      db,
+      policyDatabase(db)
+        .selectFrom("transcript_events")
+        .select(["event_json", "seq"])
+        .where("session_id", "=", sessionId)
+        .orderBy("seq"),
+    ).rows;
+    if (
+      rows.length !== derivation.eventSeqs.length ||
+      rows.some((row, index) => row.seq !== derivation.eventSeqs[index])
+    ) {
+      return undefined;
+    }
+    const eventJsons = Object.freeze(rows.map((row) => row.event_json));
+    const eventHashes = Object.freeze(
+      eventJsons.map((eventJson) => createHash("sha256").update(eventJson).digest("base64url")),
+    );
+    const evidenceRows = executeSqliteQuerySync(
+      db,
+      policyDatabase(db)
+        .selectFrom("transcript_event_memory_policies as policy")
+        .innerJoin("transcript_event_memory_policy_details as detail", (join) =>
+          join
+            .onRef("detail.session_id", "=", "policy.session_id")
+            .onRef("detail.event_seq", "=", "policy.event_seq"),
+        )
+        .select([
+          "policy.event_seq",
+          "policy.run_exposure_revision",
+          "policy.run_exposure_set_id",
+          "policy.session_identity_revision",
+          "policy.subject_revision",
+          "detail.actor_evidence_json",
+          "detail.delegation_snapshot_json",
+          "detail.egress_receipt_ids_json",
+          "detail.exposed_resource_revisions_json",
+          "detail.exposure_receipt_ids_json",
+          "detail.source_event_seq",
+          "detail.source_session_id",
+        ])
+        .where("policy.session_id", "=", sessionId)
+        .where("policy.authorization_status", "=", "authorized")
+        .where("detail.retention_state", "=", "retained")
+        .orderBy("policy.event_seq"),
+    ).rows;
+    if (
+      evidenceRows.length !== derivation.eventSeqs.length ||
+      evidenceRows.some(
+        (row, index) =>
+          row.event_seq !== derivation.eventSeqs[index] ||
+          row.run_exposure_set_id === null ||
+          row.run_exposure_revision === null ||
+          row.session_identity_revision === null ||
+          row.subject_revision === null,
+      )
+    ) {
+      return undefined;
+    }
+    const sourceEvidence = Object.freeze(
+      evidenceRows.map((row) =>
+        Object.freeze({
+          eventSeq: row.event_seq,
+          sourceEventSeq: row.source_event_seq,
+          sourceSessionId: row.source_session_id,
+          sessionIdentityRevision: row.session_identity_revision!,
+          subjectRevision: row.subject_revision!,
+          runExposureRevision: row.run_exposure_revision!,
+          runExposureSetId: row.run_exposure_set_id!,
+          actorEvidenceJson: row.actor_evidence_json,
+          delegationSnapshotJson: row.delegation_snapshot_json,
+          exposedResourceRevisionsJson: row.exposed_resource_revisions_json,
+          exposureReceiptIdsJson: row.exposure_receipt_ids_json,
+          egressReceiptIdsJson: row.egress_receipt_ids_json,
+        }),
+      ),
+    );
+    return Object.freeze({
+      ...derivation,
+      eventJsons,
+      eventHashes,
+      sourceEvidence,
+      contentHash: transcriptExportHash(eventHashes),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Stores only a source set which is still the complete authorized transcript.
  * The caller owns the surrounding transaction that also appends the summary,
@@ -1275,7 +1413,12 @@ export function readSealedCompactionOutputMemoryPolicyInTransaction(params: {
     return undefined;
   }
   const firstEventSeq = params.source.eventSeqs[0];
-  return [...readPreservedTranscriptMemoryPoliciesInTransaction(params.database, params.sessionId).values()]
+  return [
+    ...readPreservedTranscriptMemoryPoliciesInTransaction(
+      params.database,
+      params.sessionId,
+    ).values(),
+  ]
     .flat()
     .find(
       (policy) =>

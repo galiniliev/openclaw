@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { OPENCLAW_EMBEDDED_CONTEXT_ENGINE_HOST } from "../../context-engine/host-compat.js";
 import { buildContextEngineRuntimeSettings } from "../../context-engine/runtime-settings.js";
 import type { ContextEngine } from "../../context-engine/types.js";
@@ -11,6 +11,14 @@ import {
 import { createEmbeddedRunContextRecoveryState } from "./run/context-recovery-state.js";
 import type { PreparedEmbeddedRunInput } from "./run/execution-context.js";
 import type { EmbeddedRunAttemptResult } from "./run/types.js";
+
+const memoryCutover = vi.hoisted(() => ({
+  isMemoryIsolationCutoverAgent: vi.fn(() => false),
+}));
+
+vi.mock("../../plugins/memory-cutover.js", () => ({
+  isMemoryIsolationCutoverAgent: memoryCutover.isMemoryIsolationCutoverAgent,
+}));
 
 // Keep this dedicated leaf on the compaction composition boundary. Runtime/auth/lane policy is
 // covered at its direct owners so this shard never reloads the complete public runner graph.
@@ -45,9 +53,12 @@ function makeAttempt(overrides: Partial<EmbeddedRunAttemptResult> = {}): Embedde
   };
 }
 
-function makeContextEngine(compact = vi.fn()): ContextEngine {
+function makeContextEngine(
+  compact = vi.fn(),
+  ownsCompaction: boolean | undefined = true,
+): ContextEngine {
   return {
-    info: { id: "test", name: "Test", ownsCompaction: true },
+    info: { id: "test", name: "Test", ownsCompaction },
     ingest: vi.fn(),
     assemble: vi.fn(),
     compact,
@@ -55,6 +66,11 @@ function makeContextEngine(compact = vi.fn()): ContextEngine {
 }
 
 describe("compactEmbeddedRunForRecovery", () => {
+  beforeEach(() => {
+    memoryCutover.isMemoryIsolationCutoverAgent.mockReset();
+    memoryCutover.isMemoryIsolationCutoverAgent.mockReturnValue(false);
+  });
+
   it("carries locked model, auth, fallback, cache, and overflow facts into compaction", async () => {
     const compact = vi.fn(async () => ({
       ok: true as const,
@@ -145,6 +161,68 @@ describe("compactEmbeddedRunForRecovery", () => {
       },
     });
   });
+
+  it.each([
+    [false, "overflow"],
+    [true, "timeout_recovery"],
+  ] as const)(
+    "fails closed before a cutover transcript reaches a context engine that reports ownsCompaction=%s during %s recovery",
+    async (ownsCompaction, trigger) => {
+      const compact = vi.fn(async () => ({ ok: true as const, compacted: true as const }));
+      memoryCutover.isMemoryIsolationCutoverAgent.mockReturnValue(true);
+
+      const result = await compactEmbeddedRunForRecovery(
+        {
+          runParams: baseRunParams,
+          state: createEmbeddedRunContextRecoveryState(),
+          contextEngine: makeContextEngine(compact, ownsCompaction),
+          genericCompactionRecoveryAllowed: true,
+          attempt: makeAttempt(),
+          runtimeAuthPlan: {} as AgentRuntimeAuthPlan,
+          resolvedSessionKey: baseRunParams.sessionKey,
+          sessionAgentId: "main",
+          agentDir: "/tmp/agent",
+          workspaceDir: "/tmp/workspace",
+          provider: "openai",
+          modelId: "gpt-5.5",
+          harnessRuntime: "openclaw",
+          thinkLevel: "off",
+          authProfileIdSource: "auto",
+          resolveContextEnginePluginId: () => undefined,
+          buildRuntimeSettings: ({ tokenBudget, degradedReason }) =>
+            buildContextEngineRuntimeSettings({
+              contextEngineHost: OPENCLAW_EMBEDDED_CONTEXT_ENGINE_HOST,
+              provider: "openai",
+              requestedModel: "gpt-5.5",
+              resolvedModel: "gpt-5.5",
+              promptTokenBudget: tokenBudget,
+              degradedReason,
+            }),
+          onCompactionHookMessages: vi.fn(async () => {}),
+          runOwnsCompactionBeforeHook: vi.fn(async () => {}),
+          runOwnsCompactionAfterHook: vi.fn(async () => {}),
+          adoptCompactionTranscript: vi.fn(async () => undefined),
+          getActiveSession: () => ({ id: "session-1", file: baseRunParams.sessionFile }),
+          armPostCompactionGuard: vi.fn(),
+        },
+        {
+          tokenBudget: 200_000,
+          trigger,
+          diagId: `diag-cutover-${trigger}`,
+          attempt: 1,
+          maxAttempts: 3,
+        },
+      );
+
+      expect(result.result).toEqual({
+        ok: false,
+        compacted: false,
+        reason: "memory derivation authorization unavailable for context-engine compaction",
+        failure: { reason: "memory_derivation_unavailable" },
+      });
+      expect(compact).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("createEmbeddedRunCompactionRuntime", () => {

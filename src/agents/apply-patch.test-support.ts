@@ -1,11 +1,15 @@
 import type { ApplyPatchSummary } from "./apply-patch.js";
 import "./apply-patch.js";
+import type { MemoryFileMutationGuard } from "./memory-file-mutation-guard.js";
+import type { MemoryWriteProvenanceObserver } from "./memory-write-provenance.js";
 import type { SandboxFsBridge } from "./sandbox/fs-bridge.js";
 
 type ApplyPatchOptions = {
   cwd: string;
   sandbox?: { root: string; bridge: SandboxFsBridge };
   workspaceOnly?: boolean;
+  memoryFileMutationGuard?: MemoryFileMutationGuard;
+  memoryWriteProvenance?: MemoryWriteProvenanceObserver;
   signal?: AbortSignal;
 };
 

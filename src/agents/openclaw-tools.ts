@@ -26,6 +26,7 @@ import {
   wrapToolWithBeforeToolCallHook,
 } from "./agent-tools.before-tool-call.js";
 import type { ConversationRecallContext } from "./conversation-recall.types.js";
+import { stageAuthorizedMemoryChildDelegation } from "./memory-authorized-read-host.js";
 import type { AuthorizedMemoryWriteHost } from "../plugins/tool-types.js";
 import { resolveOpenClawPluginToolsForOptions } from "./openclaw-plugin-tools.js";
 import { filterToolsByClientCaps } from "./openclaw-tools.client-caps.js";
@@ -45,6 +46,7 @@ import {
 import { createOpenClawSwarmToolGroups } from "./openclaw-tools.swarm.js";
 import type { SandboxFsBridge } from "./sandbox/fs-bridge.js";
 import type { SpawnedToolContext } from "./spawned-context.js";
+import type { SpawnSubagentContext } from "./subagents/spawn/subagent-spawn-contract.js";
 import type { ToolFsPolicy } from "./tool-fs-policy.js";
 import { resolveToolLoopDetectionConfig } from "./tool-loop-detection-config.js";
 import { createAgentsListTool } from "./tools/agents-list-tool.js";
@@ -265,6 +267,28 @@ export function createOpenClawTools(
     accountId: options?.agentAccountId,
     threadId: options?.agentThreadId,
   });
+  const issueMemoryChildDelegation =
+    sessionAgentId && options?.sessionId
+      ? async (params: Parameters<NonNullable<SpawnSubagentContext["issueMemoryChildDelegation"]>>[0]) =>
+          await stageAuthorizedMemoryChildDelegation({
+            agentId: sessionAgentId,
+            parentSessionKey: params.parentSessionKey,
+            parentSessionId: options.sessionId,
+            runId: options.runId,
+            deliveryContext: normalizeDeliveryContext({
+              channel: options.agentChannel,
+              to: options.agentTo ?? options.currentMessagingTarget ?? options.currentChannelId,
+              accountId: options.agentAccountId,
+              threadId: options.agentThreadId ?? options.currentThreadTs,
+            }),
+            messageChannel: options.agentChannel,
+            agentAccountId: options.agentAccountId,
+            childSessionKey: params.childSessionKey,
+            childSessionId: params.childSessionId,
+            childSessionIdentityRevision: params.childSessionIdentityRevision,
+            expiresAt: params.expiresAt,
+          })
+      : undefined;
   // Scheduled turns keep delivery routing live, but Gateway authorization remains bound to the
   // authenticated creator account captured in the immutable scheduled authority envelope.
   const gatewayCallerAccountId = options?.gatewayCallerAccountId ?? options?.agentAccountId;
@@ -685,6 +709,7 @@ export function createOpenClawTools(
             workspaceDir: spawnWorkspaceDir,
             inheritedToolAllowlist: options?.inheritedToolAllowlist,
             inheritedToolDenylist: options?.inheritedToolDenylist,
+            issueMemoryChildDelegation,
           }),
         ]
       : []),

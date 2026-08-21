@@ -30,6 +30,7 @@ import type {
 import type { createSubagentRegistryLifecycleDelivery } from "./subagent-registry-lifecycle-delivery.js";
 import type { createSubagentRegistryLifecycleRequesterWake } from "./subagent-registry-lifecycle-requester-wake.js";
 import { loadSubagentSessionEntry } from "./subagent-session-reconciliation.js";
+import { revokeAuthorizedMemoryChildDelegationsForChildGeneration } from "../../memory-authorized-read-host.js";
 
 type RunSubagentAnnounceFlow =
   (typeof import("../announce/subagent-announce.js"))["runSubagentAnnounceFlow"];
@@ -74,6 +75,21 @@ export function createSubagentRegistryLifecycleCleanup(
     entry.expectsCompletionMessage === true &&
     entry.endedReason === SUBAGENT_ENDED_REASON_COMPLETE &&
     entry.execution.outcome?.status === "ok";
+
+  const revokeChildMemoryDelegation = (entry: SubagentRunRecord) => {
+    const childSessionGeneration = entry.childSessionGeneration;
+    if (!childSessionGeneration) {
+      return;
+    }
+    // A reused session key must not revoke a successor's capability. The exact
+    // generation recorded at spawn is the lifecycle owner's only authority.
+    revokeAuthorizedMemoryChildDelegationsForChildGeneration({
+      agentId: childSessionGeneration.agentId,
+      childSessionKey: entry.childSessionKey,
+      childSessionId: childSessionGeneration.sessionId,
+      childSessionIdentityRevision: childSessionGeneration.lifecycleRevision,
+    });
+  };
 
   const finalizeAnnounceGiveUp = async (giveUpParams: {
     runId: string;
@@ -129,6 +145,7 @@ export function createSubagentRegistryLifecycleCleanup(
     }
     const completionReason = resolveCleanupCompletionReason(entry);
     logAnnounceGiveUp(entry, reason);
+    revokeChildMemoryDelegation(entry);
     // Retry-limit / expiry give-up should not leave cleanup stuck behind the
     // best-effort ended hook. Mark the run cleaned first, then fire the hook.
     completeCleanupBookkeeping({
@@ -231,6 +248,7 @@ export function createSubagentRegistryLifecycleCleanup(
         await retireSupersededCleanupIfNeeded(runId, entry, cleanupGeneration);
         return;
       }
+      revokeChildMemoryDelegation(entry);
       completeCleanupBookkeeping({
         runId,
         entry,
@@ -308,6 +326,7 @@ export function createSubagentRegistryLifecycleCleanup(
         await retireSupersededCleanupIfNeeded(runId, entry, cleanupGeneration);
         return;
       }
+      revokeChildMemoryDelegation(entry);
       completeCleanupBookkeeping({
         runId,
         entry,
@@ -465,6 +484,7 @@ export function createSubagentRegistryLifecycleCleanup(
             return;
           }
           if (cleanup === "delete" && childSessionEffectsAllowed()) {
+            revokeChildMemoryDelegation(entry);
             if (!cleanupSessionIdentity) {
               // Without both lifecycle identities, key-only deletion could remove
               // a successor that reused this child session after cleanup yielded.
@@ -612,6 +632,9 @@ export function createSubagentRegistryLifecycleCleanup(
       run: async () => {
         let announceOutcome: SubagentAnnounceFlowOutcome = "retryable";
         try {
+          // The announce flow may delete the child session itself. Close the
+          // exact lease before handing control to that irreversible callback.
+          revokeChildMemoryDelegation(entry);
           announceOutcome = await params.runSubagentAnnounceFlow(announceParams);
         } catch (error) {
           defaultRuntime.log(

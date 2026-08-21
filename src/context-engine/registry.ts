@@ -218,6 +218,7 @@ function wrapResolvedContextEngine(
 
 const CONTEXT_ENGINE_REGISTRY_STATE = Symbol.for("openclaw.contextEngineRegistryState");
 const CORE_CONTEXT_ENGINE_OWNER = "core";
+const CORE_LEGACY_CONTEXT_ENGINE_ID = "legacy";
 
 type ContextEngineRuntimeQuarantine = {
   engineId: string;
@@ -429,6 +430,18 @@ export function resolveContextEngineOwnerPluginId(
   const owner =
     metadata && !getContextEngineQuarantine(metadata.engineId) ? metadata.owner : undefined;
   return owner ? pluginIdFromContextEngineOwner(owner) : undefined;
+}
+
+/**
+ * Cutover compaction may only use the core-owned legacy registration. Engine
+ * info is plugin-authored display metadata, so it cannot establish this trust.
+ */
+export function isCoreLegacyContextEngine(engine: ContextEngine | undefined | null): boolean {
+  const metadata = engine ? resolvedEngineMetadata.get(engine) : undefined;
+  return (
+    metadata?.owner === CORE_CONTEXT_ENGINE_OWNER &&
+    metadata.engineId === CORE_LEGACY_CONTEXT_ENGINE_ID
+  );
 }
 
 function pluginIdFromContextEngineOwner(owner: string): string | undefined {

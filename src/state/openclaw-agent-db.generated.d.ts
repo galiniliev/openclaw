@@ -231,6 +231,14 @@ export interface MemoryIndexState {
   revision: number;
 }
 
+export interface MemoryLineageEdges {
+  child_revision_id: string;
+  created_at: number;
+  parent_id: string;
+  parent_kind: string;
+  relation_kind: string;
+}
+
 export interface MemoryMigrations {
   classification_json: string;
   cutover_at: number | null;
@@ -298,21 +306,12 @@ export interface MemoryPolicySets {
   policy_set_id: string;
 }
 
-export interface MemoryRevisionPolicyRequirements {
+export interface MemoryPreoutputExposureAuthorizationFacts {
+  actor_evidence_json: string;
   created_at: number;
-  expected_revision_id: string;
-  expected_revocation_epoch: number;
-  policy_id: string;
-  requirement_kind: string;
-  revision_id: string;
-}
-
-export interface MemoryLineageEdges {
-  child_revision_id: string;
-  created_at: number;
-  parent_id: string;
-  parent_kind: string;
-  relation_kind: string;
+  delegation_snapshot_json: string;
+  exposure_set_id: string;
+  host_facts_revision: string;
 }
 
 export interface MemoryPreoutputExposureLedger {
@@ -336,14 +335,6 @@ export interface MemoryPreoutputExposureLedger {
   session_key: string;
   source_policy_set_ids_json: string;
   subject_revision: string;
-}
-
-export interface MemoryPreoutputExposureAuthorizationFacts {
-  actor_evidence_json: string;
-  created_at: number;
-  delegation_snapshot_json: string;
-  exposure_set_id: string;
-  host_facts_revision: string;
 }
 
 export interface MemoryResourceRevisions {
@@ -381,6 +372,15 @@ export interface MemoryResources {
   resource_id: string;
   source: Generated<string>;
   store_id: string;
+}
+
+export interface MemoryRevisionPolicyRequirements {
+  created_at: number;
+  expected_revision_id: string;
+  expected_revocation_epoch: number;
+  policy_id: string;
+  requirement_kind: string;
+  revision_id: string;
 }
 
 export interface MemoryRunExposureResources {
@@ -494,6 +494,43 @@ export interface MemoryStores {
   storage_root_id: string;
   store_id: string;
   updated_at: number;
+}
+
+export interface MemoryTranscriptExportArtifactEvents {
+  created_at: number;
+  event_kind: string;
+  export_event_id: string;
+  export_id: string;
+  failure_reason: string | null;
+}
+
+export interface MemoryTranscriptExportArtifactSources {
+  actor_evidence_json: string;
+  created_at: number;
+  delegation_snapshot_json: string;
+  egress_receipt_ids_json: string;
+  event_hash: string;
+  event_seq: number;
+  export_id: string;
+  exposed_resource_revisions_json: string;
+  exposure_receipt_ids_json: string;
+  run_exposure_revision: number;
+  run_exposure_set_id: string;
+  session_identity_revision: string;
+  source_event_seq: number;
+  source_session_id: string;
+  subject_revision: string;
+}
+
+export interface MemoryTranscriptExportArtifacts {
+  artifact_content_hash: string;
+  artifact_type: string;
+  created_at: number;
+  delivery_audiences_json: string;
+  export_id: string;
+  session_id: string;
+  source_content_hash: string;
+  source_policy_set_id: string;
 }
 
 export interface MemoryWriteIntents {
@@ -842,19 +879,19 @@ export interface DB {
   memory_index_meta: MemoryIndexMeta;
   memory_index_sources: MemoryIndexSources;
   memory_index_state: MemoryIndexState;
+  memory_lineage_edges: MemoryLineageEdges;
   memory_migrations: MemoryMigrations;
   memory_policies: MemoryPolicies;
   memory_policy_entries: MemoryPolicyEntries;
   memory_policy_revisions: MemoryPolicyRevisions;
   memory_policy_set_members: MemoryPolicySetMembers;
   memory_policy_sets: MemoryPolicySets;
-  memory_revision_policy_requirements: MemoryRevisionPolicyRequirements;
-  memory_lineage_edges: MemoryLineageEdges;
   memory_preoutput_exposure_authorization_facts: MemoryPreoutputExposureAuthorizationFacts;
   memory_preoutput_exposure_ledger: MemoryPreoutputExposureLedger;
   memory_resource_revisions: MemoryResourceRevisions;
   memory_resource_subjects: MemoryResourceSubjects;
   memory_resources: MemoryResources;
+  memory_revision_policy_requirements: MemoryRevisionPolicyRequirements;
   memory_run_exposure_resources: MemoryRunExposureResources;
   memory_run_exposures: MemoryRunExposures;
   memory_scoped_chunk_vectors: MemoryScopedChunkVectors;
@@ -867,6 +904,9 @@ export interface DB {
   memory_scoped_chunks_fts_idx: MemoryScopedChunksFtsIdx;
   memory_storage_roots: MemoryStorageRoots;
   memory_stores: MemoryStores;
+  memory_transcript_export_artifact_events: MemoryTranscriptExportArtifactEvents;
+  memory_transcript_export_artifact_sources: MemoryTranscriptExportArtifactSources;
+  memory_transcript_export_artifacts: MemoryTranscriptExportArtifacts;
   memory_write_intents: MemoryWriteIntents;
   schema_meta: SchemaMeta;
   session_conversations: SessionConversations;

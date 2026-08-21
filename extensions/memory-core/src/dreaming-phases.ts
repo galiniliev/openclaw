@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
 import { listSessionTranscriptCorpusEntriesForAgent } from "openclaw/plugin-sdk/memory-core-host-engine-sessions";
 import type { MemorySearchResult } from "openclaw/plugin-sdk/memory-core-host-runtime-files";
@@ -14,8 +15,8 @@ import {
 } from "openclaw/plugin-sdk/memory-core-host-status";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import { normalizeStringEntries, uniqueStrings } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { appendFailedDreamingEvent } from "./dreaming-events.js";
 import { filterToOnePromotionAuthorizedView } from "./dreaming-consolidation-candidates.js";
+import { appendFailedDreamingEvent } from "./dreaming-events.js";
 import {
   normalizeDailyIngestionState,
   normalizeMemoryDay,
@@ -38,6 +39,12 @@ import {
   readMemoryCoreWorkspaceEntries,
   writeMemoryCoreWorkspaceEntries,
 } from "./dreaming-state.js";
+import {
+  admitLegacyMemoryWorkspace,
+  requireAdmittedLegacyMemoryWorkspace,
+  resolveAdmittedLegacyMemoryWorkspace,
+  type LegacyMemoryWorkspaceAdmission,
+} from "./legacy-memory-workspace-admission.js";
 import { textSimilarity as snippetSimilarity } from "./memory/tokenize.js";
 import {
   appendSessionCorpusLines,
@@ -557,32 +564,6 @@ function isCheckpointSessionTranscriptPath(absolutePath: string): boolean {
   return SESSION_CHECKPOINT_TRANSCRIPT_FILENAME_RE.test(path.basename(absolutePath));
 }
 
-function resolveSessionAgentsForWorkspace(params: {
-  cfg: DreamingHostConfig;
-  workspaceDir: string;
-  primaryWorkspaceDir?: string;
-}): string[] {
-  const { cfg, workspaceDir, primaryWorkspaceDir } = params;
-  if (!cfg) {
-    return [];
-  }
-  const target = normalizeMemoryCoreWorkspaceKey(workspaceDir);
-  const workspaces = resolveMemoryDreamingWorkspaces(
-    cfg as Parameters<typeof resolveMemoryDreamingWorkspaces>[0],
-    {
-      primaryWorkspaceDir,
-      primaryAgentId: "main",
-    },
-  );
-  const match = workspaces.find(
-    (entry) => normalizeMemoryCoreWorkspaceKey(entry.workspaceDir) === target,
-  );
-  if (!match) {
-    return [];
-  }
-  return uniqueStrings(match.agentIds.filter((agentId) => agentId.trim().length > 0)).toSorted();
-}
-
 async function collectSessionIngestionBatches(params: {
   workspaceDir: string;
   cfg?: DreamingHostConfig;
@@ -600,11 +581,17 @@ async function collectSessionIngestionBatches(params: {
       changed: JSON.stringify(nextState) !== JSON.stringify(params.state),
     };
   }
-  const agentIds = resolveSessionAgentsForWorkspace({
-    cfg: params.cfg,
-    workspaceDir: params.workspaceDir,
-    primaryWorkspaceDir: params.primaryWorkspaceDir,
-  });
+  const workspaceKey = normalizeMemoryCoreWorkspaceKey(params.workspaceDir);
+  const workspace = resolveMemoryDreamingWorkspaces(
+    params.cfg as Parameters<typeof resolveMemoryDreamingWorkspaces>[0],
+    {
+      primaryWorkspaceDir: params.primaryWorkspaceDir,
+      primaryAgentId: "main",
+    },
+  ).find((entry) => normalizeMemoryCoreWorkspaceKey(entry.workspaceDir) === workspaceKey);
+  const agentIds = uniqueStrings(
+    (workspace?.agentIds ?? []).filter((agentId) => agentId.trim().length > 0),
+  ).toSorted();
   const cutoffMs = calculateLookbackCutoffMs(params.nowMs, params.lookbackDays);
   const batchByDay = new Map<string, SessionIngestionMessage[]>();
   // A bounded sweep must retain checkpoints for sources it never reaches.
@@ -1500,14 +1487,28 @@ type DreamingSweepPhaseResult = {
   pendingNarratives: number;
 };
 
+/**
+ * The legacy phase executor is a raw-workspace compatibility path. Only an
+ * uncut agent can receive this opaque lease; enforced agents use the scoped
+ * derivation host and must never reach workspace files through an internal call.
+ */
+export type LegacyDreamingWorkspaceLease = LegacyMemoryWorkspaceAdmission;
+
+export function issueLegacyDreamingWorkspaceLease(params: {
+  agentId: string;
+  cfg: OpenClawConfig;
+}): LegacyDreamingWorkspaceLease | undefined {
+  return admitLegacyMemoryWorkspace(params);
+}
+
+export function isLegacyDreamingWorkspaceLeaseCurrent(
+  lease: LegacyDreamingWorkspaceLease,
+): boolean {
+  return resolveAdmittedLegacyMemoryWorkspace(lease) !== undefined;
+}
+
 export async function runDreamingSweepPhases(params: {
-  /**
-   * Agent that owns this workspace; narrative subagent sessions are stored under it.
-   * Absent only when no roster or triggering agent can be attributed, which downgrades
-   * narratives to the local diary fallback without stopping the sweep.
-   */
-  agentId?: string;
-  workspaceDir: string;
+  lease: LegacyDreamingWorkspaceLease;
   pluginConfig?: Record<string, unknown>;
   cfg?: DreamingHostConfig;
   logger: Logger;
@@ -1515,6 +1516,7 @@ export async function runDreamingSweepPhases(params: {
   detachNarratives?: boolean;
   nowMs?: number;
 }): Promise<DreamingSweepPhaseResult> {
+  const { agentId, workspaceDir } = requireAdmittedLegacyMemoryWorkspace(params.lease);
   // Normalize nowMs once so all phase timestamps and narrative session keys are consistent.
   const sweepNowMs: number = Number.isFinite(params.nowMs) ? (params.nowMs as number) : Date.now();
   let degradedPhases = 0;
@@ -1533,10 +1535,11 @@ export async function runDreamingSweepPhases(params: {
   });
   if (light.enabled && light.limit > 0) {
     try {
+      requireAdmittedLegacyMemoryWorkspace(params.lease);
       recordNarrativeOutcome(
         await runLightDreaming({
-          agentId: params.agentId,
-          workspaceDir: params.workspaceDir,
+          agentId,
+          workspaceDir,
           cfg: params.cfg,
           config: light,
           logger: params.logger,
@@ -1546,14 +1549,16 @@ export async function runDreamingSweepPhases(params: {
         }),
       );
     } catch (err) {
-      await appendFailedDreamingEvent({
-        workspaceDir: params.workspaceDir,
-        phase: "light",
-        error: formatErrorMessage(err),
-        storageMode: light.storage.mode,
-        nowMs: sweepNowMs,
-        logger: params.logger,
-      });
+      if (isLegacyDreamingWorkspaceLeaseCurrent(params.lease)) {
+        await appendFailedDreamingEvent({
+          workspaceDir,
+          phase: "light",
+          error: formatErrorMessage(err),
+          storageMode: light.storage.mode,
+          nowMs: sweepNowMs,
+          logger: params.logger,
+        });
+      }
       throw err;
     }
   }
@@ -1564,10 +1569,11 @@ export async function runDreamingSweepPhases(params: {
   });
   if (rem.enabled && rem.limit > 0) {
     try {
+      requireAdmittedLegacyMemoryWorkspace(params.lease);
       recordNarrativeOutcome(
         await runRemDreaming({
-          agentId: params.agentId,
-          workspaceDir: params.workspaceDir,
+          agentId,
+          workspaceDir,
           cfg: params.cfg,
           config: rem,
           logger: params.logger,
@@ -1577,14 +1583,16 @@ export async function runDreamingSweepPhases(params: {
         }),
       );
     } catch (err) {
-      await appendFailedDreamingEvent({
-        workspaceDir: params.workspaceDir,
-        phase: "rem",
-        error: formatErrorMessage(err),
-        storageMode: rem.storage.mode,
-        nowMs: sweepNowMs,
-        logger: params.logger,
-      });
+      if (isLegacyDreamingWorkspaceLeaseCurrent(params.lease)) {
+        await appendFailedDreamingEvent({
+          workspaceDir,
+          phase: "rem",
+          error: formatErrorMessage(err),
+          storageMode: rem.storage.mode,
+          nowMs: sweepNowMs,
+          logger: params.logger,
+        });
+      }
       throw err;
     }
   }

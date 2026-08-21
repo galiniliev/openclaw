@@ -148,6 +148,34 @@ export type MemoryAccessContext = DeepReadonly<{
   hostFactsRevision: string;
 }>;
 
+/**
+ * Core owns the child lifecycle and retains the opaque result. A selected
+ * backend alone decides which parent-authorized stores that result can unlock.
+ */
+export type MemoryChildDelegationIssue = DeepReadonly<{
+  version: 1;
+  delegationId: string;
+  parentContext: MemoryAccessContext & Readonly<{ operation: "read" }>;
+  child: {
+    agentId: string;
+    sessionId: string;
+    sessionIdentityRevision: string;
+    subjectRevision: string;
+    capabilitySnapshotId: string;
+  };
+  allowedOperations: readonly MemoryOperation[];
+  maximumAudiences: readonly AudienceRef[];
+  expiresAt: string;
+}>;
+
+export type IssuedMemoryChildDelegation = DeepReadonly<{
+  version: 1;
+  /** Opaque backend capability. Hosts persist and replay it unchanged. */
+  storeCapToken: string;
+  /** Binds the child capability to the parent authorization the backend observed. */
+  parentMemoryPlanId: string;
+}>;
+
 /** Operations whose authorized results may carry memory content outside broker-internal selection. */
 export type MemoryContentAccessOperation = Extract<MemoryOperation, "read" | "derive">;
 
@@ -611,6 +639,17 @@ export interface AuthorizedMemoryRuntime {
   stageSealedCompaction?(
     params: AuthorizedSealedCompactionStageParams,
   ): Promise<AuthorizedSealedCompactionArtifact>;
+  /**
+   * Optional until a selected backend can independently bind a child capability
+   * to the parent's current read plan. Missing support is a fail-closed denial.
+   */
+  issueChildDelegation?(
+    issue: MemoryChildDelegationIssue,
+  ): Promise<IssuedMemoryChildDelegation>;
+  /** Best-effort cleanup of a backend-owned opaque child capability. */
+  revokeChildDelegation?(
+    params: Readonly<{ agentId: string; storeCapToken: string }>,
+  ): Promise<void>;
   importAuthorized(
     params: AuthorizedMemoryOperationParams<"import"> &
       Readonly<{

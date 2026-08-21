@@ -1,4 +1,5 @@
 // Versioned transcript-policy archive decoding for explicit confirmed-import workflows.
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
@@ -72,10 +73,6 @@ export type TranscriptPolicyArchive = Readonly<{
   sessionKey: string;
   subjectRevision: string;
 }>;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
 
 function text(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;

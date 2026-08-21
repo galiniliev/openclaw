@@ -29,6 +29,7 @@ import {
   SUBAGENT_SPAWN_MODES,
   spawnSubagentDirect,
 } from "../subagents/spawn/subagent-spawn.js";
+import type { SpawnSubagentContext } from "../subagents/spawn/subagent-spawn-contract.js";
 import { normalizeSubagentTaskName } from "../subagents/spawn/subagent-task-name.js";
 import {
   SWARM_CODE_MODE_IDEMPOTENCY_KEY,
@@ -282,6 +283,8 @@ export function createSessionsSpawnTool(
     requesterAgentIdOverride?: string;
     requesterRunId?: string;
     swarmCollector?: boolean;
+    /** Core-private capability, intentionally absent from the model-facing schema. */
+    issueMemoryChildDelegation?: SpawnSubagentContext["issueMemoryChildDelegation"];
   } & VisibleSessionsSpawnDeps &
     SpawnedToolContext,
 ): AnyAgentTool {
@@ -582,6 +585,7 @@ export function createSessionsSpawnTool(
           inheritedToolAllowlist: opts?.inheritedToolAllowlist,
           inheritedToolDenylist: opts?.inheritedToolDenylist,
           requesterRunId: opts?.requesterRunId,
+          issueMemoryChildDelegation: opts?.issueMemoryChildDelegation,
         },
       );
 

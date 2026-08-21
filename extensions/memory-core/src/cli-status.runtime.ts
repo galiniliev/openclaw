@@ -5,6 +5,16 @@ import {
 } from "openclaw/plugin-sdk/memory-core-host-status";
 import { asNullableRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import {
+  auditDreamingArtifacts,
+  auditShortTermPromotionArtifacts,
+  repairDreamingArtifacts,
+  repairShortTermPromotionArtifacts,
+  type DreamingArtifactsAuditSummary,
+  type RepairDreamingArtifactsResult,
+  type RepairShortTermPromotionArtifactsResult,
+  type ShortTermAuditSummary,
+} from "../runtime-api.js";
+import {
   formatAuditCounts,
   formatExtraPaths,
   resolveMemoryPluginConfig,
@@ -25,20 +35,9 @@ import {
   type OpenClawConfig,
 } from "./cli.host.runtime.js";
 import type { MemoryCommandOptions } from "./cli.types.js";
-import {
-  auditDreamingArtifacts,
-  repairDreamingArtifacts,
-  type DreamingArtifactsAuditSummary,
-  type RepairDreamingArtifactsResult,
-} from "./dreaming-repair.js";
 import { resolveShortTermPromotionDreamingConfig } from "./dreaming.js";
+import { requireAdmittedLegacyMemoryWorkspace } from "./legacy-memory-workspace-admission.js";
 import type { MemoryCoreRuntimeHost } from "./memory/runtime-host.js";
-import {
-  auditShortTermPromotionArtifacts,
-  repairShortTermPromotionArtifacts,
-  type RepairShortTermPromotionArtifactsResult,
-  type ShortTermAuditSummary,
-} from "./short-term-promotion.js";
 const { accent, heading, info, muted, success, warn } = theme;
 type LlamaCppRuntimeStatus = {
   state?: string;
@@ -192,7 +191,7 @@ export async function runMemoryStatus(
     diagnosticsToStderr: Boolean(opts.json),
     purpose: opts.index ? "cli" : "status",
     ...hostOptions,
-    run: async ({ manager, agentId }) => {
+    run: async ({ manager, cfg, agentId, legacyMemoryWorkspaceAdmission }) => {
       const deep = Boolean(opts.deep || opts.index);
       let embeddingProbe: MemoryEmbeddingProbeResult | undefined;
       let indexError: string | undefined;
@@ -261,7 +260,8 @@ export async function runMemoryStatus(
       const workspaceDir = status.workspaceDir;
       const scan = workspaceDir
         ? await scanMemorySources({
-            workspaceDir,
+            workspaceDir: requireAdmittedLegacyMemoryWorkspace(legacyMemoryWorkspaceAdmission)
+              .workspaceDir,
             agentId,
             sources,
             extraPaths: status.extraPaths,
@@ -272,15 +272,15 @@ export async function runMemoryStatus(
       let dreamingAudit: DreamingArtifactsAuditSummary | undefined;
       let dreamingRepair: RepairDreamingArtifactsResult | undefined;
       if (workspaceDir) {
-        dreamingAudit = await auditDreamingArtifacts({ workspaceDir });
+        dreamingAudit = await auditDreamingArtifacts({ cfg, agentId });
         if (opts.fix && dreamingAudit.issues.some((issue) => issue.fixable)) {
-          dreamingRepair = await repairDreamingArtifacts({ workspaceDir });
-          dreamingAudit = await auditDreamingArtifacts({ workspaceDir });
+          dreamingRepair = await repairDreamingArtifacts({ cfg, agentId });
+          dreamingAudit = await auditDreamingArtifacts({ cfg, agentId });
         }
         if (opts.fix) {
-          repair = await repairShortTermPromotionArtifacts({ workspaceDir });
+          repair = await repairShortTermPromotionArtifacts({ cfg, agentId });
         }
-        audit = await auditShortTermPromotionArtifacts({ workspaceDir });
+        audit = await auditShortTermPromotionArtifacts({ cfg, agentId });
       }
       allResults.push({
         agentId,

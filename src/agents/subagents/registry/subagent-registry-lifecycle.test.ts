@@ -125,6 +125,10 @@ const sessionReconciliationMocks = vi.hoisted(() => ({
   loadSubagentSessionEntry: vi.fn(),
 }));
 
+const childDelegationMocks = vi.hoisted(() => ({
+  revokeForChildGeneration: vi.fn(),
+}));
+
 vi.mock("../../../tasks/detached-task-runtime.js", () => ({
   completeTaskRunByRunId: taskExecutorMocks.completeTaskRunByRunId,
   failTaskRunByRunId: taskExecutorMocks.failTaskRunByRunId,
@@ -158,6 +162,11 @@ vi.mock("../../internal-session-effects.js", () => ({
 vi.mock("./subagent-session-reconciliation.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./subagent-session-reconciliation.js")>()),
   loadSubagentSessionEntry: sessionReconciliationMocks.loadSubagentSessionEntry,
+}));
+
+vi.mock("../../memory-authorized-read-host.js", () => ({
+  revokeAuthorizedMemoryChildDelegationsForChildGeneration:
+    childDelegationMocks.revokeForChildGeneration,
 }));
 
 vi.mock("../../../runtime.js", () => ({
@@ -494,6 +503,7 @@ describe("subagent registry lifecycle hardening", () => {
       sessionId: "child-session-id",
       lifecycleRevision: "child-lifecycle-revision",
     });
+    childDelegationMocks.revokeForChildGeneration.mockReset();
   });
 
   it.each([
@@ -931,6 +941,32 @@ describe("subagent registry lifecycle hardening", () => {
     releaseDelete?.();
     await waitForLifecycleState(() => expect(getActiveGatewayRootWorkCount()).toBe(0));
     expect(runs.has(entry.runId)).toBe(false);
+  });
+
+  it("revokes the exact registered child generation before direct terminal deletion", async () => {
+    const entry = createRunEntry({
+      cleanup: "delete",
+      expectsCompletionMessage: false,
+      childSessionGeneration: {
+        agentId: "main",
+        sessionId: "child-session-id",
+        lifecycleRevision: "child-lifecycle-revision",
+      },
+    });
+    const controller = createLifecycleController({ entry });
+
+    await completeRun(controller, entry, { triggerCleanup: true });
+    await waitForLifecycleState(() => expect(entry.cleanupCompletedAt).toBeTypeOf("number"));
+
+    expect(childDelegationMocks.revokeForChildGeneration).toHaveBeenCalledWith({
+      agentId: "main",
+      childSessionKey: "agent:main:subagent:child",
+      childSessionId: "child-session-id",
+      childSessionIdentityRevision: "child-lifecycle-revision",
+    });
+    expect(
+      childDelegationMocks.revokeForChildGeneration.mock.invocationCallOrder[0],
+    ).toBeLessThan(gatewayMocks.callGateway.mock.invocationCallOrder[0] ?? Infinity);
   });
 
   it("retries a cleanup handoff rejected by restart drain", async () => {

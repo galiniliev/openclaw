@@ -361,19 +361,22 @@ describe("compactEmbeddedAgentSessionDirect hooks", () => {
   });
 
   it("rechecks transcript derivation after opening the native session before summarizing", async () => {
+    const source = {
+      eventSeqs: [0, 1],
+      sourcePolicySetId: "policy-set-1",
+      deliveryAudiencesJson: '[{"kind":"user","id":"alice"}]',
+    };
     isMemoryIsolationCutoverAgentMock.mockReturnValue(true);
     admitAuthorizedMemoryDerivationMock.mockResolvedValue(true);
     createAuthorizedMemoryDerivationHostMock.mockReturnValue(undefined);
-    prepareAuthorizedSealedCompactionHostMock.mockResolvedValue(undefined);
-    readAuthorizedTranscriptDerivationMock
-      .mockReturnValueOnce({
-        eventSeqs: [0, 1],
-        sourcePolicySetId: "policy-set-1",
-        deliveryAudiencesJson: '[{"kind":"user","id":"alice"}]',
-      })
-      // A revocation or a new pending event after preparation must stop before
-      // the native compaction session turns transcript content into a prompt.
-      .mockReturnValueOnce(undefined);
+    prepareAuthorizedSealedCompactionHostMock.mockResolvedValue({
+      source: { kind: "transcript", sessionId: TEST_SESSION_ID, ...source },
+      recheckBeforeModel: vi.fn(async () => true),
+      stage: sealedCompactionStageMock,
+    });
+    // A revocation or a new pending event after preparation must stop before
+    // the native compaction session turns transcript content into a prompt.
+    readAuthorizedTranscriptDerivationMock.mockReturnValue(undefined);
 
     const result = await compactEmbeddedAgentSessionDirect({
       ...wrappedCompactionArgs(),
@@ -386,7 +389,7 @@ describe("compactEmbeddedAgentSessionDirect hooks", () => {
       compacted: false,
       reason: expect.stringContaining("transcript derivation authorization unavailable"),
     });
-    expect(readAuthorizedTranscriptDerivationMock).toHaveBeenCalledTimes(2);
+    expect(readAuthorizedTranscriptDerivationMock).toHaveBeenCalledOnce();
     expect(sessionCompactImpl).not.toHaveBeenCalled();
   });
 
@@ -411,7 +414,7 @@ describe("compactEmbeddedAgentSessionDirect hooks", () => {
       compacted: false,
       reason: expect.stringContaining("sealed compaction authorization unavailable"),
     });
-    expect(readAuthorizedTranscriptDerivationMock).toHaveBeenCalledTimes(2);
+    expect(readAuthorizedTranscriptDerivationMock).toHaveBeenCalledOnce();
     expect(sessionCompactImpl).not.toHaveBeenCalled();
   });
 
@@ -426,6 +429,7 @@ describe("compactEmbeddedAgentSessionDirect hooks", () => {
     readAuthorizedTranscriptDerivationMock.mockReturnValue(source);
     prepareAuthorizedSealedCompactionHostMock.mockResolvedValue({
       source: { kind: "transcript", sessionId: TEST_SESSION_ID, ...source },
+      recheckBeforeModel: vi.fn(async () => true),
       stage: sealedCompactionStageMock,
     });
 
@@ -2488,20 +2492,27 @@ describe("compactEmbeddedAgentSession hooks (ownsCompaction engine)", () => {
     mockQueuedRouteAwareModel();
   });
 
-  it("fails closed before an owning context engine can summarize a cutover transcript", async () => {
-    isMemoryIsolationCutoverAgentMock.mockReturnValue(true);
+  it.each([false, true])(
+    "fails closed before a cutover transcript reaches a context engine that reports ownsCompaction=%s",
+    async (ownsCompaction) => {
+      isMemoryIsolationCutoverAgentMock.mockReturnValue(true);
+      resolveContextEngineMock.mockResolvedValue({
+        info: { ownsCompaction },
+        compact: contextEngineCompactMock,
+      });
 
-    const result = await compactEmbeddedAgentSession(
-      wrappedCompactionArgs({ provider: "openai", model: "gpt-5.5" }),
-    );
+      const result = await compactEmbeddedAgentSession(
+        wrappedCompactionArgs({ provider: "openai", model: "gpt-5.5" }),
+      );
 
-    expect(result).toMatchObject({
-      ok: false,
-      compacted: false,
-      failure: { reason: "memory_derivation_unavailable" },
-    });
-    expect(contextEngineCompactMock).not.toHaveBeenCalled();
-  });
+      expect(result).toMatchObject({
+        ok: false,
+        compacted: false,
+        failure: { reason: "memory_derivation_unavailable" },
+      });
+      expect(contextEngineCompactMock).not.toHaveBeenCalled();
+    },
+  );
 
   it("resolves the durable session key before invoking an owning context engine", async () => {
     const dir = await mkdtemp(join(tmpdir(), "openclaw-compaction-session-key-"));

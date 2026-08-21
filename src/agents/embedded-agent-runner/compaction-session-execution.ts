@@ -17,6 +17,7 @@ import { getCurrentPluginMetadataSnapshot } from "../../plugins/current-plugin-m
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import { isMemoryIsolationCutoverAgent } from "../../plugins/memory-cutover.js";
 import { openOpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
+import { bindStreamLlmRuntime } from "../../llm/model-runtime-binding.js";
 import {
   consumeCompactionSafeguardCancelReason,
   setCompactionSafeguardCancelReason,
@@ -314,6 +315,21 @@ export async function executePreparedCompactionSession(runtime: PreparedCompacti
               nextCallId: nextDiagnosticModelCallId,
             },
           );
+          if (authorizedSealedCompaction) {
+            const authorizedStreamFn = session.agent.streamFn;
+            session.agent.streamFn = async (model, context, options) => {
+              if (!(await authorizedSealedCompaction.recheckBeforeModel())) {
+                throw new Error("compaction transcript derivation authorization unavailable");
+              }
+              return await authorizedStreamFn(model, context, options);
+            };
+            // The authorization wrapper is lifecycle-owned like the diagnostic wrapper. Preserve
+            // its runtime binding so the prepared transport stays selected after the wrapper swap.
+            bindStreamLlmRuntime(
+              session.agent.streamFn,
+              getModelRegistryRuntime(modelRegistry).llmRuntime,
+            );
+          }
 
           const prior = await sanitizeSessionHistory({
             messages: session.messages,

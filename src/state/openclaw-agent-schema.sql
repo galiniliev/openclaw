@@ -130,6 +130,41 @@ BEGIN
   SELECT RAISE(ABORT, 'session memory subject snapshot is immutable');
 END;
 
+-- A spawned child never inherits its parent's memory identity. A grant is a
+-- separate, short-lived capability bound to both immutable session generations.
+CREATE TABLE IF NOT EXISTS memory_child_delegations (
+  delegation_id TEXT NOT NULL PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  parent_session_key TEXT NOT NULL,
+  parent_session_id TEXT NOT NULL,
+  parent_session_identity_revision TEXT NOT NULL,
+  parent_subject_revision TEXT NOT NULL,
+  parent_authority_revision TEXT NOT NULL,
+  child_session_key TEXT NOT NULL,
+  child_session_id TEXT NOT NULL,
+  child_session_identity_revision TEXT NOT NULL,
+  child_subject_revision TEXT NOT NULL,
+  capability_snapshot_id TEXT NOT NULL,
+  delegation_json TEXT NOT NULL,
+  parent_facts_json TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'active', 'revoked')),
+  expires_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  activated_at INTEGER,
+  revoked_at INTEGER,
+  CHECK (
+    (state = 'pending' AND activated_at IS NULL AND revoked_at IS NULL)
+    OR (state = 'active' AND activated_at IS NOT NULL AND revoked_at IS NULL)
+    OR (state = 'revoked' AND revoked_at IS NOT NULL)
+  )
+) STRICT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_child_delegations_child_generation
+  ON memory_child_delegations(child_session_id, child_session_identity_revision);
+
+CREATE INDEX IF NOT EXISTS idx_memory_child_delegations_parent_generation
+  ON memory_child_delegations(parent_session_id, parent_session_identity_revision, state);
+
 CREATE TABLE IF NOT EXISTS session_key_contract (
   id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
   main_key TEXT NOT NULL,
@@ -797,6 +832,30 @@ BEGIN
   SELECT RAISE(ABORT, 'memory lineage edges cannot be deleted');
 END;
 
+-- The selected memory plugin owns this opaque capability ledger. Core retains
+-- the token unchanged but never learns which stores it represents.
+CREATE TABLE IF NOT EXISTS memory_child_delegation_capabilities (
+  delegation_id TEXT NOT NULL PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  child_session_id TEXT NOT NULL,
+  child_session_identity_revision TEXT NOT NULL,
+  child_subject_revision TEXT NOT NULL,
+  root_principal_id TEXT NOT NULL,
+  parent_memory_plan_id TEXT NOT NULL,
+  capability_snapshot_id TEXT NOT NULL,
+  allowed_operations_json TEXT NOT NULL,
+  maximum_audiences_json TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  expires_at INTEGER NOT NULL,
+  revoked_at INTEGER,
+  created_at INTEGER NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_memory_child_delegation_capabilities_child
+  ON memory_child_delegation_capabilities(
+    agent_id, child_session_id, child_session_identity_revision, expires_at
+  );
+
 CREATE TABLE IF NOT EXISTS memory_resource_subjects (
   revision_id TEXT NOT NULL,
   subject_kind TEXT NOT NULL CHECK (subject_kind IN ('person', 'project', 'conversation', 'topic')),
@@ -1303,6 +1362,121 @@ CREATE TRIGGER IF NOT EXISTS memory_compaction_policy_sources_no_delete
 BEFORE DELETE ON memory_compaction_policy_sources
 BEGIN
   SELECT RAISE(ABORT, 'memory compaction policy sources cannot be deleted');
+END;
+
+-- Transcript exports are external artifacts, not memory resources. Keep their
+-- immutable manifest separate from memory_lineage_edges, whose child foreign
+-- key intentionally requires a durable memory revision.
+CREATE TABLE IF NOT EXISTS memory_transcript_export_artifacts (
+  export_id TEXT NOT NULL PRIMARY KEY,
+  artifact_type TEXT NOT NULL CHECK (artifact_type IN ('session-html', 'trajectory')),
+  session_id TEXT NOT NULL,
+  source_policy_set_id TEXT NOT NULL,
+  delivery_audiences_json TEXT NOT NULL,
+  source_content_hash TEXT NOT NULL,
+  artifact_content_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_memory_transcript_export_artifacts_session
+  ON memory_transcript_export_artifacts(session_id, created_at, export_id);
+
+CREATE TRIGGER IF NOT EXISTS memory_transcript_export_artifacts_no_update
+BEFORE UPDATE ON memory_transcript_export_artifacts
+BEGIN
+  SELECT RAISE(ABORT, 'transcript export artifacts are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_transcript_export_artifacts_no_delete
+BEFORE DELETE ON memory_transcript_export_artifacts
+BEGIN
+  SELECT RAISE(ABORT, 'transcript export artifacts cannot be deleted');
+END;
+
+-- These rows preserve source-policy, actor, delegation, delivery, and egress
+-- receipts even if the canonical transcript is later purged or rewritten.
+CREATE TABLE IF NOT EXISTS memory_transcript_export_artifact_sources (
+  export_id TEXT NOT NULL,
+  event_seq INTEGER NOT NULL CHECK (event_seq >= 0),
+  source_session_id TEXT NOT NULL,
+  source_event_seq INTEGER NOT NULL CHECK (source_event_seq >= 0),
+  event_hash TEXT NOT NULL,
+  session_identity_revision TEXT NOT NULL,
+  subject_revision TEXT NOT NULL,
+  run_exposure_set_id TEXT NOT NULL,
+  run_exposure_revision INTEGER NOT NULL CHECK (run_exposure_revision >= 0),
+  actor_evidence_json TEXT NOT NULL,
+  delegation_snapshot_json TEXT NOT NULL,
+  exposed_resource_revisions_json TEXT NOT NULL,
+  exposure_receipt_ids_json TEXT NOT NULL,
+  egress_receipt_ids_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (export_id, event_seq),
+  FOREIGN KEY (export_id) REFERENCES memory_transcript_export_artifacts(export_id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_memory_transcript_export_artifact_sources_session
+  ON memory_transcript_export_artifact_sources(source_session_id, source_event_seq, export_id);
+
+CREATE TRIGGER IF NOT EXISTS memory_transcript_export_artifact_sources_no_update
+BEFORE UPDATE ON memory_transcript_export_artifact_sources
+BEGIN
+  SELECT RAISE(ABORT, 'transcript export artifact sources are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_transcript_export_artifact_sources_no_delete
+BEFORE DELETE ON memory_transcript_export_artifact_sources
+BEGIN
+  SELECT RAISE(ABORT, 'transcript export artifact sources cannot be deleted');
+END;
+
+-- Lifecycle is append-only: a staged manifest is durable before filesystem
+-- publication, and it can become either active or failed exactly once.
+CREATE TABLE IF NOT EXISTS memory_transcript_export_artifact_events (
+  export_event_id TEXT NOT NULL PRIMARY KEY,
+  export_id TEXT NOT NULL,
+  event_kind TEXT NOT NULL CHECK (event_kind IN ('staged', 'active', 'failed')),
+  failure_reason TEXT,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (export_id) REFERENCES memory_transcript_export_artifacts(export_id) ON DELETE RESTRICT,
+  CHECK (
+    (event_kind = 'failed' AND failure_reason IS NOT NULL AND length(trim(failure_reason)) > 0) OR
+    (event_kind IN ('staged', 'active') AND failure_reason IS NULL)
+  )
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_memory_transcript_export_artifact_events_export
+  ON memory_transcript_export_artifact_events(export_id, created_at, export_event_id);
+
+CREATE TRIGGER IF NOT EXISTS memory_transcript_export_artifact_events_lifecycle
+BEFORE INSERT ON memory_transcript_export_artifact_events
+BEGIN
+  SELECT CASE
+    WHEN new.event_kind = 'staged' AND EXISTS (
+      SELECT 1 FROM memory_transcript_export_artifact_events
+      WHERE export_id = new.export_id
+    ) THEN RAISE(ABORT, 'transcript export artifact is already staged')
+    WHEN new.event_kind IN ('active', 'failed') AND NOT EXISTS (
+      SELECT 1 FROM memory_transcript_export_artifact_events
+      WHERE export_id = new.export_id AND event_kind = 'staged'
+    ) THEN RAISE(ABORT, 'transcript export artifact must be staged first')
+    WHEN new.event_kind IN ('active', 'failed') AND EXISTS (
+      SELECT 1 FROM memory_transcript_export_artifact_events
+      WHERE export_id = new.export_id AND event_kind IN ('active', 'failed')
+    ) THEN RAISE(ABORT, 'transcript export artifact is already terminal')
+  END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_transcript_export_artifact_events_no_update
+BEFORE UPDATE ON memory_transcript_export_artifact_events
+BEGIN
+  SELECT RAISE(ABORT, 'transcript export artifact events are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_transcript_export_artifact_events_no_delete
+BEFORE DELETE ON memory_transcript_export_artifact_events
+BEGIN
+  SELECT RAISE(ABORT, 'transcript export artifact events cannot be deleted');
 END;
 
 CREATE TABLE IF NOT EXISTS standing_intents (

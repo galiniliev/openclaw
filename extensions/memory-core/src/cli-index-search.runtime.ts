@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { resolveMemorySearchStaleness } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import { resolveMemoryDreamingConfig } from "openclaw/plugin-sdk/memory-core-host-status";
+import { auditShortTermPromotionArtifacts } from "../runtime-api.js";
 import {
   buildCliMemorySearchSessionKey,
   formatAuditCounts,
@@ -26,11 +27,11 @@ import type {
   MemorySearchCommandOptions,
 } from "./cli.types.js";
 import { resolveShortTermPromotionDreamingConfig } from "./dreaming.js";
+import { requireAdmittedLegacyMemoryWorkspace } from "./legacy-memory-workspace-admission.js";
 import { formatMemoryVectorDegradedWriteReason } from "./memory/manager-vector-warning.js";
 import type { MemoryCoreRuntimeHost } from "./memory/runtime-host.js";
 import {
   applyShortTermPromotions,
-  auditShortTermPromotionArtifacts,
   rankShortTermPromotionCandidates,
   recordShortTermRecalls,
   resolveShortTermRecallLockPath,
@@ -205,7 +206,7 @@ export async function runMemorySearch(
     diagnosticsToStderr: Boolean(opts.json),
     purpose: "cli",
     ...hostOptions,
-    run: async ({ manager, cfg, agentId }) => {
+    run: async ({ manager, cfg, agentId, legacyMemoryWorkspaceAdmission }) => {
       const memoryPluginConfig = resolveMemoryPluginConfig(cfg);
       const dreamingEnabled = resolveMemoryDreamingConfig({
         pluginConfig: memoryPluginConfig,
@@ -231,10 +232,10 @@ export async function runMemorySearch(
       }
       const status = manager.status();
       const staleness = resolveMemorySearchStaleness(status, agentId);
-      const workspaceDir = status.workspaceDir;
       if (dreamingEnabled) {
         await recordShortTermRecalls({
-          workspaceDir,
+          workspaceDir: requireAdmittedLegacyMemoryWorkspace(legacyMemoryWorkspaceAdmission)
+            .workspaceDir,
           query,
           results,
           timezone: dreaming.timezone,
@@ -295,18 +296,14 @@ export async function runMemoryPromote(
     diagnosticsToStderr: Boolean(opts.json),
     purpose: "status",
     ...hostOptions,
-    run: async ({ manager, cfg, agentId }) => {
-      const status = manager.status();
-      const workspaceDir = status.workspaceDir?.trim();
+    run: async ({ cfg, agentId, legacyMemoryWorkspaceAdmission }) => {
+      const workspaceDir = requireAdmittedLegacyMemoryWorkspace(
+        legacyMemoryWorkspaceAdmission,
+      ).workspaceDir;
       const dreaming = resolveShortTermPromotionDreamingConfig({
         pluginConfig: resolveMemoryPluginConfig(cfg),
         cfg,
       });
-      if (!workspaceDir) {
-        defaultRuntime.error("Memory promote requires a resolvable workspace directory.");
-        process.exitCode = 1;
-        return;
-      }
       let candidates: Awaited<ReturnType<typeof rankShortTermPromotionCandidates>>;
       try {
         candidates = await rankShortTermPromotionCandidates({
@@ -328,7 +325,8 @@ export async function runMemoryPromote(
       if (opts.apply) {
         try {
           applyResult = await applyShortTermPromotions({
-            workspaceDir,
+            workspaceDir: requireAdmittedLegacyMemoryWorkspace(legacyMemoryWorkspaceAdmission)
+              .workspaceDir,
             candidates,
             limit: opts.limit,
             minScore: opts.minScore ?? dreaming.minScore,
@@ -346,7 +344,7 @@ export async function runMemoryPromote(
       }
       const storePath = resolveShortTermRecallStorePath(workspaceDir);
       const lockPath = resolveShortTermRecallLockPath(workspaceDir);
-      const audit = await auditShortTermPromotionArtifacts({ workspaceDir });
+      const audit = await auditShortTermPromotionArtifacts({ cfg, agentId });
       if (opts.json) {
         defaultRuntime.writeJson({
           workspaceDir,
@@ -441,18 +439,14 @@ export async function runMemoryPromoteExplain(
     diagnosticsToStderr: Boolean(opts.json),
     purpose: "status",
     ...hostOptions,
-    run: async ({ manager, cfg, agentId }) => {
-      const status = manager.status();
-      const workspaceDir = status.workspaceDir?.trim();
+    run: async ({ cfg, agentId, legacyMemoryWorkspaceAdmission }) => {
+      const workspaceDir = requireAdmittedLegacyMemoryWorkspace(
+        legacyMemoryWorkspaceAdmission,
+      ).workspaceDir;
       const dreaming = resolveShortTermPromotionDreamingConfig({
         pluginConfig: resolveMemoryPluginConfig(cfg),
         cfg,
       });
-      if (!workspaceDir) {
-        defaultRuntime.error("Memory promote-explain requires a resolvable workspace directory.");
-        process.exitCode = 1;
-        return;
-      }
       let candidates: Awaited<ReturnType<typeof rankShortTermPromotionCandidates>>;
       try {
         candidates = await rankShortTermPromotionCandidates({

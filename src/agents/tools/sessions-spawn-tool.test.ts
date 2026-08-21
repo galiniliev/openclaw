@@ -1207,6 +1207,22 @@ describe("sessions_spawn tool", () => {
     expect(spawnContext.inheritedToolAllowlist).toEqual(["sessions_spawn", "read"]);
   });
 
+  it("passes the opaque child-memory issuer only to the native spawn context", async () => {
+    const issueMemoryChildDelegation = vi.fn();
+    const tool = createSessionsSpawnTool({
+      agentSessionKey: "agent:main:main",
+      issueMemoryChildDelegation,
+    });
+
+    await tool.execute("call-child-memory-issuer", { task: "inspect private context" });
+
+    const spawnArgs = mockCallArg(hoisted.spawnSubagentDirectMock, 0, 0, "spawnSubagentDirect");
+    const spawnContext = mockCallArg(hoisted.spawnSubagentDirectMock, 0, 1, "spawnSubagentDirect");
+    expect(spawnContext.issueMemoryChildDelegation).toBe(issueMemoryChildDelegation);
+    expect(spawnArgs).not.toHaveProperty("issueMemoryChildDelegation");
+    expect(JSON.stringify(tool.parameters)).not.toContain("issueMemoryChildDelegation");
+  });
+
   it("accepts taskName as a stable subagent handle", async () => {
     const tool = createSessionsSpawnTool({
       agentSessionKey: "agent:main:main",

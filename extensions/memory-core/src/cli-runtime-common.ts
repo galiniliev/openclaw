@@ -25,6 +25,10 @@ import {
   type OpenClawConfig,
   withManager,
 } from "./cli.host.runtime.js";
+import {
+  admitLegacyMemoryWorkspace,
+  type LegacyMemoryWorkspaceAdmission,
+} from "./legacy-memory-workspace-admission.js";
 import type { MemoryCoreAcquireLocalService } from "./memory/embedding-local-service.js";
 import type { ShortTermAuditSummary } from "./short-term-promotion.js";
 const { warn } = theme;
@@ -203,7 +207,12 @@ export async function withMemoryCommand(params: {
   diagnosticsToStderr?: boolean;
   purpose?: MemoryManagerPurpose;
   acquireLocalService?: MemoryCoreAcquireLocalService;
-  run: (context: { manager: MemoryManager; cfg: OpenClawConfig; agentId: string }) => Promise<void>;
+  run: (context: {
+    manager: MemoryManager;
+    cfg: OpenClawConfig;
+    agentId: string;
+    legacyMemoryWorkspaceAdmission: LegacyMemoryWorkspaceAdmission;
+  }) => Promise<void>;
 }): Promise<OpenClawConfig> {
   const { config: cfg, diagnostics } = await loadMemoryCommandConfig(
     params.commandName,
@@ -219,12 +228,18 @@ export async function withMemoryCommand(params: {
     return cfg;
   }
   for (const agentId of agentIds) {
+    const legacyMemoryWorkspaceAdmission = admitLegacyMemoryWorkspace({ cfg, agentId });
+    if (!legacyMemoryWorkspaceAdmission) {
+      defaultRuntime.error(LEGACY_MEMORY_OPERATOR_UNAVAILABLE);
+      process.exitCode = 1;
+      continue;
+    }
     await withMemoryManagerForAgent({
       cfg,
       agentId,
       purpose: params.purpose,
       acquireLocalService: params.acquireLocalService,
-      run: async (manager) => params.run({ manager, cfg, agentId }),
+      run: async (manager) => params.run({ manager, cfg, agentId, legacyMemoryWorkspaceAdmission }),
     });
   }
   return cfg;

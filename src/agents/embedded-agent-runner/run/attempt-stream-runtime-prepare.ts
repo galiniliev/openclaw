@@ -139,6 +139,12 @@ export async function prepareEmbeddedAttemptStreamRuntime(input: {
       if (input.runAbortController.signal.aborted) {
         return abortable(Promise.resolve());
       }
+      if (
+        attempt.authorizedMemoryWrite &&
+        !(await attempt.authorizedMemoryWrite.recheckBeforeModel())
+      ) {
+        throw new Error("memory transcript source is unavailable");
+      }
       return abortable(input.trackPromptSettlePromise(activeSession.prompt(prompt, options)));
     });
   const onBlockReply = attempt.onBlockReply

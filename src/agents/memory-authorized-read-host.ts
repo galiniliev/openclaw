@@ -1,5 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readAuthorizedTranscriptDerivation } from "../config/sessions/session-transcript-memory-policy.js";
+import {
+  captureAuthorizedTranscriptExportSource,
+  readAuthorizedTranscriptDerivation,
+  type AuthorizedTranscriptExportSource,
+} from "../config/sessions/session-transcript-memory-policy.js";
 import type {
   AuthorizedMemoryVirtualView,
   AuthorizedSealedCompactionArtifact,
@@ -15,13 +19,19 @@ import {
   commitAuthorizedMemoryDerivationForInvocation,
   collectAuthorizedMemoryDerivationSources,
   createAuthorizedMemoryDeriveInvocation,
+  createAuthorizedMemoryExportInvocation,
   createAuthorizedMemoryReadInvocation,
   createAuthorizedMemoryWriteInvocation,
   materializeAuthorizedMemoryVirtualView,
+  issueAuthorizedMemoryChildDelegationForInvocation,
   readAuthorizedMemoryVirtualFile,
   readAuthorizedMemoryForInvocation,
+  recheckAuthorizedMemoryDerivationSources,
+  recheckAuthorizedMemoryDeriveWriteInvocation,
+  recheckAuthorizedMemoryExportInvocation,
   searchAuthorizedMemoryForInvocation,
   stageAuthorizedMemorySealedCompactionForInvocation,
+  revokeAuthorizedMemoryChildDelegationForInvocation,
   writeAuthorizedMemoryForInvocation,
   type AuthorizedMemoryDerivationInvocation,
   type AuthorizedMemoryReadInvocation,
@@ -29,18 +39,35 @@ import {
 import type {
   AuthorizedMemoryReadHost,
   AuthorizedMemoryResourceDerivationHost,
+  AuthorizedMemoryTranscriptDerivationHost,
   AuthorizedMemoryWriteHost,
 } from "../plugins/tool-types.js";
 import {
   captureTrustedMemoryAccessFacts,
   createTrustedMemoryAccessContext,
+  materializeTrustedMemoryAccessContext,
   type TrustedMemoryAccessContext,
 } from "../state/memory-access-context.js";
+import {
+  activateMemoryChildDelegation,
+  readMemoryChildTaskCapabilitySnapshot,
+  resolveActiveMemoryChildDelegation,
+  revokeMemoryChildDelegationsForChildGeneration,
+  revokeMemoryChildDelegation,
+  stageMemoryChildDelegation,
+} from "../state/memory-child-delegation.js";
 import { recheckMemoryIdentityBinding } from "../state/memory-identity.js";
 import {
   createCurrentMemorySessionContext,
   type CurrentMemorySessionContext,
 } from "../state/memory-session-subject.js";
+import {
+  activateTranscriptExportArtifact,
+  failTranscriptExportArtifact,
+  stageTranscriptExportArtifact,
+  type StagedTranscriptExportArtifact,
+  type TranscriptExportArtifactType,
+} from "../state/memory-transcript-export-ledger.js";
 import { openOpenClawAgentDatabase } from "../state/openclaw-agent-db.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
 import { resolveMemoryEgressDeliveryFacts } from "./memory-egress-admission.js";
@@ -48,6 +75,7 @@ import { resolveMemoryEgressDeliveryFacts } from "./memory-egress-admission.js";
 const authorizedMemoryVirtualBroker: unique symbol = Symbol(
   "openclaw.authorized-memory-virtual-broker",
 );
+const BACKGROUND_MEMORY_DELIVERY_REGISTRY_REVISION = "mer1_internal-no-egress";
 
 /** Core-private bridge for generic filesystem tools; it is absent from plugin contexts. */
 export type AuthorizedMemoryVirtualFileBroker = Readonly<{
@@ -58,15 +86,52 @@ export type AuthorizedMemoryVirtualFileBroker = Readonly<{
 /** Core-private sealed compaction capability; plugins never receive this host. */
 export type AuthorizedSealedCompactionHost = Readonly<{
   source: AuthorizedTranscriptDerivationSource;
+  /** Rechecks the captured source immediately before each compaction model request. */
+  recheckBeforeModel: () => Promise<boolean>;
   stage: (
     content: string,
   ) => Promise<AuthorizedSealedCompactionArtifact | typeof MEMORY_INVOCATION_UNAVAILABLE>;
+}>;
+
+/** Core-private child grant lifecycle; it never crosses task text or gateway payloads. */
+export type AuthorizedMemoryChildDelegationLease = Readonly<{
+  activate: () => Promise<boolean>;
+  revoke: () => Promise<void>;
+}>;
+
+/**
+ * Core-private transcript-export capability. The command formatter receives
+ * captured event bytes, never a session path or a database reader, and cannot
+ * choose the session, policy set, actor evidence, or artifact destination.
+ */
+export type AuthorizedTranscriptExportHost = Readonly<{
+  exportId: string;
+  eventJsons: readonly string[];
+  sourceContentHash: string;
+  /** Recheck immediately before serializing the captured event bytes. */
+  recheckBeforeSerialization: () => Promise<boolean>;
+  /** Persist the immutable manifest and a staged lifecycle event before publication. */
+  stage: (params: {
+    artifactContentHash: string;
+    artifactType: TranscriptExportArtifactType;
+  }) => Promise<StagedTranscriptExportArtifact | undefined>;
+  /** Recheck immediately before the irrevocable publication fence, then append the lifecycle event. */
+  publish: <Result>(params: {
+    artifact: StagedTranscriptExportArtifact;
+    write: (params: { recheckBeforePublication: () => Promise<void> }) => Promise<Result>;
+  }) => Promise<Result | undefined>;
 }>;
 
 type AuthorizedMemoryReadHostWithVirtualBroker = AuthorizedMemoryReadHost &
   Readonly<{
     [authorizedMemoryVirtualBroker]: () => Promise<AuthorizedMemoryVirtualFileBroker | undefined>;
   }>;
+
+class TranscriptExportPublicationAuthorizationLostError extends Error {
+  constructor() {
+    super("transcript export publication authorization was lost");
+  }
+}
 
 export async function resolveAuthorizedMemoryVirtualFileBroker(
   host: AuthorizedMemoryReadHost | undefined,
@@ -79,6 +144,53 @@ export async function resolveAuthorizedMemoryVirtualFileBroker(
 
 function hash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("base64url");
+}
+
+function matchesCurrentTranscriptDerivationSource(
+  source: AuthorizedTranscriptDerivationSource,
+  current: ReturnType<typeof readAuthorizedTranscriptDerivation>,
+): boolean {
+  return (
+    current?.sourcePolicySetId === source.sourcePolicySetId &&
+    current.deliveryAudiencesJson === source.deliveryAudiencesJson &&
+    current.eventSeqs.length === source.eventSeqs.length &&
+    current.eventSeqs.every((eventSeq, index) => eventSeq === source.eventSeqs[index])
+  );
+}
+
+function matchesCurrentTranscriptExportSource(
+  source: AuthorizedTranscriptExportSource,
+  current: AuthorizedTranscriptExportSource | undefined,
+): boolean {
+  return (
+    current !== undefined &&
+    current.sourcePolicySetId === source.sourcePolicySetId &&
+    current.deliveryAudiencesJson === source.deliveryAudiencesJson &&
+    current.contentHash === source.contentHash &&
+    current.eventSeqs.length === source.eventSeqs.length &&
+    current.eventSeqs.every((eventSeq, index) => eventSeq === source.eventSeqs[index]) &&
+    current.eventHashes.length === source.eventHashes.length &&
+    current.eventHashes.every((eventHash, index) => eventHash === source.eventHashes[index]) &&
+    current.sourceEvidence.length === source.sourceEvidence.length &&
+    current.sourceEvidence.every((evidence, index) => {
+      const expected = source.sourceEvidence[index];
+      return (
+        expected !== undefined &&
+        evidence.eventSeq === expected.eventSeq &&
+        evidence.sourceEventSeq === expected.sourceEventSeq &&
+        evidence.sourceSessionId === expected.sourceSessionId &&
+        evidence.sessionIdentityRevision === expected.sessionIdentityRevision &&
+        evidence.subjectRevision === expected.subjectRevision &&
+        evidence.runExposureRevision === expected.runExposureRevision &&
+        evidence.runExposureSetId === expected.runExposureSetId &&
+        evidence.actorEvidenceJson === expected.actorEvidenceJson &&
+        evidence.delegationSnapshotJson === expected.delegationSnapshotJson &&
+        evidence.exposedResourceRevisionsJson === expected.exposedResourceRevisionsJson &&
+        evidence.exposureReceiptIdsJson === expected.exposureReceiptIdsJson &&
+        evidence.egressReceiptIdsJson === expected.egressReceiptIdsJson
+      );
+    })
+  );
 }
 
 function deliveryFacts(params: {
@@ -104,6 +216,198 @@ function deliveryFacts(params: {
       egressRegistryRevision: facts.egressRegistryRevision,
     }
   );
+}
+
+/**
+ * A maintenance derivation has no recipient-visible delivery path. It can use
+ * only the owning agent's internal audience; reusing egress facts here would
+ * make a delivery-less cron unable to derive, or let it borrow a stale route.
+ */
+function backgroundDeliveryFacts(context: CurrentMemorySessionContext) {
+  return {
+    sink: "internal" as const,
+    audiences: [{ kind: "agent" as const, id: context.agentId }],
+    routeRevision: `mbr1_${hash({
+      agentId: context.agentId,
+      authorityRevision: context.authorityRevision,
+      session: context.fingerprint,
+      subject: context.subject.kind,
+    })}`,
+    egressCapabilityIds: [] as const,
+    egressRegistryRevision: BACKGROUND_MEMORY_DELIVERY_REGISTRY_REVISION,
+  };
+}
+
+function delegationRootPrincipalId(subject: MemoryAccessContext["subject"]): string | undefined {
+  switch (subject.kind) {
+    case "user":
+      return subject.principalId;
+    case "conversation":
+      return subject.conversationPrincipalId;
+    case "service":
+    case "agent":
+    case "system":
+      return subject.principalId;
+  }
+}
+
+/**
+ * Stage a read-only child grant after the child session generation is durable.
+ * The selected plugin owns the opaque token; the core record owns lifecycle,
+ * parent/child identity rechecks, and revocation.
+ */
+export async function stageAuthorizedMemoryChildDelegation(params: {
+  agentId: string;
+  parentSessionKey?: string;
+  parentSessionId?: string;
+  runId?: string;
+  deliveryContext?: DeliveryContext;
+  messageChannel?: string;
+  agentAccountId?: string;
+  childSessionKey: string;
+  childSessionId: string;
+  childSessionIdentityRevision: string;
+  expiresAt: number;
+}): Promise<AuthorizedMemoryChildDelegationLease | undefined> {
+  if (
+    !params.parentSessionKey?.trim() ||
+    !params.parentSessionId?.trim() ||
+    !params.childSessionKey.trim() ||
+    !params.childSessionId.trim() ||
+    !params.childSessionIdentityRevision.trim() ||
+    !Number.isFinite(params.expiresAt) ||
+    params.expiresAt <= Date.now()
+  ) {
+    return undefined;
+  }
+  const parent = createCurrentMemorySessionContext({
+    sessionKey: params.parentSessionKey,
+    sessionId: params.parentSessionId,
+    options: { agentId: params.agentId },
+  });
+  const child = createCurrentMemorySessionContext({
+    sessionKey: params.childSessionKey,
+    sessionId: params.childSessionId,
+    options: { agentId: params.agentId },
+  });
+  if (
+    parent.kind !== "current" ||
+    child.kind !== "current" ||
+    !child.context.isChildSession ||
+    child.context.sessionIdentityRevision !== params.childSessionIdentityRevision
+  ) {
+    return undefined;
+  }
+  const parentTrusted = createTrustedMemoryHostContext({
+    agentId: params.agentId,
+    sessionKey: params.parentSessionKey,
+    sessionId: params.parentSessionId,
+    runId: params.runId,
+    deliveryContext: params.deliveryContext,
+    messageChannel: params.messageChannel,
+    agentAccountId: params.agentAccountId,
+    operation: "read",
+  });
+  if (!parentTrusted) {
+    return undefined;
+  }
+  const parentContext = parentTrusted && materializeTrustedMemoryAccessContext(parentTrusted);
+  const capabilitySnapshotId = readMemoryChildTaskCapabilitySnapshot({
+    child: child.context,
+    options: { agentId: params.agentId },
+  });
+  const rootPrincipalId = parentContext && delegationRootPrincipalId(parentContext.subject);
+  if (!parentContext || !capabilitySnapshotId || !rootPrincipalId) {
+    return undefined;
+  }
+  const delegationId = `mchild1_${randomUUID()}`;
+  const issued = await issueAuthorizedMemoryChildDelegationForInvocation({
+    context: parentTrusted,
+    issue: {
+      version: 1,
+      delegationId,
+      child: {
+        agentId: params.agentId,
+        sessionId: child.context.sessionId,
+        sessionIdentityRevision: child.context.sessionIdentityRevision,
+        subjectRevision: child.context.subjectRevision,
+        capabilitySnapshotId,
+      },
+      allowedOperations: ["read"],
+      maximumAudiences: parentContext.delivery.audiences,
+      expiresAt: new Date(params.expiresAt).toISOString(),
+    },
+  });
+  if ("unavailable" in issued) {
+    return undefined;
+  }
+  const delegation = {
+    rootPrincipalId,
+    rootContextId: parentContext.contextId,
+    parentContextId: parentContext.contextId,
+    parentMemoryPlanId: issued.parentMemoryPlanId,
+    capabilitySnapshotId,
+    allowedOperations: ["read"] as const,
+    maximumAudiences: parentContext.delivery.audiences,
+    storeCapToken: issued.storeCapToken,
+    depth: 1,
+  } satisfies NonNullable<MemoryAccessContext["delegation"]>;
+  const staged = stageMemoryChildDelegation({
+    delegationId,
+    parent: parent.context,
+    child: child.context,
+    delegation,
+    facts: {
+      subject: parentContext.subject,
+      actor: parentContext.actor,
+      verifiedPrincipals: parentContext.verifiedPrincipals,
+      collaboration: parentContext.collaboration,
+      delivery: parentContext.delivery,
+    },
+    expiresAt: params.expiresAt,
+    options: { agentId: params.agentId },
+  });
+  if (!staged) {
+    await revokeAuthorizedMemoryChildDelegationForInvocation({
+      agentId: params.agentId,
+      storeCapToken: issued.storeCapToken,
+    });
+    return undefined;
+  }
+  const revoke = async () => {
+    revokeMemoryChildDelegation({ delegation: staged, options: { agentId: params.agentId } });
+    await revokeAuthorizedMemoryChildDelegationForInvocation({
+      agentId: params.agentId,
+      storeCapToken: issued.storeCapToken,
+    });
+  };
+  return Object.freeze({
+    activate: async () =>
+      activateMemoryChildDelegation({ delegation: staged, options: { agentId: params.agentId } }),
+    revoke,
+  });
+}
+
+/**
+ * Terminal child cleanup owns durable revocation. The selected plugin only
+ * receives opaque tokens after the core row is already closed.
+ */
+export function revokeAuthorizedMemoryChildDelegationsForChildGeneration(params: {
+  agentId: string;
+  childSessionKey: string;
+  childSessionId: string;
+  childSessionIdentityRevision: string;
+}): void {
+  const storeCapTokens = revokeMemoryChildDelegationsForChildGeneration({
+    ...params,
+    options: { agentId: params.agentId },
+  });
+  for (const storeCapToken of storeCapTokens) {
+    void revokeAuthorizedMemoryChildDelegationForInvocation({
+      agentId: params.agentId,
+      storeCapToken,
+    });
+  }
 }
 
 /**
@@ -143,25 +447,44 @@ function createTrustedMemoryHostContext(
     return undefined;
   }
   const { context } = session;
-  if (context.isChildSession) {
-    // A child starts with the empty memory intersection. Only a future
-    // host-issued delegation may add a bounded view; session metadata cannot.
+  const childDelegation = context.isChildSession
+    ? resolveActiveMemoryChildDelegation({
+        child: context,
+        operation: params.operation,
+        options: { agentId: params.agentId },
+      })
+    : undefined;
+  if (context.isChildSession && !childDelegation) {
+    // Spawn metadata is never authority. A child needs its own durable,
+    // exact-generation grant before it can receive even a parent-bounded view.
     return undefined;
   }
   if (
     params.background === true &&
-    context.subject.kind !== "agent" &&
-    context.subject.kind !== "service" &&
-    context.subject.kind !== "system"
+    (childDelegation ||
+      (context.subject.kind !== "agent" &&
+        context.subject.kind !== "service" &&
+        context.subject.kind !== "system"))
   ) {
     return undefined;
   }
-  const delivery = deliveryFacts({
-    context,
-    deliveryContext: params.deliveryContext,
-    messageChannel: params.messageChannel,
-    agentAccountId: params.agentAccountId,
-  });
+  const delivery =
+    childDelegation
+      ? {
+          sink: childDelegation.facts.delivery.sinkKind,
+          audiences: childDelegation.facts.delivery.audiences,
+          routeRevision: childDelegation.facts.delivery.deliveryRevision,
+          egressCapabilityIds: childDelegation.facts.delivery.egressCapabilityIds,
+          egressRegistryRevision: childDelegation.facts.delivery.egressRegistryRevision,
+        }
+      : params.background === true
+      ? backgroundDeliveryFacts(context)
+      : deliveryFacts({
+          context,
+          deliveryContext: params.deliveryContext,
+          messageChannel: params.messageChannel,
+          agentAccountId: params.agentAccountId,
+        });
   if (!delivery) {
     return undefined;
   }
@@ -172,7 +495,10 @@ function createTrustedMemoryHostContext(
     evidenceRevision: string;
     expiresAt?: string;
   }> = [];
-  if (context.subject.kind === "user" && context.bindingId) {
+  if (childDelegation) {
+    actor = childDelegation.facts.actor;
+    verifiedPrincipals = [...childDelegation.facts.verifiedPrincipals];
+  } else if (context.subject.kind === "user" && context.bindingId) {
     const binding = recheckMemoryIdentityBinding({ bindingId: context.bindingId });
     if (binding.kind !== "current" || binding.binding.principalId !== context.principalId) {
       return undefined;
@@ -230,11 +556,23 @@ function createTrustedMemoryHostContext(
     runId: params.runId?.trim() || `session:${context.sessionId}`,
     actor,
     verifiedPrincipals,
-    collaboration: { kind: "not-applicable" },
+    collaboration: childDelegation?.facts.collaboration ?? { kind: "not-applicable" },
     // Role membership is intentionally absent until a trusted membership resolver exists. This
     // keeps a group actor from selecting a role store merely because they sent the latest message.
     verifiedMemberships: [],
     delivery,
+    ...(childDelegation
+      ? {
+          delegation: childDelegation.delegation,
+          delegationSubject: childDelegation.facts.subject,
+          delegationRecheck: () =>
+            resolveActiveMemoryChildDelegation({
+              child: context,
+              operation: params.operation,
+              options: { agentId: params.agentId },
+            }) !== undefined,
+        }
+      : {}),
     operation: params.operation,
     hostFactsRevision: `mhf1_${hash({
       session: context.fingerprint,
@@ -266,22 +604,45 @@ function createAuthorizedMemoryContentHost(
   if (!trusted) {
     return undefined;
   }
-  let invocation:
-    | Promise<
-        | AuthorizedMemoryReadInvocation
-        | AuthorizedMemoryDerivationInvocation
-        | typeof MEMORY_INVOCATION_UNAVAILABLE
-      >
+  let readInvocation:
+    | Promise<AuthorizedMemoryReadInvocation | typeof MEMORY_INVOCATION_UNAVAILABLE>
     | undefined;
+  let deriveInvocation:
+    | Promise<AuthorizedMemoryDerivationInvocation | typeof MEMORY_INVOCATION_UNAVAILABLE>
+    | undefined;
+  const getReadInvocation = () =>
+    (readInvocation ??= createAuthorizedMemoryReadInvocation({ context: trusted }));
   const getInvocation = () =>
-    (invocation ??=
-      operation === "derive"
-        ? createAuthorizedMemoryDeriveInvocation({ context: trusted })
-        : createAuthorizedMemoryReadInvocation({ context: trusted }));
+    operation === "derive"
+      ? (deriveInvocation ??= createAuthorizedMemoryDeriveInvocation({ context: trusted }))
+      : getReadInvocation();
+  const contentHost = {
+    async search(search: Parameters<AuthorizedMemoryReadHost["search"]>[0]) {
+      const active = await getInvocation();
+      if ("unavailable" in active) {
+        return active;
+      }
+      const result = await searchAuthorizedMemoryForInvocation({ invocation: active, ...search });
+      return "unavailable" in result ? MEMORY_INVOCATION_UNAVAILABLE : result;
+    },
+    async read(read: Parameters<AuthorizedMemoryReadHost["read"]>[0]) {
+      const active = await getInvocation();
+      if ("unavailable" in active) {
+        return active;
+      }
+      const result = await readAuthorizedMemoryForInvocation({ invocation: active, ...read });
+      return "unavailable" in result ? MEMORY_INVOCATION_UNAVAILABLE : result;
+    },
+  } satisfies AuthorizedMemoryReadHost;
+  if (operation === "derive") {
+    // Generic virtual files are a read capability. Derivations expose source bytes
+    // only through their dedicated broker, so they cannot create a second read path.
+    return Object.freeze(contentHost);
+  }
   let virtualBroker: Promise<AuthorizedMemoryVirtualFileBroker | undefined> | undefined;
   const getVirtualBroker = () =>
     (virtualBroker ??= (async () => {
-      const active = await getInvocation();
+      const active = await getReadInvocation();
       if ("unavailable" in active) {
         return undefined;
       }
@@ -302,24 +663,9 @@ function createAuthorizedMemoryContentHost(
       });
     })());
   return Object.freeze({
-    async search(search) {
-      const active = await getInvocation();
-      if ("unavailable" in active) {
-        return active;
-      }
-      const result = await searchAuthorizedMemoryForInvocation({ invocation: active, ...search });
-      return "unavailable" in result ? MEMORY_INVOCATION_UNAVAILABLE : result;
-    },
-    async read(read) {
-      const active = await getInvocation();
-      if ("unavailable" in active) {
-        return active;
-      }
-      const result = await readAuthorizedMemoryForInvocation({ invocation: active, ...read });
-      return "unavailable" in result ? MEMORY_INVOCATION_UNAVAILABLE : result;
-    },
+    ...contentHost,
     [authorizedMemoryVirtualBroker]: getVirtualBroker,
-  }) as AuthorizedMemoryReadHost;
+  }) satisfies AuthorizedMemoryReadHost;
 }
 
 export function createAuthorizedMemoryReadHost(
@@ -378,6 +724,9 @@ export async function prepareAuthorizedMemoryBackgroundDerivationHost(
       });
       return "unavailable" in result ? MEMORY_INVOCATION_UNAVAILABLE : result;
     },
+    async recheckSources() {
+      return await recheckAuthorizedMemoryDerivationSources({ invocation });
+    },
     async commit({ content, contentType = "markdown", signal }) {
       if (signal?.aborted) {
         return MEMORY_INVOCATION_UNAVAILABLE;
@@ -390,7 +739,7 @@ export async function prepareAuthorizedMemoryBackgroundDerivationHost(
       });
       return "unavailable" in result ? MEMORY_INVOCATION_UNAVAILABLE : result;
     },
-  });
+  } satisfies AuthorizedMemoryResourceDerivationHost);
 }
 
 /**
@@ -416,7 +765,7 @@ export async function admitAuthorizedMemoryDerivation(
 export async function prepareAuthorizedTranscriptDerivationHost(
   params: AuthorizedMemoryHostParams &
     Readonly<{ derivationPurpose?: AuthorizedTranscriptDerivationPurpose }>,
-): Promise<AuthorizedMemoryWriteHost | undefined> {
+): Promise<AuthorizedMemoryTranscriptDerivationHost | undefined> {
   const sessionId = params.sessionId?.trim();
   const trusted = createTrustedMemoryHostContext({ ...params, operation: "derive" });
   if (!trusted || !sessionId) {
@@ -433,7 +782,24 @@ export async function prepareAuthorizedTranscriptDerivationHost(
   if ("unavailable" in invocation) {
     return undefined;
   }
+  const source = Object.freeze({
+    kind: "transcript" as const,
+    sessionId,
+    eventSeqs: transcriptSource.eventSeqs,
+    sourcePolicySetId: transcriptSource.sourcePolicySetId,
+    deliveryAudiencesJson: transcriptSource.deliveryAudiencesJson,
+  });
   return Object.freeze({
+    async recheckBeforeModel() {
+      if (!recheckAuthorizedMemoryDeriveWriteInvocation({ invocation })) {
+        return false;
+      }
+      const current = readAuthorizedTranscriptDerivation(
+        openOpenClawAgentDatabase({ agentId: params.agentId }).db,
+        sessionId,
+      );
+      return matchesCurrentTranscriptDerivationSource(source, current);
+    },
     async remember({ content, contentType = "markdown" }) {
       const result = await writeAuthorizedMemoryForInvocation({
         invocation,
@@ -445,19 +811,13 @@ export async function prepareAuthorizedTranscriptDerivationHost(
           idempotencyKey: randomUUID(),
           content,
           contentType,
-          sourcePolicySetId: transcriptSource.sourcePolicySetId,
-          transcriptSource: {
-            kind: "transcript",
-            sessionId,
-            eventSeqs: transcriptSource.eventSeqs,
-            sourcePolicySetId: transcriptSource.sourcePolicySetId,
-            deliveryAudiencesJson: transcriptSource.deliveryAudiencesJson,
-          },
+          sourcePolicySetId: source.sourcePolicySetId,
+          transcriptSource: source,
         },
       });
       return "unavailable" in result ? MEMORY_INVOCATION_UNAVAILABLE : result;
     },
-  });
+  } satisfies AuthorizedMemoryTranscriptDerivationHost);
 }
 
 /**
@@ -486,18 +846,132 @@ export async function prepareAuthorizedSealedCompactionHost(
   const sealedSource = Object.freeze({
     kind: "transcript",
     sessionId,
-    eventSeqs: transcriptSource.eventSeqs,
+    eventSeqs: Object.freeze([...transcriptSource.eventSeqs]),
     sourcePolicySetId: transcriptSource.sourcePolicySetId,
     deliveryAudiencesJson: transcriptSource.deliveryAudiencesJson,
   });
   return Object.freeze({
     source: sealedSource,
+    async recheckBeforeModel() {
+      if (!recheckAuthorizedMemoryDeriveWriteInvocation({ invocation })) {
+        return false;
+      }
+      return matchesCurrentTranscriptDerivationSource(
+        sealedSource,
+        readAuthorizedTranscriptDerivation(
+          openOpenClawAgentDatabase({ agentId: params.agentId }).db,
+          sessionId,
+        ),
+      );
+    },
     async stage(content) {
       return await stageAuthorizedMemorySealedCompactionForInvocation({
         invocation,
         content,
         transcriptSource: sealedSource,
       });
+    },
+  });
+}
+
+/**
+ * Creates an owner-command-only export capability for one complete transcript.
+ * The caller's command gate owns owner authorization; this host owns current
+ * identity, delivery, policy, source bytes, staging, and publication rechecks.
+ */
+export async function prepareAuthorizedTranscriptExportHost(
+  params: AuthorizedMemoryHostParams,
+): Promise<AuthorizedTranscriptExportHost | undefined> {
+  const sessionId = params.sessionId?.trim();
+  const trusted = createTrustedMemoryHostContext({ ...params, operation: "export" });
+  if (!trusted || !sessionId) {
+    return undefined;
+  }
+  const invocation = await createAuthorizedMemoryExportInvocation({ context: trusted });
+  if ("unavailable" in invocation) {
+    return undefined;
+  }
+  const database = openOpenClawAgentDatabase({ agentId: params.agentId });
+  const source = captureAuthorizedTranscriptExportSource(database.db, sessionId);
+  if (!source) {
+    return undefined;
+  }
+  const exportId = `mexp1_${randomUUID()}`;
+  const recheck = async (): Promise<boolean> => {
+    if (!(await recheckAuthorizedMemoryExportInvocation({ invocation }))) {
+      return false;
+    }
+    return matchesCurrentTranscriptExportSource(
+      source,
+      captureAuthorizedTranscriptExportSource(database.db, sessionId),
+    );
+  };
+  const recheckBeforePublication = async (): Promise<void> => {
+    if (!(await recheck())) {
+      throw new TranscriptExportPublicationAuthorizationLostError();
+    }
+  };
+  return Object.freeze({
+    exportId,
+    eventJsons: Object.freeze([...source.eventJsons]),
+    sourceContentHash: source.contentHash,
+    recheckBeforeSerialization: recheck,
+    async stage({
+      artifactContentHash,
+      artifactType,
+    }: {
+      artifactContentHash: string;
+      artifactType: TranscriptExportArtifactType;
+    }) {
+      if (!(await recheck())) {
+        return undefined;
+      }
+      try {
+        return stageTranscriptExportArtifact({
+          artifactContentHash,
+          artifactType,
+          database,
+          exportId,
+          sessionId,
+          source,
+        });
+      } catch {
+        return undefined;
+      }
+    },
+    async publish<Result>({
+      artifact,
+      write,
+    }: {
+      artifact: StagedTranscriptExportArtifact;
+      write: (params: { recheckBeforePublication: () => Promise<void> }) => Promise<Result>;
+    }): Promise<Result | undefined> {
+      if (!(await recheck())) {
+        failTranscriptExportArtifact({
+          artifact,
+          database,
+          failureReason: "publication-authorization-lost",
+        });
+        return undefined;
+      }
+      try {
+        const result = await write({ recheckBeforePublication });
+        // The writer's final recheck is the authorization fence for an irreversible
+        // filesystem publication. Once visible, retain the staged lineage even if
+        // the post-commit ledger append cannot complete.
+        activateTranscriptExportArtifact({ artifact, database });
+        return result;
+      } catch (error) {
+        failTranscriptExportArtifact({
+          artifact,
+          database,
+          failureReason:
+            error instanceof TranscriptExportPublicationAuthorizationLostError
+              ? "publication-authorization-lost"
+              : "publication-failed",
+        });
+        return undefined;
+      }
     },
   });
 }

@@ -193,32 +193,35 @@ describe("runContextEngineMaintenance", () => {
     await loadFreshContextEngineMaintenanceModuleForTest();
   });
 
-  it("does not let cutover maintenance route transcript content through an owning engine", async () => {
-    isMemoryIsolationCutoverAgentMock.mockReturnValue(true);
-    const maintain = vi.fn(async () => ({
-      changed: true,
-      bytesFreed: 10,
-      rewrittenEntries: 1,
-    }));
+  it.each([false, true])(
+    "does not let cutover maintenance route transcript content through a context engine that reports ownsCompaction=%s",
+    async (ownsCompaction) => {
+      isMemoryIsolationCutoverAgentMock.mockReturnValue(true);
+      const maintain = vi.fn(async () => ({
+        changed: true,
+        bytesFreed: 10,
+        rewrittenEntries: 1,
+      }));
 
-    const result = await runContextEngineMaintenance({
-      contextEngine: {
-        info: { id: "test", name: "Test Engine", ownsCompaction: true },
-        ingest: async () => ({ ingested: true }),
-        assemble: async ({ messages }) => ({ messages, estimatedTokens: 0 }),
-        compact: async () => ({ ok: true, compacted: false }),
-        maintain,
-      },
-      agentId: "main",
-      sessionId: "session-1",
-      sessionKey: "agent:main:session-1",
-      sessionFile: "/tmp/session.jsonl",
-      reason: "turn",
-    });
+      const result = await runContextEngineMaintenance({
+        contextEngine: {
+          info: { id: "test", name: "Test Engine", ownsCompaction },
+          ingest: async () => ({ ingested: true }),
+          assemble: async ({ messages }) => ({ messages, estimatedTokens: 0 }),
+          compact: async () => ({ ok: true, compacted: false }),
+          maintain,
+        },
+        agentId: "main",
+        sessionId: "session-1",
+        sessionKey: "agent:main:session-1",
+        sessionFile: "/tmp/session.jsonl",
+        reason: "turn",
+      });
 
-    expect(result).toBeUndefined();
-    expect(maintain).not.toHaveBeenCalled();
-  });
+      expect(result).toBeUndefined();
+      expect(maintain).not.toHaveBeenCalled();
+    },
+  );
 
   it("passes a rewrite-capable runtime context into maintain()", async () => {
     const sessionTarget = {

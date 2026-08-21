@@ -1,11 +1,13 @@
 // Builds export bundles for a session transcript and runtime context.
 import fsp from "node:fs/promises";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expectDefined } from "@openclaw/normalization-core";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { hasNonEmptyString } from "@openclaw/normalization-core/string-coerce";
 import { readAcpSessionMetaForEntry } from "../../acp/runtime/session-meta.js";
+import { prepareAuthorizedTranscriptExportHost } from "../../agents/memory-authorized-read-host.js";
 import {
   migrateSessionEntries,
   type FileEntry as SessionFileEntry,
@@ -21,6 +23,7 @@ import type { ReplyPayload } from "../types.js";
 import {
   isReplyPayload,
   parseExportCommandOutputPath,
+  resolveTranscriptExportCutoverStatus,
   resolveExportCommandSessionTarget,
 } from "./commands-export-common.js";
 import { writeSessionExportFile } from "./commands-export-session-file.js";
@@ -89,7 +92,7 @@ function isBackendDelegatedSession(
 }
 
 type SessionExportEventWarning = {
-  code: "invalid-session-row";
+  code: "invalid-session-json" | "invalid-session-row";
   row: number;
 };
 
@@ -325,6 +328,123 @@ function readSessionDataFromEntries(
   };
 }
 
+function readSessionDataFromAuthorizedEventJsons(eventJsons: readonly string[]): {
+  header: SessionHeader | null;
+  entries: AgentSessionEntry[];
+  leafId: string | null;
+  hasLeafControl: boolean;
+  warnings: SessionExportWarningSummary[];
+} {
+  const events: unknown[] = [];
+  const warnings: SessionExportEventWarning[] = [];
+  for (const [index, eventJson] of eventJsons.entries()) {
+    try {
+      events.push(JSON.parse(eventJson) as unknown);
+    } catch {
+      warnings.push({ code: "invalid-session-json", row: index + 1 });
+    }
+  }
+  const filtered = filterSessionEntriesWithWarnings(events);
+  return readSessionDataFromEntries(
+    filtered.entries,
+    summarizeSessionExportWarnings([...warnings, ...filtered.warnings]),
+  );
+}
+
+function addScopedExportLineageWatermark(params: {
+  html: string;
+  exportId: string;
+  sourceContentHash: string;
+}): string {
+  const watermark = `<meta name="openclaw-transcript-export" content="${params.exportId}:${params.sourceContentHash}">`;
+  if (!params.html.includes("</head>")) {
+    throw new Error("Export HTML template is missing its document head");
+  }
+  return params.html.replace("</head>", `${watermark}\n</head>`);
+}
+
+function hashExportArtifact(contents: string): string {
+  return createHash("sha256").update(contents).digest("base64url");
+}
+
+async function buildAuthorizedScopedExportSessionReply(params: {
+  commandParams: HandleCommandsParams;
+  outputPath?: string;
+  targetAgentId: string;
+}): Promise<ReplyPayload> {
+  const commandParams = params.commandParams;
+  const sessionId = commandParams.sessionEntry?.sessionId?.trim();
+  if (!sessionId) {
+    return { text: "❌ Scoped transcript export is unavailable because the active session is missing." };
+  }
+  const exportHost = await prepareAuthorizedTranscriptExportHost({
+    agentId: params.targetAgentId,
+    sessionKey: commandParams.sessionKey,
+    sessionId,
+    messageChannel: commandParams.command.channel,
+    agentAccountId: commandParams.ctx.AccountId,
+  });
+  if (!exportHost) {
+    return {
+      text: "❌ Scoped transcript export is unavailable because current owner, policy, or delivery evidence could not be verified.",
+    };
+  }
+  const { entries, header, leafId, hasLeafControl, warnings } =
+    readSessionDataFromAuthorizedEventJsons(exportHost.eventJsons);
+  if (!(await exportHost.recheckBeforeSerialization())) {
+    return { text: "❌ Scoped transcript export was cancelled because its authorization changed." };
+  }
+  const html = addScopedExportLineageWatermark({
+    html: await generateHtml({ header, entries, leafId, hasLeafControl }),
+    exportId: exportHost.exportId,
+    sourceContentHash: exportHost.sourceContentHash,
+  });
+  const staged = await exportHost.stage({
+    artifactContentHash: hashExportArtifact(html),
+    artifactType: "session-html",
+  });
+  if (!staged) {
+    return { text: "❌ Scoped transcript export was cancelled because its authorization changed." };
+  }
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const defaultFileName = `openclaw-session-${sessionId.slice(0, 8)}-${timestamp}-${exportHost.exportId}.html`;
+  let writeError: unknown;
+  const written = await exportHost.publish({
+    artifact: staged,
+    async write({ recheckBeforePublication }) {
+      try {
+        return await writeSessionExportFile({
+          workspaceDir: commandParams.workspaceDir,
+          requestedPath: params.outputPath,
+          defaultFileName,
+          contents: html,
+          recheckBeforePublication,
+        });
+      } catch (error) {
+        writeError = error;
+        throw error;
+      }
+    },
+  });
+  if (!written) {
+    if (writeError instanceof FsSafeError && writeError.category === "policy") {
+      return { text: "❌ Output path must be a regular file inside the workspace." };
+    }
+    return { text: "❌ Scoped transcript export was cancelled before it could be published." };
+  }
+  return {
+    text: [
+      "✅ Session exported!",
+      "",
+      `📄 File: ${written.displayPath}`,
+      `📊 Entries: ${entries.length}`,
+      ...warnings.map(formatSessionExportWarning),
+      `🔏 Lineage: ${exportHost.exportId}`,
+      "🧠 System prompt and tools: omitted from scoped transcript export",
+    ].join("\n"),
+  };
+}
+
 export async function buildExportSessionReply(params: HandleCommandsParams): Promise<ReplyPayload> {
   const args = parseExportCommandOutputPath(params.command.commandBodyNormalized, [
     "export-session",
@@ -332,6 +452,17 @@ export async function buildExportSessionReply(params: HandleCommandsParams): Pro
   ]);
   if (args.error) {
     return { text: args.error };
+  }
+  const cutover = resolveTranscriptExportCutoverStatus(params);
+  if (cutover.kind === "denied") {
+    return cutover.reply;
+  }
+  if (cutover.kind === "scoped") {
+    return await buildAuthorizedScopedExportSessionReply({
+      commandParams: params,
+      outputPath: args.outputPath,
+      targetAgentId: cutover.targetAgentId,
+    });
   }
   const sessionTarget = resolveExportCommandSessionTarget(params);
   if (isReplyPayload(sessionTarget)) {

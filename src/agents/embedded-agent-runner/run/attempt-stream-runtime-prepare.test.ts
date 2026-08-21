@@ -246,6 +246,27 @@ describe("prepareEmbeddedAttemptStreamRuntime", () => {
     expect(mocks.abortable).toHaveBeenCalledOnce();
   });
 
+  it("does not dispatch a provider request after transcript source freshness is revoked", async () => {
+    const fixture = createFixture();
+    const recheckBeforeModel = vi.fn().mockResolvedValue(false);
+    fixture.input.attempt = {
+      ...fixture.input.attempt,
+      authorizedMemoryWrite: {
+        remember: vi.fn(),
+        recheckBeforeModel,
+      },
+    };
+
+    const runtime = await prepareEmbeddedAttemptStreamRuntime(fixture.input);
+
+    await expect(runtime.promptActiveSession("flush retained history")).rejects.toThrow(
+      "memory transcript source is unavailable",
+    );
+    expect(recheckBeforeModel).toHaveBeenCalledOnce();
+    expect(fixture.activeSession.prompt).not.toHaveBeenCalled();
+    expect(fixture.trackPromptSettlePromise).not.toHaveBeenCalled();
+  });
+
   it("flushes pending tool results and disposes the session when history preparation fails", async () => {
     const fixture = createFixture({ aborted: true });
     const failure = new Error("history failed");

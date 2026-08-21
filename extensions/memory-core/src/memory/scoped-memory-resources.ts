@@ -172,6 +172,136 @@ function readRevisionPolicyRequirements(params: {
   );
 }
 
+/** A policy-set parent remains current only while every captured policy revision does. */
+function isPolicySetCurrent(params: {
+  database: Parameters<typeof getNodeSqliteKysely<ScopedMemoryDatabase>>[0];
+  policySetId: string;
+}): boolean {
+  const db = getNodeSqliteKysely<ScopedMemoryDatabase>(params.database);
+  const members = executeSqliteQuerySync(
+    params.database,
+    db
+      .selectFrom("memory_policy_set_members")
+      .select(["policy_id", "expected_revision_id", "expected_revocation_epoch", "retention_state"])
+      .where("policy_set_id", "=", params.policySetId)
+      .orderBy("policy_id"),
+  ).rows;
+  if (members.length === 0 || members.some((member) => member.retention_state !== "retained")) {
+    return false;
+  }
+  return members.every((member) => {
+    const current = executeSqliteQueryTakeFirstSync(
+      params.database,
+      db
+        .selectFrom("memory_policies as policy")
+        .innerJoin(
+          "memory_policy_revisions as revision",
+          "revision.revision_id",
+          "policy.current_revision_id",
+        )
+        .select([
+          "policy.lifecycle_state as policy_lifecycle_state",
+          "policy.revocation_epoch",
+          "revision.lifecycle_state as revision_lifecycle_state",
+        ])
+        .where("policy.policy_id", "=", member.policy_id)
+        .where("policy.current_revision_id", "=", member.expected_revision_id)
+        .where("policy.revocation_epoch", "=", member.expected_revocation_epoch),
+    );
+    return (
+      current?.policy_lifecycle_state === "active" && current.revision_lifecycle_state === "active"
+    );
+  });
+}
+
+function readCompactionPolicyAudience(
+  deliveryAudiencesJson: string,
+): Readonly<{ kind: string; id: string }> | undefined {
+  try {
+    const audiences: unknown = JSON.parse(deliveryAudiencesJson);
+    if (!Array.isArray(audiences) || audiences.length !== 1) {
+      return undefined;
+    }
+    const audience = audiences[0];
+    if (
+      typeof audience === "object" &&
+      audience !== null &&
+      "kind" in audience &&
+      "id" in audience &&
+      typeof audience.kind === "string" &&
+      typeof audience.id === "string" &&
+      audience.kind.length > 0 &&
+      audience.id.length > 0
+    ) {
+      return Object.freeze({ kind: audience.kind, id: audience.id });
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Compaction source rows are immutable evidence, so transcript reset and archive cannot make a
+ * valid summary unreadable. Policy-set membership is still rechecked on every read: revocation
+ * changes the active policy revision and immediately invalidates all descendants.
+ */
+function isCompactionPolicyCurrent(params: {
+  database: Parameters<typeof getNodeSqliteKysely<ScopedMemoryDatabase>>[0];
+  compactionPolicyId: string;
+  revisionId: string;
+}): boolean {
+  const db = getNodeSqliteKysely<ScopedMemoryDatabase>(params.database);
+  const policy = executeSqliteQueryTakeFirstSync(
+    params.database,
+    db
+      .selectFrom("memory_compaction_policies")
+      .select(["session_id", "source_policy_set_id", "retention_state"])
+      .where("compaction_policy_id", "=", params.compactionPolicyId),
+  );
+  if (!policy || policy.retention_state !== "retained") {
+    return false;
+  }
+  const sources = executeSqliteQuerySync(
+    params.database,
+    db
+      .selectFrom("memory_compaction_policy_sources")
+      .select(["source_session_id", "source_policy_set_id", "delivery_audiences_json"])
+      .where("compaction_policy_id", "=", params.compactionPolicyId)
+      .orderBy("source_event_seq"),
+  ).rows;
+  if (
+    sources.length === 0 ||
+    sources.some(
+      (source) =>
+        source.source_session_id !== policy.session_id ||
+        source.source_policy_set_id !== policy.source_policy_set_id ||
+        !readCompactionPolicyAudience(source.delivery_audiences_json),
+    )
+  ) {
+    return false;
+  }
+  const target = executeSqliteQueryTakeFirstSync(
+    params.database,
+    db
+      .selectFrom("memory_resource_revisions as revision")
+      .innerJoin("memory_resources as resource", "resource.resource_id", "revision.resource_id")
+      .innerJoin("memory_stores as store", "store.store_id", "resource.store_id")
+      .select(["store.audience_kind", "store.audience_id"])
+      .where("revision.revision_id", "=", params.revisionId),
+  );
+  if (
+    !target ||
+    !isPolicySetCurrent({ database: params.database, policySetId: policy.source_policy_set_id })
+  ) {
+    return false;
+  }
+  return sources.every((source) => {
+    const audience = readCompactionPolicyAudience(source.delivery_audiences_json);
+    return audience?.kind === target.audience_kind && audience.id === target.audience_id;
+  });
+}
+
 /** Requirements and parent revisions are checked for every future exposure, not only at write time. */
 function isRevisionLineageCurrent(params: {
   database: Parameters<typeof getNodeSqliteKysely<ScopedMemoryDatabase>>[0];
@@ -228,6 +358,18 @@ function isRevisionLineageCurrent(params: {
     if (parent.parent_kind === "transcript-policy-set") {
       // Transcript sources materialize their stable policy requirements and every exposed resource
       // parent on the child revision. Those checks above and below are the durable invalidation path.
+      continue;
+    }
+    if (parent.parent_kind === "compaction-policy") {
+      if (
+        !isCompactionPolicyCurrent({
+          database: params.database,
+          compactionPolicyId: parent.parent_id,
+          revisionId: params.revisionId,
+        })
+      ) {
+        return false;
+      }
       continue;
     }
     // Other Phase 2C producers add their own immutable parent types. A resource parent is already

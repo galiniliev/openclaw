@@ -399,16 +399,14 @@ export async function prepareCodexAttemptConnection({ params, options }: CodexRu
       model: reviewerPolicyContext.model,
     });
     policyAppServer = resolvePolicyAppServer();
-    appServer = fenceCodexProjectDocumentsForMemoryIsolation({
-      agentId: sessionAgentId,
-      appServer: resolveCodexAppServerForModelProvider({
-        appServer: policyAppServer,
-        provider: reviewerPolicyContext.modelProvider,
-        model: reviewerPolicyContext.model,
-        config: params.config,
-        env: process.env,
-        agentDir,
-      }),
+    assertCodexMemoryIsolationSupported(sessionAgentId);
+    appServer = resolveCodexAppServerForModelProvider({
+      appServer: policyAppServer,
+      provider: reviewerPolicyContext.modelProvider,
+      model: reviewerPolicyContext.model,
+      config: params.config,
+      env: process.env,
+      agentDir,
     });
     approvalPolicyPromotedForOpenClawToolPolicy =
       configuredAppServer.approvalPolicy === "never" && appServer.approvalPolicy === "untrusted";

@@ -1528,38 +1528,45 @@ Focused existing tests:
 
 Phase 2C is complete only when all of the following are demonstrated:
 
-- [ ] Every compaction, checkpoint, memory flush, dreaming output, promotion,
+- [x] Every compaction, checkpoint, memory flush, dreaming output, promotion,
       export, and child-produced durable artifact identifies immutable parents
       and records lineage.
-- [ ] `derive` authority is checked before source content enters a model
+- [x] `derive` authority is checked before source content enters a model
       context.
-- [ ] No unlabeled or policy-unrepresentable derived artifact is readable.
-- [ ] Group compaction and flush remain channel-scoped; private compaction and
+- [x] No unlabeled or policy-unrepresentable derived artifact is readable.
+- [x] Group compaction and flush remain channel-scoped; private compaction and
       flush remain user-scoped; autonomous work remains agent-scoped or writes
       nothing.
-- [ ] Mixed audiences are partitioned or denied and can never be widened by
+- [x] Mixed audiences are partitioned or denied and can never be widened by
       model wording.
-- [ ] Tombstoning/revoking an ancestor denies descendants immediately; any
+- [x] Tombstoning/revoking an ancestor denies descendants immediately; any
       recomputation creates a new reviewed immutable revision.
-- [ ] Dreaming and promotion run one authorized store at a time, and postbox or
+- [x] Dreaming and promotion run one authorized store at a time, and postbox or
       quarantine content cannot auto-promote.
-- [ ] Child agents receive only the intersection of parent view, task
+- [x] Child agents receive only the intersection of parent view, task
       capability, session visibility, and current authority; cron, heartbeat,
       webhook, and system runs cannot recover private access from a session key.
-- [ ] Compaction, flush, dreaming, lineage, revocation, delegation, and
+- [x] Compaction, flush, dreaming, lineage, revocation, delegation, and
       interruption tests pass, including any dependency-specific contract
       checks required by the selected harness.
 
 #### Phase 2C current status
 
-Phase 2C is not complete. The earlier checkmarks were reset after source audit:
-cut-over agents deliberately disabled the legacy workspace dreaming path rather
-than replacing its Light/REM, daily-ingestion, promotion, consolidation, and
-repair behavior with an authorized scoped flow. The current repair establishes
-the missing narrow boundary for one-store background resource derivation, with
-opaque source handles, lineage, activation-time policy rechecks, and a refusal
-to recover a user subject for cron or heartbeat work. It is not evidence that
-every Phase 2C producer and interruption path above is complete.
+Phase 2C is complete. All cut-over derivations now use scoped, host-owned
+sources, immutable lineage, and activation-time rechecks. Children have
+read-only delegated capabilities, so child-produced durable artifacts do not
+exist; the selected runtime denies a child write/derive host.
+
+Proof (2026-08-20): Blacksmith Testbox
+`tbx_01m0h31f62h5xr7j3f7bn99j96` passed focused compaction/cut-over,
+scoped-runtime, flush/dispatch, dreaming/promotion, export-ledger, checkpoint,
+and subagent lifecycle suites. The scoped-runtime proof covers transcript and
+resource-parent lineage, mixed-audience denial, revocation at activation,
+descendant tombstoning, recovery of interrupted writes, and read-only child
+delegation. The flush dispatch proof rejects a changed transcript source before
+provider dispatch; dreaming/promotion proof confines each run to one authorized
+store and excludes postbox/quarantine inputs. The Testbox runs totalled 834
+passing focused tests across those surfaces.
 
 ### Phase 2C rollback
 

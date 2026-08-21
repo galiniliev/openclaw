@@ -4,6 +4,7 @@
  * Validates spawn requests, prepares child sessions, stages attachments, binds delivery context, and registers runs.
  */
 import { promises as fs } from "node:fs";
+import { finiteSecondsToTimerSafeMilliseconds } from "@openclaw/normalization-core/number-coercion";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { isAcpRuntimeSpawnAvailable } from "../../../acp/runtime/availability.js";
 import type { SubagentSpawnPreparation } from "../../../context-engine/types.js";
@@ -46,6 +47,7 @@ import {
 } from "./subagent-spawn-context.js";
 import type {
   SpawnSubagentContext,
+  SpawnSubagentMemoryChildDelegationLease,
   SpawnSubagentParams,
   SpawnSubagentResult,
 } from "./subagent-spawn-contract.js";
@@ -147,6 +149,23 @@ export async function spawnSubagentDirect(
   let hasBoundThreadDeliveryOrigin = false;
   let childRunId: string = childIdem;
   let swarmReservationPending = reservationPending;
+  let childMemoryDelegationLease: SpawnSubagentMemoryChildDelegationLease | undefined;
+  let childMemoryDelegationRevocation: Promise<void> | undefined;
+  const revokeChildMemoryDelegation = async () => {
+    if (!childMemoryDelegationLease) {
+      return;
+    }
+    childMemoryDelegationRevocation ??= childMemoryDelegationLease.revoke();
+    await childMemoryDelegationRevocation;
+  };
+  const activateChildMemoryDelegation = async () => {
+    if (!childMemoryDelegationLease || childMemoryDelegationRevocation) {
+      return;
+    }
+    if (!(await childMemoryDelegationLease.activate())) {
+      await revokeChildMemoryDelegation();
+    }
+  };
   try {
     const childPlan = await resolveSubagentChildPlan({
       request: params,
@@ -205,12 +224,39 @@ export async function spawnSubagentDirect(
       expectedSessionId: initialSession.entry?.sessionId,
       expectedLifecycleRevision: initialSession.entry?.lifecycleRevision,
     };
-    const cleanupCreatedSession = (emitLifecycleHooks = false) =>
-      cleanupProvisionalSession(childSessionKey, {
+    const childMemoryDelegationTtlMs = finiteSecondsToTimerSafeMilliseconds(runTimeoutSeconds, {
+      floorSeconds: true,
+    });
+    if (
+      ctx.issueMemoryChildDelegation &&
+      initialSession.entry?.sessionId &&
+      initialSession.entry.lifecycleRevision &&
+      childMemoryDelegationTtlMs &&
+      childMemoryDelegationTtlMs > 0
+    ) {
+      try {
+        // A zero/no-timeout child deliberately receives no lease: retaining a
+        // parent view beyond a bounded run would turn it into ambient authority.
+        childMemoryDelegationLease = await ctx.issueMemoryChildDelegation({
+          parentSessionKey: requesterInternalKey,
+          childSessionKey,
+          childSessionId: initialSession.entry.sessionId,
+          childSessionIdentityRevision: initialSession.entry.lifecycleRevision,
+          expiresAt: Date.now() + childMemoryDelegationTtlMs,
+        });
+      } catch {
+        // A child without a successfully staged lease remains runnable, but its
+        // memory host fails closed just like any other unavailable memory path.
+      }
+    }
+    const cleanupCreatedSession = async (emitLifecycleHooks = false) => {
+      await revokeChildMemoryDelegation();
+      return await cleanupProvisionalSession(childSessionKey, {
         emitLifecycleHooks,
         deleteTranscript: true,
         ...provisionalSessionIdentity,
       });
+    };
     const preparedSpawnContext = await prepareSubagentSessionContext({
       cfg,
       contextMode,
@@ -371,8 +417,11 @@ export async function spawnSubagentDirect(
       requesterSessionKey: requesterInternalKey,
       agentId: targetAgentId,
     });
-    const launchChildRun = async () =>
-      await callSubagentGateway(
+    const launchChildRun = async () => {
+      // A pending lease is inert. Move it to active at the dispatch fence so
+      // setup, attachments, and queued collector waits never grant a child view.
+      await activateChildMemoryDelegation();
+      return await callSubagentGateway(
         {
           method: "agent",
           params: childLaunch.request,
@@ -380,6 +429,7 @@ export async function spawnSubagentDirect(
         },
         childLaunch.authorization,
       );
+    };
 
     const emitSpawnLifecycleHooks = createSubagentSpawnLifecycleEmitter({
       hookRunner,
@@ -393,8 +443,9 @@ export async function spawnSubagentDirect(
       spawnMode,
       resolvedModelMetadata,
     });
-    const cleanupFailedSpawn = (waitForSessionDeletion?: boolean) =>
-      cleanupFailedSpawnBeforeAgentStart({
+    const cleanupFailedSpawn = async (waitForSessionDeletion?: boolean) => {
+      await revokeChildMemoryDelegation();
+      return await cleanupFailedSpawnBeforeAgentStart({
         childSessionKey,
         attachmentAbsDir,
         emitLifecycleHooks: threadBindingReady,
@@ -402,6 +453,7 @@ export async function spawnSubagentDirect(
         ...provisionalSessionIdentity,
         waitForSessionDeletion,
       });
+    };
     type SubagentBackendState = { contextEnginePreparation?: SubagentSpawnPreparation };
     const adapter: SpawnBackendAdapter<SubagentBackendState> = {
       async initialize() {
@@ -515,6 +567,15 @@ export async function spawnSubagentDirect(
             ? params.swarmLaunchRequestFingerprint
             : undefined,
           outputSchema: params.outputSchema,
+          ...(initialSession.entry?.sessionId && initialSession.entry.lifecycleRevision
+            ? {
+                childSessionGeneration: {
+                  agentId: targetAgentId,
+                  sessionId: initialSession.entry.sessionId,
+                  lifecycleRevision: initialSession.entry.lifecycleRevision,
+                },
+              }
+            : {}),
           groupId: swarmGroupId,
           queuedLaunch,
           queued: params.collect === true,

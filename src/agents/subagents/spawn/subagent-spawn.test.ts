@@ -1196,6 +1196,85 @@ describe("spawnSubagentDirect seam flow", () => {
     expect(agentParams.cleanupBundleMcpOnRunEnd).toBe(true);
   });
 
+  it("stages a bounded child-memory lease after session creation and activates it at gateway dispatch", async () => {
+    const lease = {
+      activate: vi.fn(async () => true),
+      revoke: vi.fn(async () => {}),
+    };
+    const issueMemoryChildDelegation = vi.fn(async () => lease);
+
+    const result = await spawnSubagentDirect(
+      { task: "inspect private context", runTimeoutSeconds: 30 },
+      {
+        agentSessionKey: "agent:main:main",
+        issueMemoryChildDelegation,
+      },
+    );
+
+    expect(result.status).toBe("accepted");
+    expect(issueMemoryChildDelegation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        parentSessionKey: "agent:main:main",
+        childSessionKey: result.childSessionKey,
+        childSessionId: expect.any(String),
+        childSessionIdentityRevision: expect.any(String),
+        expiresAt: expect.any(Number),
+      }),
+    );
+    expect(lease.activate).toHaveBeenCalledOnce();
+    expect(lease.revoke).not.toHaveBeenCalled();
+    expect(lease.activate.mock.invocationCallOrder[0]).toBeLessThan(
+      hoisted.callGatewayMock.mock.invocationCallOrder[0] ?? Infinity,
+    );
+    const registered = firstRegisteredSubagentRun();
+    expect(registered.childSessionGeneration).toEqual({
+      agentId: "main",
+      sessionId: expect.any(String),
+      lifecycleRevision: expect.any(String),
+    });
+    expect(JSON.stringify(gatewayRequest("agent").params)).not.toContain("mchild");
+  });
+
+  it("does not issue a child-memory lease for an unbounded child run", async () => {
+    const issueMemoryChildDelegation = vi.fn();
+
+    const result = await spawnSubagentDirect(
+      { task: "inspect private context", runTimeoutSeconds: 0 },
+      {
+        agentSessionKey: "agent:main:main",
+        issueMemoryChildDelegation,
+      },
+    );
+
+    expect(result.status).toBe("accepted");
+    expect(issueMemoryChildDelegation).not.toHaveBeenCalled();
+  });
+
+  it("revokes a staged child-memory lease when gateway dispatch fails", async () => {
+    const lease = {
+      activate: vi.fn(async () => true),
+      revoke: vi.fn(async () => {}),
+    };
+    hoisted.callGatewayMock.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent") {
+        throw new Error("gateway dispatch failed");
+      }
+      return {};
+    });
+
+    const result = await spawnSubagentDirect(
+      { task: "inspect private context", runTimeoutSeconds: 30 },
+      {
+        agentSessionKey: "agent:main:main",
+        issueMemoryChildDelegation: vi.fn(async () => lease),
+      },
+    );
+
+    expect(result).toMatchObject({ status: "error" });
+    expect(lease.activate).toHaveBeenCalledOnce();
+    expect(lease.revoke).toHaveBeenCalledOnce();
+  });
+
   it("dispatches spawned agent runs in process when a gateway context is available", async () => {
     hoisted.hasInProcessGatewayContextMock.mockReturnValue(true);
     hoisted.callGatewayMock.mockRejectedValue(new Error("unexpected websocket gateway call"));

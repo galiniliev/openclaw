@@ -7,13 +7,14 @@ import {
   closeOpenClawAgentDatabasesForTest,
   openOpenClawAgentDatabase,
 } from "../state/openclaw-agent-db.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { runDoctorMemoryIsolation } from "./doctor-memory-isolation.js";
 
 describe("runDoctorMemoryIsolation", () => {
   let stateDir = "";
-  const cfg = {
+  const cfg: OpenClawConfig = {
     agents: { list: [{ id: "main", default: true }, { id: "support" }] },
-  } as const;
+  };
 
   beforeEach(() => {
     stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-doctor-memory-isolation-"));

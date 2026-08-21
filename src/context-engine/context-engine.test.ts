@@ -40,6 +40,7 @@ import { registerLegacyContextEngine } from "./legacy.registration.js";
 import {
   activateContextEngineRegistrations,
   getContextEngineRegistration,
+  isCoreLegacyContextEngine,
   listContextEngineQuarantines,
   registerContextEngineForOwner,
   registerContextEngineInRegistry,
@@ -277,6 +278,30 @@ describe("Engine contract tests", () => {
 
     expect(compactRuntimeSpy).toHaveBeenCalledTimes(1);
     expect(requireCompactRuntimeParams(0).currentTokenCount).toBe(277403);
+  });
+
+  it("routes the registry-proven core legacy engine through direct compaction", async () => {
+    const compactRuntimeSpy = installCompactRuntimeSpy();
+    registerLegacyContextEngine();
+    const engine = await resolveContextEngine(configWithSlot("legacy"));
+
+    expect(isCoreLegacyContextEngine(engine)).toBe(true);
+    await engine.compact({
+      sessionId: "sealed-session",
+      sessionKey: "agent:main:sealed-session",
+      sessionTarget: {
+        agentId: "main",
+        sessionId: "sealed-session",
+        sessionKey: "agent:main:sealed-session",
+      },
+      runtimeContext: { workspaceDir: "/tmp/workspace" },
+    });
+
+    expect(compactRuntimeSpy).toHaveBeenCalledOnce();
+    expect(requireCompactRuntimeParams(0)).toMatchObject({
+      sessionId: "sealed-session",
+      sessionKey: "agent:main:sealed-session",
+    });
   });
 
   it("delegateCompactionToRuntime reuses the legacy runtime bridge", async () => {

@@ -2,19 +2,21 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { resolveMemoryRemDreamingConfig } from "openclaw/plugin-sdk/memory-core-host-status";
 import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/temp-path";
+import {
+  removeBackfillDiaryEntries,
+  removeGroundedShortTermCandidates,
+  writeBackfillDiaryEntries,
+} from "../runtime-api.js";
 import { resolveMemoryPluginConfig, withMemoryCommand } from "./cli-runtime-common.js";
 import { defaultRuntime, shortenHomePath, theme } from "./cli.host.runtime.js";
 import type { MemoryRemBackfillOptions, MemoryRemHarnessOptions } from "./cli.types.js";
-import { removeBackfillDiaryEntries, writeBackfillDiaryEntries } from "./dreaming-narrative.js";
 import { seedHistoricalDailyMemorySignals } from "./dreaming-phases.js";
+import { requireAdmittedLegacyMemoryWorkspace } from "./legacy-memory-workspace-admission.js";
 import type { MemoryCoreRuntimeHost } from "./memory/runtime-host.js";
 import { previewGroundedRemMarkdown } from "./rem-evidence.js";
 import { previewRemHarness } from "./rem-harness.js";
 import { runSessionBackfill, type MemorySessionBackfillOptions } from "./session-backfill.js";
-import {
-  recordGroundedShortTermCandidates,
-  removeGroundedShortTermCandidates,
-} from "./short-term-promotion.js";
+import { recordGroundedShortTermCandidates } from "./short-term-promotion.js";
 const { heading, muted, warn } = theme;
 
 export async function runMemorySessionBackfill(
@@ -27,13 +29,7 @@ export async function runMemorySessionBackfill(
     diagnosticsToStderr: Boolean(opts.json),
     purpose: "status",
     ...hostOptions,
-    run: async ({ manager, cfg, agentId }) => {
-      const workspaceDir = manager.status().workspaceDir?.trim();
-      if (!workspaceDir) {
-        defaultRuntime.error("Memory session-backfill requires a resolvable workspace directory.");
-        process.exitCode = 1;
-        return;
-      }
+    run: async ({ cfg, agentId, legacyMemoryWorkspaceAdmission }) => {
       if (
         opts.rollback &&
         (opts.apply || opts.rem || opts.from || opts.to || opts.archiveFiles?.length)
@@ -51,8 +47,7 @@ export async function runMemorySessionBackfill(
       let result;
       try {
         result = await runSessionBackfill({
-          agentId,
-          workspaceDir,
+          admission: legacyMemoryWorkspaceAdmission,
           ...(opts.from !== undefined ? { from: opts.from } : {}),
           ...(opts.to !== undefined ? { to: opts.to } : {}),
           ...(opts.limitDays !== undefined ? { limitDays: opts.limitDays } : {}),
@@ -75,7 +70,7 @@ export async function runMemorySessionBackfill(
         defaultRuntime.log(
           [
             `${heading("Session Backfill")} ${muted("(rollback)")}`,
-            muted(`workspace=${shortenHomePath(workspaceDir)}`),
+            muted(`workspace=${shortenHomePath(result.workspaceDir)}`),
             muted(`removedDiaryEntries=${result.rollback.removedDiaryEntries}`),
             muted(`removedStagedEntries=${result.rollback.removedStagedEntries}`),
           ].join("\n"),
@@ -84,7 +79,7 @@ export async function runMemorySessionBackfill(
       }
       const lines = [
         `${heading("Session Backfill")} ${muted(`(${agentId})`)}`,
-        muted(`workspace=${shortenHomePath(workspaceDir)}`),
+        muted(`workspace=${shortenHomePath(result.workspaceDir)}`),
         muted(
           `batches=${result.batchCount ?? 1} days=${result.days.length} candidates=${result.candidateCount} staged=${result.stagedEntries}`,
         ),
@@ -286,25 +281,21 @@ export async function runMemoryRemBackfill(
     diagnosticsToStderr: Boolean(opts.json),
     purpose: "status",
     ...hostOptions,
-    run: async ({ manager, cfg, agentId }) => {
-      const status = manager.status();
-      const workspaceDir = status.workspaceDir?.trim();
+    run: async ({ cfg, agentId, legacyMemoryWorkspaceAdmission }) => {
+      const workspaceDir = requireAdmittedLegacyMemoryWorkspace(
+        legacyMemoryWorkspaceAdmission,
+      ).workspaceDir;
       const pluginConfig = resolveMemoryPluginConfig(cfg);
       const remConfig = resolveMemoryRemDreamingConfig({
         pluginConfig,
         cfg,
       });
-      if (!workspaceDir) {
-        defaultRuntime.error("Memory rem-backfill requires a resolvable workspace directory.");
-        process.exitCode = 1;
-        return;
-      }
       if (opts.rollback || opts.rollbackShortTerm) {
         const diaryRollback = opts.rollback
-          ? await removeBackfillDiaryEntries({ workspaceDir })
+          ? await removeBackfillDiaryEntries({ cfg, agentId })
           : null;
         const shortTermRollback = opts.rollbackShortTerm
-          ? await removeGroundedShortTermCandidates({ workspaceDir })
+          ? await removeGroundedShortTermCandidates({ cfg, agentId })
           : null;
         if (opts.json) {
           defaultRuntime.writeJson({
@@ -400,19 +391,21 @@ export async function runMemoryRemBackfill(
           })
           .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
         const written = await writeBackfillDiaryEntries({
-          workspaceDir,
+          cfg,
+          agentId,
           entries,
           timezone: remConfig.timezone,
         });
         let stagedShortTermEntries = 0;
         let replacedShortTermEntries = 0;
         if (opts.stageShortTerm) {
-          const cleared = await removeGroundedShortTermCandidates({ workspaceDir });
+          const cleared = await removeGroundedShortTermCandidates({ cfg, agentId });
           replacedShortTermEntries = cleared.removed;
           const shortTermSeedItems = collectGroundedShortTermSeedItems(grounded.files);
           if (shortTermSeedItems.length > 0) {
             await recordGroundedShortTermCandidates({
-              workspaceDir,
+              workspaceDir: requireAdmittedLegacyMemoryWorkspace(legacyMemoryWorkspaceAdmission)
+                .workspaceDir,
               query: "__dreaming_grounded_backfill__",
               items: shortTermSeedItems,
               dedupeByQueryPerDay: true,

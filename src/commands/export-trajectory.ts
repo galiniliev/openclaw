@@ -8,6 +8,7 @@ import {
   resolveSessionTranscriptReadTarget,
 } from "../config/sessions/session-accessor.js";
 import { formatErrorMessage } from "../infra/errors.js";
+import { isMemoryIsolationCutoverAgent } from "../plugins/memory-cutover.js";
 import { resolveAgentIdFromSessionKey } from "../routing/session-key.js";
 import { type RuntimeEnv, writeRuntimeJson } from "../runtime.js";
 import {
@@ -35,6 +36,8 @@ type EncodedExportTrajectoryRequest = {
 };
 
 const ENCODED_EXPORT_REQUEST_RE = /^[A-Za-z0-9_-]{1,65536}$/u;
+const LEGACY_TRAJECTORY_EXPORT_CUTOVER_DENIAL =
+  "Trajectory export is unavailable after scoped-memory cutover. Scoped transcript export with lineage is not available yet.";
 
 function readNonBlankString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
@@ -117,6 +120,17 @@ export async function exportTrajectoryCommand(
     return;
   }
   const targetAgentId = resolvedOpts.agent ?? resolveAgentIdFromSessionKey(sessionKey);
+  const sessionAgentId = resolveAgentIdFromSessionKey(sessionKey, targetAgentId);
+  // A supplied --agent selects a session store, not authority to relabel the session's
+  // transcript. Check both identities before looking up a store or creating an export.
+  if (
+    isMemoryIsolationCutoverAgent(sessionAgentId) ||
+    isMemoryIsolationCutoverAgent(targetAgentId)
+  ) {
+    runtime.error(LEGACY_TRAJECTORY_EXPORT_CUTOVER_DENIAL);
+    runtime.exit(1);
+    return;
+  }
   const storePath = resolvedOpts.store
     ? resolveStorePath(resolvedOpts.store, { agentId: targetAgentId })
     : resolveStorePath(getRuntimeConfig().session?.store, { agentId: targetAgentId });

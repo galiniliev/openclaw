@@ -8,13 +8,13 @@ import {
 } from "@openclaw/normalization-core/string-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { prepareSystemAgentRunAdmission } from "../../agents/admitted-run-context.js";
-import { prepareAuthorizedTranscriptDerivationHost } from "../../agents/memory-authorized-read-host.js";
 import { resolveDefaultAgentId } from "../../agents/agent-scope-config.js";
 import { resolveBootstrapWarningSignaturesSeen } from "../../agents/bootstrap-budget.js";
 import { resolveCliBackendConfig } from "../../agents/cli-backends.js";
 import { estimateMessagesTokens } from "../../agents/compaction.js";
 import { isBenignCompactionSkipResult } from "../../agents/embedded-agent-runner/compact-reasons.js";
 import { runEmbeddedAgentEntry } from "../../agents/embedded-agent-runner/run-entry.js";
+import { prepareAuthorizedTranscriptDerivationHost } from "../../agents/memory-authorized-read-host.js";
 import { isCliRuntimeAliasForProvider } from "../../agents/model-runtime-aliases.js";
 import { isCliProvider } from "../../agents/model-selection.js";
 import { resolveContextConfigProviderForRuntime } from "../../agents/openai-routing.js";
@@ -1047,6 +1047,7 @@ export async function runMemoryFlushIfNeeded(params: {
         params.followupRun.run.agentId ?? resolveDefaultAgentId(params.cfg),
       )
     : (params.followupRun.run.agentId ?? resolveDefaultAgentId(params.cfg));
+  const usesAuthorizedMemoryStore = isMemoryIsolationCutoverAgent(memoryFlushAgentId);
   const memoryFlushPlan = resolveMemoryFlushPlan({
     cfg: params.cfg,
     agentId: memoryFlushAgentId,
@@ -1087,7 +1088,10 @@ export async function runMemoryFlushIfNeeded(params: {
   const isCli =
     followupUsesCliRuntime(runtimeParams, runtimeId) ||
     followupOwnsNativeCompaction(runtimeParams, runtimeId);
-  const canAttemptFlush = memoryFlushWritable && !params.isHeartbeat && !isCli;
+  // Cut-over flushes mutate only the host-owned subject store. Workspace access
+  // still gates legacy file flushes, but must not suppress that separate path.
+  const canAttemptFlush =
+    (usesAuthorizedMemoryStore || memoryFlushWritable) && !params.isHeartbeat && !isCli;
   const contextWindowTokens = resolveMemoryFlushContextWindowTokens({
     cfg: params.cfg,
     provider: resolveFollowupContextConfigProvider({
@@ -1250,19 +1254,17 @@ export async function runMemoryFlushIfNeeded(params: {
   );
 
   const shouldFlushMemory =
-    (memoryFlushWritable &&
-      !params.isHeartbeat &&
-      !isCli &&
-      shouldRunMemoryFlush({
-        entry,
-        tokenCount: tokenCountForFlush,
-        contextWindowTokens,
-        reserveTokensFloor: memoryFlushPlan.reserveTokensFloor,
-        softThresholdTokens: memoryFlushPlan.softThresholdTokens,
-      })) ||
-    (shouldForceFlushByTranscriptSize &&
-      entry != null &&
-      !hasAlreadyFlushedForCurrentCompaction(entry));
+    canAttemptFlush &&
+    (shouldRunMemoryFlush({
+      entry,
+      tokenCount: tokenCountForFlush,
+      contextWindowTokens,
+      reserveTokensFloor: memoryFlushPlan.reserveTokensFloor,
+      softThresholdTokens: memoryFlushPlan.softThresholdTokens,
+    }) ||
+      (shouldForceFlushByTranscriptSize &&
+        entry != null &&
+        !hasAlreadyFlushedForCurrentCompaction(entry)));
 
   if (!shouldFlushMemory) {
     return { sessionEntry: entry ?? params.sessionEntry, outcome: "skipped" };
@@ -1301,22 +1303,19 @@ export async function runMemoryFlushIfNeeded(params: {
       nowMs: memoryFlushNowMs,
     }) ?? memoryFlushPlan;
   const memoryFlushWritePath = activeMemoryFlushPlan.relativePath;
-  const usesAuthorizedMemoryStore = isMemoryIsolationCutoverAgent(
-    params.followupRun.run.agentId,
-  );
   const authorizedMemoryWrite = usesAuthorizedMemoryStore
     ? await prepareAuthorizedTranscriptDerivationHost({
-      agentId: memoryFlushAgentId,
-      sessionKey:
-        params.runtimePolicySessionKey ??
-        params.followupRun.run.runtimePolicySessionKey ??
-        params.sessionKey ??
-        params.followupRun.run.sessionKey,
-      sessionId: activeSessionEntry?.sessionId ?? params.followupRun.run.sessionId,
-      runId: flushRunId,
-      messageChannel: params.followupRun.run.messageProvider,
-      agentAccountId: params.followupRun.run.agentAccountId,
-    })
+        agentId: memoryFlushAgentId,
+        sessionKey:
+          params.runtimePolicySessionKey ??
+          params.followupRun.run.runtimePolicySessionKey ??
+          params.sessionKey ??
+          params.followupRun.run.sessionKey,
+        sessionId: activeSessionEntry?.sessionId ?? params.followupRun.run.sessionId,
+        runId: flushRunId,
+        messageChannel: params.followupRun.run.messageProvider,
+        agentAccountId: params.followupRun.run.agentAccountId,
+      })
     : undefined;
   if (usesAuthorizedMemoryStore && !authorizedMemoryWrite) {
     // A flush is a transcript derivation, not an ordinary append. Do not give a

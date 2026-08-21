@@ -35,7 +35,9 @@ const hoisted = await vi.hoisted(async () => {
     readAcpSessionMetaForEntryMock: vi.fn<
       (params: { sessionKey: string; entry?: { sessionId?: string } }) => unknown
     >(() => undefined),
+    isMemoryIsolationCutoverAgentMock: vi.fn(() => false),
     loadTranscriptEventsMock: vi.fn(async (): Promise<unknown[]> => []),
+    prepareAuthorizedTranscriptExportHostMock: vi.fn(),
     exportHtmlTemplateContents: new Map<string, string>(),
     sessionTranscriptEvents: [] as unknown[],
   };
@@ -61,6 +63,14 @@ vi.mock("../../config/sessions/session-accessor.js", () => {
     loadTranscriptEvents: hoisted.loadTranscriptEventsMock,
   };
 });
+
+vi.mock("../../plugins/memory-cutover.js", () => ({
+  isMemoryIsolationCutoverAgent: hoisted.isMemoryIsolationCutoverAgentMock,
+}));
+
+vi.mock("../../agents/memory-authorized-read-host.js", () => ({
+  prepareAuthorizedTranscriptExportHost: hoisted.prepareAuthorizedTranscriptExportHostMock,
+}));
 
 vi.mock("./commands-system-prompt.js", () => ({
   resolveCommandsSystemPromptBundle: hoisted.resolveCommandsSystemPromptBundleMock,
@@ -209,14 +219,100 @@ describe("buildExportSessionReply", () => {
       displayPath: "openclaw-session.html",
     });
     hoisted.readAcpSessionMetaForEntryMock.mockReturnValue(undefined);
+    hoisted.isMemoryIsolationCutoverAgentMock.mockReturnValue(false);
     hoisted.loadTranscriptEventsMock.mockImplementation(
       async () => hoisted.sessionTranscriptEvents,
     );
+    hoisted.prepareAuthorizedTranscriptExportHostMock.mockResolvedValue(undefined);
     hoisted.exportHtmlTemplateContents.clear();
     for (const [fileName, contents] of Object.entries(generatedVendorAssets)) {
       hoisted.exportHtmlTemplateContents.set(`vendor/${fileName}`, contents);
     }
     hoisted.sessionTranscriptEvents = [];
+  });
+
+  it("exports a cut-over transcript only from the host snapshot and stages lineage before write", async () => {
+    hoisted.isMemoryIsolationCutoverAgentMock.mockReturnValue(true);
+    const lifecycle: string[] = [];
+    hoisted.prepareAuthorizedTranscriptExportHostMock.mockResolvedValue({
+      exportId: "mexp1_export",
+      eventJsons: [
+        JSON.stringify({
+          type: "message",
+          id: "entry-1",
+          timestamp: "2026-05-16T00:00:00.000Z",
+          message: { role: "user", content: "authorized transcript" },
+        }),
+      ],
+      sourceContentHash: "source-hash",
+      recheckBeforeSerialization: vi.fn(async () => true),
+      stage: vi.fn(async () => {
+        lifecycle.push("staged");
+        return {
+          exportId: "mexp1_export",
+          artifactContentHash: "artifact-hash",
+          artifactType: "session-html",
+        };
+      }),
+      publish: vi.fn(
+        async ({
+          write,
+        }: {
+          write: (params: {
+            recheckBeforePublication: () => Promise<void>;
+          }) => Promise<{ absolutePath: string; displayPath: string }>;
+        }) => {
+          lifecycle.push("publish");
+          return await write({ recheckBeforePublication: async () => undefined });
+        },
+      ),
+    });
+    hoisted.writeSessionExportFileMock.mockImplementation(async () => {
+      lifecycle.push("write");
+      return {
+        absolutePath: "/tmp/workspace/openclaw-session.html",
+        displayPath: "openclaw-session.html",
+      };
+    });
+
+    const reply = await buildExportSessionReply(makeParams());
+
+    expect(hoisted.loadSessionStoreMock).not.toHaveBeenCalled();
+    expect(hoisted.loadTranscriptEventsMock).not.toHaveBeenCalled();
+    expect(hoisted.resolveCommandsSystemPromptBundleMock).not.toHaveBeenCalled();
+    expect(hoisted.prepareAuthorizedTranscriptExportHostMock).toHaveBeenCalledWith({
+      agentId: "target",
+      sessionKey: "agent:target:session",
+      sessionId: "session-1",
+      messageChannel: "quietchat",
+      agentAccountId: undefined,
+    });
+    expect(lifecycle).toEqual(["staged", "publish", "write"]);
+    expect(writtenHtml()).toContain(
+      '<meta name="openclaw-transcript-export" content="mexp1_export:source-hash">',
+    );
+    expect(reply.text).toContain("🔏 Lineage: mexp1_export");
+    expect(reply.text).toContain("System prompt and tools: omitted");
+  });
+
+  it("does not stage or write a cut-over export when its source recheck fails", async () => {
+    hoisted.isMemoryIsolationCutoverAgentMock.mockReturnValue(true);
+    const stage = vi.fn();
+    hoisted.prepareAuthorizedTranscriptExportHostMock.mockResolvedValue({
+      exportId: "mexp1_export",
+      eventJsons: [],
+      sourceContentHash: "source-hash",
+      recheckBeforeSerialization: vi.fn(async () => false),
+      stage,
+      publish: vi.fn(),
+    });
+
+    await expect(buildExportSessionReply(makeParams())).resolves.toEqual({
+      text: "❌ Scoped transcript export was cancelled because its authorization changed.",
+    });
+
+    expect(stage).not.toHaveBeenCalled();
+    expect(hoisted.writeSessionExportFileMock).not.toHaveBeenCalled();
   });
 
   it("resolves store and transcript paths from the target session agent", async () => {

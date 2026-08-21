@@ -4,6 +4,7 @@
 import { OPENCLAW_EMBEDDED_CONTEXT_ENGINE_HOST } from "../../context-engine/host-compat.js";
 import { ensureContextEnginesInitialized } from "../../context-engine/init.js";
 import {
+  isCoreLegacyContextEngine,
   resolveContextEngine,
   resolveContextEngineOwnerPluginId,
 } from "../../context-engine/registry.js";
@@ -403,10 +404,12 @@ async function compactResolvedContextEngine(
     config: params.config,
     agentId: runtimeTarget.agentId,
   });
-  // Context engines own their prompt assembly and can invoke a model without the
-  // prepared native-compaction host. Until their public contract carries an opaque
-  // derive plan, letting one compact a cutover transcript would launder raw history.
-  if (contextEngine.info.ownsCompaction === true && isMemoryIsolationCutoverAgent(sessionAgentId)) {
+  // The core legacy registration delegates to the sealed compaction host. Every
+  // other engine can assemble raw history itself and has no derivation authority.
+  if (
+    isMemoryIsolationCutoverAgent(sessionAgentId) &&
+    !isCoreLegacyContextEngine(contextEngine)
+  ) {
     return {
       ok: false,
       compacted: false,

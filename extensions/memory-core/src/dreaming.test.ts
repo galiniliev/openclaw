@@ -33,12 +33,18 @@ vi.mock("openclaw/plugin-sdk/memory-core-host-runtime-core", { spy: true });
 
 // `runDreamingSweepPhases` is the only binding the dreaming trigger imports from this module.
 const runDreamingSweepPhasesMock = vi.hoisted(() =>
-  vi.fn(async (_params: { agentId?: string; workspaceDir: string }) => ({
+  vi.fn(async (_params: { lease: object }) => ({
     degradedPhases: 0,
     pendingNarratives: 0,
   })),
 );
+const issueLegacyDreamingWorkspaceLeaseMock = vi.hoisted(() =>
+  vi.fn((_params: { agentId: string; cfg: OpenClawConfig }) => Object.freeze({})),
+);
+const isLegacyDreamingWorkspaceLeaseCurrentMock = vi.hoisted(() => vi.fn(() => true));
 vi.mock("./dreaming-phases.js", () => ({
+  isLegacyDreamingWorkspaceLeaseCurrent: isLegacyDreamingWorkspaceLeaseCurrentMock,
+  issueLegacyDreamingWorkspaceLease: issueLegacyDreamingWorkspaceLeaseMock,
   runDreamingSweepPhases: runDreamingSweepPhasesMock,
 }));
 
@@ -75,6 +81,10 @@ afterEach(() => {
   isLegacyMemorySurfaceDisabledMock.mockReturnValue(false);
   prepareAuthorizedMemoryBackgroundDerivationHostMock.mockReset();
   prepareAuthorizedMemoryBackgroundDerivationHostMock.mockResolvedValue(undefined);
+  issueLegacyDreamingWorkspaceLeaseMock.mockReset();
+  issueLegacyDreamingWorkspaceLeaseMock.mockReturnValue(Object.freeze({}));
+  isLegacyDreamingWorkspaceLeaseCurrentMock.mockReset();
+  isLegacyDreamingWorkspaceLeaseCurrentMock.mockReturnValue(true);
 });
 
 function clearInternalHooks(): void {}
@@ -344,9 +354,7 @@ function expectCronSchedule(
   expect(schedule?.tz).toBe(tz);
 }
 
-function getBeforeAgentReplyHandler(
-  onMock: ReturnType<typeof vi.fn>,
-): (
+function getBeforeAgentReplyHandler(onMock: ReturnType<typeof vi.fn>): (
   event: { cleanedBody: string },
   ctx: {
     agentId?: string;
@@ -1712,7 +1720,7 @@ describe("gateway startup reconciliation", () => {
     }
   });
 
-  it("derives one scoped artifact without entering the legacy workspace sweep for a cut-over trigger", async () => {
+  it("derives scoped consolidation and promotion artifacts without entering the legacy workspace sweep for a cut-over trigger", async () => {
     clearInternalHooks();
     isLegacyMemorySurfaceDisabledMock.mockImplementation((agentId) => agentId === "main");
     runDreamingSweepPhasesMock.mockClear();
@@ -1728,22 +1736,46 @@ describe("gateway startup reconciliation", () => {
       },
       audit: { caller: { kind: "plugin", id: "memory-core" } },
     });
-    const collectSources = vi.fn().mockResolvedValue([
-      { text: "SCOPED_DREAMING_SOURCE_SENTINEL", path: "memory/scoped.md" },
-    ]);
-    const commit = vi.fn().mockResolvedValue({
+    const collectDreamingSources = vi
+      .fn()
+      .mockResolvedValue([{ text: "SCOPED_DREAMING_SOURCE_SENTINEL", path: "memory/scoped.md" }]);
+    const commitDreaming = vi.fn().mockResolvedValue({
       version: 1,
       mutationId: "scoped-dream",
       status: "committed",
       policyRevision: "policy-1",
       committedAt: new Date().toISOString(),
     });
-    prepareAuthorizedMemoryBackgroundDerivationHostMock.mockResolvedValue({
-      search: vi.fn(),
-      read: vi.fn(),
-      collectSources,
-      commit,
+    const collectPromotionSources = vi
+      .fn()
+      .mockResolvedValue([{ text: "SCOPED_PROMOTION_SOURCE_SENTINEL", path: "memory/scoped.md" }]);
+    const commitPromotion = vi.fn().mockResolvedValue({
+      version: 1,
+      mutationId: "scoped-promotion",
+      status: "committed",
+      policyRevision: "policy-1",
+      committedAt: new Date().toISOString(),
     });
+    const recheckDreamingSources = vi.fn().mockResolvedValue(true);
+    const recheckPromotionSources = vi.fn().mockResolvedValue(true);
+    prepareAuthorizedMemoryBackgroundDerivationHostMock
+      .mockResolvedValueOnce({
+        search: vi.fn(),
+        read: vi.fn(),
+        collectSources: collectDreamingSources,
+        recheckSources: recheckDreamingSources,
+        commit: commitDreaming,
+      })
+      .mockResolvedValueOnce({
+        search: vi.fn(),
+        read: vi.fn(),
+        collectSources: collectPromotionSources,
+        recheckSources: recheckPromotionSources,
+        commit: commitPromotion,
+      });
+    complete
+      .mockResolvedValueOnce({ text: "MODEL_DREAMING_OUTPUT_SENTINEL" })
+      .mockResolvedValueOnce({ text: "MODEL_PROMOTION_OUTPUT_SENTINEL" });
     const { api, harness, onMock } = createDreamingTestContext({
       runtime: { llm: { complete } },
     });
@@ -1773,36 +1805,157 @@ describe("gateway startup reconciliation", () => {
         reason: "memory-core: scoped dreaming completed",
       });
       expect(harness.listCalls).toBeGreaterThanOrEqual(cronCallsBeforeTrigger);
-      expect(prepareAuthorizedMemoryBackgroundDerivationHostMock).toHaveBeenCalledWith({
+      expect(prepareAuthorizedMemoryBackgroundDerivationHostMock).toHaveBeenNthCalledWith(1, {
         agentId: "main",
         sessionKey: "agent:main:cron:memory-dreaming",
         sessionId: "session-1",
         runId: "run-1",
         purpose: "dreaming",
       });
-      expect(collectSources).toHaveBeenCalledOnce();
-      expect(complete).toHaveBeenCalledOnce();
-      const completionRequest = complete.mock.calls[0]?.[0] as Record<string, unknown>;
-      expect(completionRequest).toMatchObject({
+      expect(prepareAuthorizedMemoryBackgroundDerivationHostMock).toHaveBeenNthCalledWith(2, {
+        agentId: "main",
+        sessionKey: "agent:main:cron:memory-dreaming",
+        sessionId: "session-1",
+        runId: "run-1",
+        purpose: "promotion",
+      });
+      expect(collectDreamingSources).toHaveBeenCalledOnce();
+      expect(collectPromotionSources).toHaveBeenCalledOnce();
+      expect(complete).toHaveBeenCalledTimes(2);
+      const dreamingCompletionRequest = complete.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(dreamingCompletionRequest).toMatchObject({
         purpose: "memory.dreaming",
         maxTokens: 2048,
         execution: { mode: "isolated-agent-runtime", timeoutMs: 30_000 },
       });
-      expect(completionRequest).not.toHaveProperty("agentId");
-      expect(completionRequest).not.toHaveProperty("model");
-      expect(completionRequest.messages).toEqual([
+      expect(dreamingCompletionRequest).not.toHaveProperty("agentId");
+      expect(dreamingCompletionRequest).not.toHaveProperty("model");
+      expect(dreamingCompletionRequest.messages).toEqual([
         { role: "user", content: "SCOPED_DREAMING_SOURCE_SENTINEL" },
       ]);
-      expect(String(completionRequest.systemPrompt)).not.toContain("memory/scoped.md");
-      expect(collectSources.mock.invocationCallOrder[0]).toBeLessThan(
+      expect(String(dreamingCompletionRequest.systemPrompt)).not.toContain("memory/scoped.md");
+      const promotionCompletionRequest = complete.mock.calls[1]?.[0] as Record<string, unknown>;
+      expect(promotionCompletionRequest).toMatchObject({
+        purpose: "memory.promotion",
+        maxTokens: 2048,
+        execution: { mode: "isolated-agent-runtime", timeoutMs: 30_000 },
+      });
+      expect(promotionCompletionRequest.messages).toEqual([
+        { role: "user", content: "SCOPED_PROMOTION_SOURCE_SENTINEL" },
+      ]);
+      expect(String(promotionCompletionRequest.systemPrompt)).not.toContain("memory/scoped.md");
+      expect(collectDreamingSources.mock.invocationCallOrder[0]).toBeLessThan(
+        recheckDreamingSources.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+      );
+      expect(recheckDreamingSources.mock.invocationCallOrder[0]).toBeLessThan(
         complete.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
       );
-      expect(commit).toHaveBeenCalledWith({
+      expect(commitDreaming).toHaveBeenCalledWith({
         content: "MODEL_DREAMING_OUTPUT_SENTINEL",
       });
       expect(complete.mock.invocationCallOrder[0]).toBeLessThan(
-        commit.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+        commitDreaming.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
       );
+      expect(commitDreaming.mock.invocationCallOrder[0]).toBeLessThan(
+        collectPromotionSources.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+      );
+      expect(collectPromotionSources.mock.invocationCallOrder[0]).toBeLessThan(
+        recheckPromotionSources.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+      );
+      expect(recheckPromotionSources.mock.invocationCallOrder[0]).toBeLessThan(
+        complete.mock.invocationCallOrder[1] ?? Number.POSITIVE_INFINITY,
+      );
+      expect(commitPromotion).toHaveBeenCalledWith({
+        content: "MODEL_PROMOTION_OUTPUT_SENTINEL",
+      });
+      expect(complete.mock.invocationCallOrder[1]).toBeLessThan(
+        commitPromotion.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+      );
+      expect(runDreamingSweepPhasesMock).not.toHaveBeenCalled();
+    } finally {
+      await triggerGatewayStop(onMock).catch(() => undefined);
+      clearInternalHooks();
+    }
+  });
+
+  it("does not start a scoped promotion when consolidation is unavailable", async () => {
+    clearInternalHooks();
+    isLegacyMemorySurfaceDisabledMock.mockImplementation((agentId) => agentId === "main");
+    runDreamingSweepPhasesMock.mockClear();
+    const collectSources = vi
+      .fn()
+      .mockResolvedValue([{ text: "SCOPED_DREAMING_SOURCE_SENTINEL", path: "memory/scoped.md" }]);
+    const commit = vi.fn();
+    prepareAuthorizedMemoryBackgroundDerivationHostMock.mockResolvedValue({
+      search: vi.fn(),
+      read: vi.fn(),
+      collectSources,
+      recheckSources: vi.fn().mockResolvedValue(true),
+      commit,
+    });
+    const complete = vi.fn().mockRejectedValue(new Error("isolated completion failed"));
+    const { api, harness, onMock } = createDreamingTestContext({ runtime: { llm: { complete } } });
+
+    try {
+      registerShortTermPromotionDreamingForTest(api);
+      await triggerGatewayStart(onMock, { config: api.config, getCron: () => harness.cron });
+      await expect(
+        getBeforeAgentReplyHandler(onMock)(
+          { cleanedBody: constants.DREAMING_SYSTEM_EVENT_TEXT },
+          {
+            trigger: "cron",
+            agentId: "main",
+            sessionKey: "agent:main:cron:memory-dreaming",
+            sessionId: "session-1",
+          },
+        ),
+      ).resolves.toEqual({ handled: true, reason: "memory-core: scoped dreaming unavailable" });
+      expect(prepareAuthorizedMemoryBackgroundDerivationHostMock).toHaveBeenCalledOnce();
+      expect(commit).not.toHaveBeenCalled();
+      expect(runDreamingSweepPhasesMock).not.toHaveBeenCalled();
+    } finally {
+      await triggerGatewayStop(onMock).catch(() => undefined);
+      clearInternalHooks();
+    }
+  });
+
+  it("does not send revoked scoped sources to a model or commit them", async () => {
+    clearInternalHooks();
+    isLegacyMemorySurfaceDisabledMock.mockImplementation((agentId) => agentId === "main");
+    runDreamingSweepPhasesMock.mockClear();
+    const collectSources = vi
+      .fn()
+      .mockResolvedValue([{ text: "SCOPED_DREAMING_SOURCE_SENTINEL", path: "memory/scoped.md" }]);
+    const recheckSources = vi.fn().mockResolvedValue(false);
+    const commit = vi.fn();
+    const complete = vi.fn();
+    prepareAuthorizedMemoryBackgroundDerivationHostMock.mockResolvedValue({
+      search: vi.fn(),
+      read: vi.fn(),
+      collectSources,
+      recheckSources,
+      commit,
+    });
+    const { api, harness, onMock } = createDreamingTestContext({ runtime: { llm: { complete } } });
+
+    try {
+      registerShortTermPromotionDreamingForTest(api);
+      await triggerGatewayStart(onMock, { config: api.config, getCron: () => harness.cron });
+      await expect(
+        getBeforeAgentReplyHandler(onMock)(
+          { cleanedBody: constants.DREAMING_SYSTEM_EVENT_TEXT },
+          {
+            trigger: "cron",
+            agentId: "main",
+            sessionKey: "agent:main:cron:memory-dreaming",
+            sessionId: "session-1",
+          },
+        ),
+      ).resolves.toEqual({ handled: true, reason: "memory-core: scoped dreaming unavailable" });
+      expect(collectSources).toHaveBeenCalledOnce();
+      expect(recheckSources).toHaveBeenCalledOnce();
+      expect(complete).not.toHaveBeenCalled();
+      expect(commit).not.toHaveBeenCalled();
       expect(runDreamingSweepPhasesMock).not.toHaveBeenCalled();
     } finally {
       await triggerGatewayStop(onMock).catch(() => undefined);
@@ -1814,14 +1967,15 @@ describe("gateway startup reconciliation", () => {
     clearInternalHooks();
     isLegacyMemorySurfaceDisabledMock.mockImplementation((agentId) => agentId === "main");
     runDreamingSweepPhasesMock.mockClear();
-    const collectSources = vi.fn().mockResolvedValue([
-      { text: "SCOPED_DREAMING_SOURCE_SENTINEL", path: "memory/scoped.md" },
-    ]);
+    const collectSources = vi
+      .fn()
+      .mockResolvedValue([{ text: "SCOPED_DREAMING_SOURCE_SENTINEL", path: "memory/scoped.md" }]);
     const commit = vi.fn();
     prepareAuthorizedMemoryBackgroundDerivationHostMock.mockResolvedValue({
       search: vi.fn(),
       read: vi.fn(),
       collectSources,
+      recheckSources: vi.fn().mockResolvedValue(true),
       commit,
     });
 
@@ -1837,7 +1991,9 @@ describe("gateway startup reconciliation", () => {
         }),
     ];
     for (const complete of completionCases.map((implementation) => vi.fn(implementation))) {
-      const { api, harness, onMock } = createDreamingTestContext({ runtime: { llm: { complete } } });
+      const { api, harness, onMock } = createDreamingTestContext({
+        runtime: { llm: { complete } },
+      });
       try {
         registerShortTermPromotionDreamingForTest(api);
         await triggerGatewayStart(onMock, {
@@ -1876,6 +2032,7 @@ describe("gateway startup reconciliation", () => {
       search: vi.fn(),
       read: vi.fn(),
       collectSources: vi.fn().mockResolvedValue([{ text: "source", path: "memory/scoped.md" }]),
+      recheckSources: vi.fn().mockResolvedValue(true),
       commit,
     });
     const complete = vi.fn().mockResolvedValue({ text: "MODEL_DREAMING_OUTPUT_SENTINEL" });
@@ -1942,12 +2099,15 @@ describe("gateway startup reconciliation", () => {
       );
 
       expect(runDreamingSweepPhasesMock).toHaveBeenCalledTimes(1);
+      expect(issueLegacyDreamingWorkspaceLeaseMock).toHaveBeenCalledWith({
+        agentId: "researcher",
+        cfg: expect.any(Object),
+      });
       const sweepArgs = expectDefined(
         runDreamingSweepPhasesMock.mock.calls[0],
         "dreaming sweep call",
       )[0];
-      expect(sweepArgs.agentId).toBe("researcher");
-      expect(sweepArgs.workspaceDir).toBe(workspaceDir);
+      expect(sweepArgs).toEqual(expect.objectContaining({ lease: expect.any(Object) }));
     } finally {
       clearInternalHooks();
     }
@@ -1996,7 +2156,7 @@ describe("gateway startup reconciliation", () => {
       });
       expect(runDreamingSweepPhasesMock).toHaveBeenCalledOnce();
       expect(runDreamingSweepPhasesMock).toHaveBeenCalledWith(
-        expect.objectContaining({ agentId: "researcher", workspaceDir: researcherWorkspaceDir }),
+        expect.objectContaining({ lease: expect.any(Object) }),
       );
     } finally {
       await triggerGatewayStop(onMock).catch(() => undefined);

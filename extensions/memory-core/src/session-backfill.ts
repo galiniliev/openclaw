@@ -5,6 +5,10 @@ import type { MemorySearchResult } from "openclaw/plugin-sdk/memory-core-host-ru
 import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/temp-path";
 import type { SessionIngestionFileState } from "./dreaming-ingestion-state.js";
 import { removeBackfillDiaryEntries, writeBackfillDiaryEntries } from "./dreaming-narrative.js";
+import {
+  requireAdmittedLegacyMemoryWorkspace,
+  type LegacyMemoryWorkspaceAdmission,
+} from "./legacy-memory-workspace-admission.js";
 import { previewGroundedRemMarkdown } from "./rem-evidence.js";
 import type {
   SessionBackfillDay,
@@ -72,8 +76,7 @@ type SessionBackfillScan = {
 };
 
 type RunSessionBackfillParams = {
-  agentId: string;
-  workspaceDir: string;
+  admission: LegacyMemoryWorkspaceAdmission;
   from?: string;
   to?: string;
   limitDays?: number;
@@ -311,18 +314,19 @@ function uniqueGroundedItems(results: MemorySearchResult[]): MemorySearchResult[
 }
 
 async function applySessionBackfillDays(params: {
-  workspaceDir: string;
+  admission: LegacyMemoryWorkspaceAdmission;
   days: Array<{ day: string; candidates: SessionBackfillCandidate[] }>;
   nowMs: number;
   timezone?: string;
 }): Promise<number> {
+  const workspaceDir = requireAdmittedLegacyMemoryWorkspace(params.admission).workspaceDir;
   const before = await readShortTermRecallEntries({
-    workspaceDir: params.workspaceDir,
+    workspaceDir,
     nowMs: params.nowMs,
   });
   for (const day of params.days) {
     const results = await appendSessionCorpusLines({
-      workspaceDir: params.workspaceDir,
+      workspaceDir: requireAdmittedLegacyMemoryWorkspace(params.admission).workspaceDir,
       day: day.day,
       lines: day.candidates,
     });
@@ -333,7 +337,7 @@ async function applySessionBackfillDays(params: {
     // Standard grounded staging owns claim identity. Exact duplicates are
     // collapsed here; claim-hash keying also converges the same fact across sources.
     await recordGroundedShortTermCandidates({
-      workspaceDir: params.workspaceDir,
+      workspaceDir: requireAdmittedLegacyMemoryWorkspace(params.admission).workspaceDir,
       query: `${SESSION_BACKFILL_QUERY_PREFIX}:${day.day}`,
       items: grounded.map((result) => ({
         path: result.path,
@@ -349,7 +353,7 @@ async function applySessionBackfillDays(params: {
     });
   }
   const after = await readShortTermRecallEntries({
-    workspaceDir: params.workspaceDir,
+    workspaceDir: requireAdmittedLegacyMemoryWorkspace(params.admission).workspaceDir,
     nowMs: params.nowMs,
   });
   return Math.max(0, after.length - before.length);
@@ -358,10 +362,7 @@ async function applySessionBackfillDays(params: {
 async function executeSessionBackfillCore(
   params: RunSessionBackfillParams,
 ): Promise<SessionBackfillExecution> {
-  const workspaceDir = params.workspaceDir.trim();
-  if (!workspaceDir) {
-    throw new Error("Memory session-backfill requires a resolvable workspace directory.");
-  }
+  const { agentId, workspaceDir } = requireAdmittedLegacyMemoryWorkspace(params.admission);
   if (params.rem && params.apply) {
     throw new Error("Memory session-backfill --rem cannot be combined with --apply.");
   }
@@ -369,23 +370,31 @@ async function executeSessionBackfillCore(
   if (params.rollback) {
     // Backfill diary markers and grounded-only candidates are a shared artifact
     // class with rem-backfill; the stable removal APIs intentionally clear both.
-    const [diary, staged] = await Promise.all([
-      removeBackfillDiaryEntries({ workspaceDir }),
-      removeGroundedShortTermCandidates({ workspaceDir }),
-    ]);
+    const diary = await removeBackfillDiaryEntries({
+      workspaceDir: requireAdmittedLegacyMemoryWorkspace(params.admission).workspaceDir,
+    });
+    const staged = await removeGroundedShortTermCandidates({
+      workspaceDir: requireAdmittedLegacyMemoryWorkspace(params.admission).workspaceDir,
+    });
     const rewind = await rewindSessionBackfillIngestionState({
-      workspaceDir,
-      agentId: params.agentId,
+      workspaceDir: requireAdmittedLegacyMemoryWorkspace(params.admission).workspaceDir,
+      agentId,
     });
     if (!rewind.completeCoverage && (diary.removed > 0 || staged.removed > 0)) {
       // Applies from before the rewind journal shipped have no owned offsets to restore.
       // Without this agent-scoped reset, rollback deletes artifacts but re-apply finds nothing.
-      await resetSessionBackfillIngestionState({ workspaceDir, agentId: params.agentId });
+      await resetSessionBackfillIngestionState({
+        workspaceDir: requireAdmittedLegacyMemoryWorkspace(params.admission).workspaceDir,
+        agentId,
+      });
     }
-    await markSessionBackfillRewindBaseline({ workspaceDir, agentId: params.agentId });
+    await markSessionBackfillRewindBaseline({
+      workspaceDir: requireAdmittedLegacyMemoryWorkspace(params.admission).workspaceDir,
+      agentId,
+    });
     return {
       result: {
-        agentId: params.agentId,
+        agentId,
         workspaceDir,
         applied: false,
         rem: false,
@@ -406,7 +415,7 @@ async function executeSessionBackfillCore(
   const { from, to, limitDays } = normalizeSessionBackfillSelection(params);
   const state = await readSessionIngestionState(workspaceDir);
   const sources = await listSessionBackfillSources({
-    agentId: params.agentId,
+    agentId,
     archiveFiles: params.archiveFiles ?? [],
   });
   const collected = await collectSessionBackfillCandidates({
@@ -447,7 +456,7 @@ async function executeSessionBackfillCore(
           bodyLines: buildSummaryDiaryLines(summarizeDay(entry.day, entry.candidates)),
         }));
     const diary = await writeBackfillDiaryEntries({
-      workspaceDir,
+      workspaceDir: requireAdmittedLegacyMemoryWorkspace(params.admission).workspaceDir,
       entries: diaryEntries,
       preserveExisting: true,
       ...(params.timezone !== undefined ? { timezone: params.timezone } : {}),
@@ -458,7 +467,7 @@ async function executeSessionBackfillCore(
 
   if (params.apply) {
     await recordSessionBackfillRewindBatch({
-      workspaceDir,
+      workspaceDir: requireAdmittedLegacyMemoryWorkspace(params.admission).workspaceDir,
       candidates: selectedDays.flatMap((day) =>
         day.candidates.map((candidate) => ({
           contentIndex: candidate.contentIndex,
@@ -470,7 +479,7 @@ async function executeSessionBackfillCore(
     });
     if (selectedDays.length > 0) {
       stagedEntries = await applySessionBackfillDays({
-        workspaceDir,
+        admission: params.admission,
         days: selectedDays,
         nowMs,
         ...(params.timezone !== undefined ? { timezone: params.timezone } : {}),
@@ -488,20 +497,23 @@ async function executeSessionBackfillCore(
         nextSeenMessages[scope] = mergeTrackedMessageHashes(nextSeenMessages[scope] ?? [], hashes);
       }
     }
-    await writeSessionIngestionState(workspaceDir, {
-      ...state,
-      files: mergeSessionBackfillFileProgress({
-        current: state.files,
-        scans: collected.scans,
-        selectedDays,
-      }),
-      seenMessages: trimTrackedSessionScopes(nextSeenMessages),
-    });
+    await writeSessionIngestionState(
+      requireAdmittedLegacyMemoryWorkspace(params.admission).workspaceDir,
+      {
+        ...state,
+        files: mergeSessionBackfillFileProgress({
+          current: state.files,
+          scans: collected.scans,
+          selectedDays,
+        }),
+        seenMessages: trimTrackedSessionScopes(nextSeenMessages),
+      },
+    );
   }
 
   return {
     result: {
-      agentId: params.agentId,
+      agentId,
       workspaceDir,
       applied: Boolean(params.apply),
       rem: Boolean(params.rem),

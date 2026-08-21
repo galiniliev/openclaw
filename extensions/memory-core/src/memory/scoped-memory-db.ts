@@ -147,6 +147,23 @@ type MemoryPolicySetMemberRow = {
   created_at: number;
 };
 
+type MemoryCompactionPolicyRow = {
+  compaction_policy_id: string;
+  session_id: string;
+  source_policy_set_id: string;
+  retention_state: "retained" | "quarantined";
+  created_at: number;
+};
+
+type MemoryCompactionPolicySourceRow = {
+  compaction_policy_id: string;
+  source_session_id: string;
+  source_event_seq: number;
+  source_policy_set_id: string;
+  delivery_audiences_json: string;
+  created_at: number;
+};
+
 type SessionMemorySubjectSnapshotRow = {
   session_id: string;
   session_identity_revision: string;
@@ -282,7 +299,25 @@ export type ScopedMemoryDatabase = {
   memory_resource_revisions: MemoryResourceRevisionRow;
   memory_revision_policy_requirements: MemoryRevisionPolicyRequirementRow;
   memory_lineage_edges: MemoryLineageEdgeRow;
+  memory_child_delegation_capabilities: {
+    delegation_id: string;
+    agent_id: string;
+    child_session_id: string;
+    child_session_identity_revision: string;
+    child_subject_revision: string;
+    root_principal_id: string;
+    parent_memory_plan_id: string;
+    capability_snapshot_id: string;
+    allowed_operations_json: string;
+    maximum_audiences_json: string;
+    token_hash: string;
+    expires_at: number;
+    revoked_at: number | null;
+    created_at: number;
+  };
   memory_policy_set_members: MemoryPolicySetMemberRow;
+  memory_compaction_policies: MemoryCompactionPolicyRow;
+  memory_compaction_policy_sources: MemoryCompactionPolicySourceRow;
   session_memory_subject_snapshots: SessionMemorySubjectSnapshotRow;
   transcript_event_memory_policies: TranscriptEventMemoryPolicyRow;
   transcript_event_memory_policy_details: TranscriptEventMemoryPolicyDetailRow;

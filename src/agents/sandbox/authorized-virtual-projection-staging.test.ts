@@ -17,7 +17,9 @@ function makeTempDir(): string {
   return dir;
 }
 
-function createBroker(readFile = vi.fn(async (virtualPath: string) => `contents:${virtualPath}`)) {
+type BrokerReadFile = (virtualPath: string) => Promise<string | undefined>;
+
+function createBroker(readFile: BrokerReadFile = async (virtualPath) => `contents:${virtualPath}`) {
   return {
     view: {
       version: 1 as const,
@@ -45,7 +47,7 @@ function createBroker(readFile = vi.fn(async (virtualPath: string) => `contents:
       ],
       expiresAt: "2099-01-01T00:00:00.000Z",
     },
-    readFile,
+    readFile: vi.fn<BrokerReadFile>(readFile),
   };
 }
 

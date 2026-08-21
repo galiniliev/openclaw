@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { resolveSessionTranscriptsDirForAgent } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import {
+  isLegacyMemorySurfaceDisabled,
+  resolveSessionTranscriptsDirForAgent,
+} from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import {
   clearConfigCache,
   clearRuntimeConfigSnapshot,
@@ -14,21 +18,56 @@ import {
   clearMemoryCoreWorkspaceNamespace,
   SESSION_BACKFILL_REWIND_NAMESPACE,
 } from "./dreaming-state.js";
+import { admitLegacyMemoryWorkspace } from "./legacy-memory-workspace-admission.js";
 import {
   markSessionBackfillRewindBaseline,
   resetSessionBackfillIngestionState,
   rewindSessionBackfillIngestionState,
 } from "./session-backfill-lifecycle.js";
 import {
-  executeSessionBackfill,
-  executeSessionBackfillBatch,
-  runSessionBackfill,
+  executeSessionBackfill as executeSessionBackfillActual,
+  executeSessionBackfillBatch as executeSessionBackfillBatchActual,
+  runSessionBackfill as runSessionBackfillActual,
 } from "./session-backfill.js";
 import { writeSessionIngestionState } from "./session-ingestion.js";
 import { readShortTermRecallEntries } from "./short-term-promotion.js";
 import { createMemoryCoreTestHarness, dreamingTestState } from "./test-helpers.js";
 
+vi.mock("openclaw/plugin-sdk/memory-core-host-runtime-core", { spy: true });
+
+const isLegacyMemorySurfaceDisabledMock = vi.mocked(isLegacyMemorySurfaceDisabled);
+isLegacyMemorySurfaceDisabledMock.mockReturnValue(false);
+
 const harness = createMemoryCoreTestHarness();
+
+type TestSessionBackfillParams = Omit<
+  Parameters<typeof executeSessionBackfillActual>[0],
+  "admission"
+> & {
+  agentId: string;
+  workspaceDir: string;
+};
+
+function admitTestSessionBackfill(params: TestSessionBackfillParams) {
+  const { agentId, workspaceDir, ...options } = params;
+  const admission = admitLegacyMemoryWorkspace({
+    cfg: {
+      agents: { list: [{ id: agentId, workspace: workspaceDir }] },
+    } as OpenClawConfig,
+    agentId,
+  });
+  if (!admission) {
+    throw new Error("legacy memory workspace access is unavailable");
+  }
+  return { admission, ...options };
+}
+
+const executeSessionBackfill = (params: TestSessionBackfillParams) =>
+  executeSessionBackfillActual(admitTestSessionBackfill(params));
+const executeSessionBackfillBatch = (params: TestSessionBackfillParams) =>
+  executeSessionBackfillBatchActual(admitTestSessionBackfill(params));
+const runSessionBackfill = (params: TestSessionBackfillParams) =>
+  runSessionBackfillActual(admitTestSessionBackfill(params));
 
 type TranscriptMessage = {
   role: "assistant" | "tool" | "user";
@@ -108,6 +147,8 @@ function hashStagedContent(
 }
 
 afterEach(() => {
+  isLegacyMemorySurfaceDisabledMock.mockReset();
+  isLegacyMemorySurfaceDisabledMock.mockReturnValue(false);
   vi.unstubAllEnvs();
   clearRuntimeConfigSnapshot();
   clearConfigCache();
@@ -116,6 +157,41 @@ afterEach(() => {
 describe("runSessionBackfill", () => {
   it("keeps CLI draining separate from the single-batch executor", () => {
     expect(runSessionBackfill).not.toBe(executeSessionBackfill);
+  });
+
+  it("denies legacy workspace admission for a cut-over owner before reading it", async () => {
+    const workspaceDir = await createIsolatedWorkspace("cutover-");
+    isLegacyMemorySurfaceDisabledMock.mockImplementation((agentId) => agentId === "main");
+
+    const admission = admitLegacyMemoryWorkspace({
+      cfg: {
+        agents: { list: [{ id: "main", workspace: workspaceDir }] },
+      } as OpenClawConfig,
+      agentId: "main",
+    });
+
+    expect(admission).toBeUndefined();
+    await expect(fs.readdir(workspaceDir)).resolves.toEqual([]);
+  });
+
+  it("rejects a shared workspace when another configured owner has cut over before reading it", async () => {
+    const workspaceDir = await createIsolatedWorkspace("shared-cutover-");
+    isLegacyMemorySurfaceDisabledMock.mockImplementation((agentId) => agentId === "alpha");
+
+    const admission = admitLegacyMemoryWorkspace({
+      cfg: {
+        agents: {
+          list: [
+            { id: "alpha", workspace: workspaceDir },
+            { id: "beta", workspace: workspaceDir },
+          ],
+        },
+      } as OpenClawConfig,
+      agentId: "beta",
+    });
+
+    expect(admission).toBeUndefined();
+    await expect(fs.readdir(workspaceDir)).resolves.toEqual([]);
   });
 
   it("keeps REM preview mode mutually exclusive with apply", async () => {

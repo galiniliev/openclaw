@@ -119,7 +119,7 @@ test.runIf(dockerAvailable)(
 
       const { execDocker } = await import("./docker.js");
       const inspected = await execDocker(["inspect", runtimeId]);
-      const mounts = JSON.parse(inspected.stdout.toString("utf8")) as Array<{
+      const mounts = JSON.parse(inspected.stdout) as Array<{
         Mounts?: Array<{ Destination?: string; Source?: string; RW?: boolean }>;
       }>;
       expect(mounts[0]?.Mounts).toContainEqual(

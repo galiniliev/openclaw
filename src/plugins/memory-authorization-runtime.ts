@@ -298,6 +298,8 @@ export async function admitMemoryAuthorizationRuntime(
   }
   const source = runtime.value;
   const stageSealedCompaction = readCallable(source, "stageSealedCompaction");
+  const issueChildDelegation = readCallable(source, "issueChildDelegation");
+  const revokeChildDelegation = readCallable(source, "revokeChildDelegation");
   return Object.freeze({
     ok: true,
     runtime: Object.freeze({
@@ -315,6 +317,20 @@ export async function admitMemoryAuthorizationRuntime(
         ? {
             stageSealedCompaction: (
               stageSealedCompaction as NonNullable<AuthorizedMemoryRuntime["stageSealedCompaction"]>
+            ).bind(source),
+          }
+        : {}),
+      ...(issueChildDelegation
+        ? {
+            issueChildDelegation: (
+              issueChildDelegation as NonNullable<AuthorizedMemoryRuntime["issueChildDelegation"]>
+            ).bind(source),
+          }
+        : {}),
+      ...(revokeChildDelegation
+        ? {
+            revokeChildDelegation: (
+              revokeChildDelegation as NonNullable<AuthorizedMemoryRuntime["revokeChildDelegation"]>
             ).bind(source),
           }
         : {}),

@@ -38,6 +38,28 @@ export type SpawnSubagentParams = {
   attachMountPath?: string;
 };
 
+/**
+ * Core-private lease for one child session generation. It is never serialized
+ * into a launch request, surfaced in the tool schema, or exposed to the model.
+ */
+export type SpawnSubagentMemoryChildDelegationLease = Readonly<{
+  activate(): Promise<boolean>;
+  revoke(): Promise<void>;
+}>;
+
+/**
+ * The spawn owner supplies this after admitting the parent's memory view. The
+ * native spawner supplies the exact persisted `spawned_by` key, not task text
+ * or a completion-routing key, when it asks for the child lease.
+ */
+export type SpawnSubagentMemoryChildDelegationIssuer = (params: Readonly<{
+  parentSessionKey: string;
+  childSessionKey: string;
+  childSessionId: string;
+  childSessionIdentityRevision: string;
+  expiresAt: number;
+}>) => Promise<SpawnSubagentMemoryChildDelegationLease | undefined>;
+
 export type SpawnSubagentContext = {
   agentSessionKey?: string;
   requesterTurnRunId?: string;
@@ -60,6 +82,8 @@ export type SpawnSubagentContext = {
   inheritedToolAllowlist?: string[];
   inheritedToolDenylist?: string[];
   requesterRunId?: string;
+  /** Core-private child-memory issuer; never forwarded to tool input or Gateway payloads. */
+  issueMemoryChildDelegation?: SpawnSubagentMemoryChildDelegationIssuer;
 };
 
 export type SpawnSubagentResult = {

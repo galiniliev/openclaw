@@ -3,11 +3,42 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
+
+const durabilityTestState = vi.hoisted(() => ({
+  failAfterPublication: false,
+}));
+
+vi.mock("@openclaw/fs-safe/durability", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@openclaw/fs-safe/durability")>();
+  const { FsSafeError } = await import("@openclaw/fs-safe/errors");
+  return {
+    ...actual,
+    publishFileExclusive: async (...args: Parameters<typeof actual.publishFileExclusive>) => {
+      const result = await actual.publishFileExclusive(...args);
+      if (!durabilityTestState.failAfterPublication) {
+        return result;
+      }
+      throw new FsSafeError("helper-failed", "post-publication failure", {
+        details: {
+          phase: "directory-sync",
+          targetCreated: true,
+          targetIdentity: result.identity,
+          cleanup: "preserved",
+        },
+      });
+    },
+  };
+});
+
 const { writeSessionExportFile } = await vi.importActual<
   typeof import("./commands-export-session-file.js")
 >("./commands-export-session-file.js");
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+
+afterEach(() => {
+  durabilityTestState.failAfterPublication = false;
+});
 
 function makeWorkspace(): string {
   return tempDirs.make("openclaw-session-export-");
@@ -18,12 +49,14 @@ async function writeExport(params: {
   requestedPath?: string;
   defaultFileName?: string;
   contents?: string;
+  recheckBeforePublication?: () => Promise<void>;
 }) {
   return await writeSessionExportFile({
     workspaceDir: params.workspaceDir,
     requestedPath: params.requestedPath,
     defaultFileName: params.defaultFileName ?? "session.html",
     contents: params.contents ?? "new export",
+    recheckBeforePublication: params.recheckBeforePublication,
   });
 }
 
@@ -61,6 +94,26 @@ describe("writeSessionExportFile", () => {
     if (process.platform !== "win32") {
       expect((await fs.stat(targetPath)).mode & 0o777).toBe(0o600);
     }
+  });
+
+  it("keeps an existing output unchanged when publication authorization is revoked", async () => {
+    const workspaceDir = makeWorkspace();
+    const targetPath = path.join(workspaceDir, "session.html");
+    await fs.writeFile(targetPath, "old export", "utf-8");
+
+    await expect(
+      writeExport({
+        workspaceDir,
+        requestedPath: targetPath,
+        recheckBeforePublication: async () => {
+          await expect(fs.readFile(targetPath, "utf-8")).resolves.toBe("old export");
+          throw new Error("authorization lost");
+        },
+      }),
+    ).rejects.toThrow("authorization lost");
+
+    await expect(fs.readFile(targetPath, "utf-8")).resolves.toBe("old export");
+    await expect(fs.readdir(workspaceDir)).resolves.toEqual(["session.html"]);
   });
 
   it.each([
@@ -119,5 +172,55 @@ describe("writeSessionExportFile", () => {
     expect(result.displayPath).toBe("session-2.html");
     expect(await fs.readFile(path.join(workspaceDir, "session.html"), "utf-8")).toBe("existing");
     expect(await fs.readFile(result.absolutePath, "utf-8")).toBe("new export");
+  });
+
+  it("retries an exclusive generated publication when a filename is claimed at its fence", async () => {
+    const workspaceDir = makeWorkspace();
+    let publicationChecks = 0;
+
+    const result = await writeExport({
+      workspaceDir,
+      recheckBeforePublication: async () => {
+        publicationChecks += 1;
+        if (publicationChecks === 1) {
+          await fs.writeFile(path.join(workspaceDir, "session.html"), "racing export", "utf-8");
+        }
+      },
+    });
+
+    expect(publicationChecks).toBe(2);
+    expect(result.displayPath).toBe("session-2.html");
+    await expect(fs.readFile(path.join(workspaceDir, "session.html"), "utf-8")).resolves.toBe(
+      "racing export",
+    );
+    await expect(fs.readFile(result.absolutePath, "utf-8")).resolves.toBe("new export");
+  });
+
+  it("leaves no generated artifact when publication authorization is revoked", async () => {
+    const workspaceDir = makeWorkspace();
+
+    await expect(
+      writeExport({
+        workspaceDir,
+        recheckBeforePublication: async () => {
+          throw new Error("authorization lost");
+        },
+      }),
+    ).rejects.toThrow("authorization lost");
+
+    await expect(fs.readdir(workspaceDir)).resolves.toEqual([]);
+  });
+
+  it("keeps a receipt-confirmed generated export successful after a post-publication failure", async () => {
+    const workspaceDir = makeWorkspace();
+    durabilityTestState.failAfterPublication = true;
+
+    const result = await writeExport({
+      workspaceDir,
+      recheckBeforePublication: async () => undefined,
+    });
+
+    expect(result.displayPath).toBe("session.html");
+    await expect(fs.readFile(result.absolutePath, "utf-8")).resolves.toBe("new export");
   });
 });

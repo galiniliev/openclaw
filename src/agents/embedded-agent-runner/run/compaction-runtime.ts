@@ -1,9 +1,13 @@
-import type { resolveContextEngine } from "../../../context-engine/registry.js";
+import {
+  isCoreLegacyContextEngine,
+  type resolveContextEngine,
+} from "../../../context-engine/registry.js";
 import type { buildContextEngineRuntimeSettings } from "../../../context-engine/runtime-settings.js";
 import {
   resolveCompactionSuccessorTranscript,
   type ContextEngineSessionTarget,
 } from "../../../context-engine/types.js";
+import { isMemoryIsolationCutoverAgent } from "../../../plugins/memory-cutover.js";
 import { resolveProcessToolScopeKey } from "../../agent-tools.js";
 import { listActiveProcessSessionReferences } from "../../bash-process-references.js";
 import { buildEmbeddedCompactionRuntimeContext } from "../compaction-runtime-context.js";
@@ -144,6 +148,23 @@ export async function compactEmbeddedRunForRecovery(
     tokenBudget: recovery.tokenBudget,
     ...(recovery.trigger === "overflow" ? { degradedReason: "context_overflow" } : {}),
   });
+  // Only registry-proven core legacy reaches the sealed derivation host. Engine
+  // info is plugin-authored metadata, so every other cutover engine fails closed.
+  if (
+    isMemoryIsolationCutoverAgent(input.sessionAgentId) &&
+    !isCoreLegacyContextEngine(input.contextEngine)
+  ) {
+    return {
+      result: {
+        ok: false as const,
+        compacted: false as const,
+        reason: "memory derivation authorization unavailable for context-engine compaction",
+        failure: { reason: "memory_derivation_unavailable" as const },
+      },
+      runtimeContext,
+      runtimeSettings,
+    };
+  }
   const result = await compactContextEngineWithSafetyTimeout(
     input.contextEngine,
     {

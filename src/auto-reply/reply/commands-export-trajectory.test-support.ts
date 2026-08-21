@@ -1,6 +1,7 @@
 // Tests trajectory export command approval routing.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
+import { isMemoryIsolationCutoverAgent } from "../../plugins/memory-cutover.js";
 import { buildExportTrajectoryCommandReply } from "./commands-export-trajectory.js";
 import type { HandleCommandsParams } from "./commands-types.js";
 
@@ -78,6 +79,7 @@ function createExecDeps(
     }),
   }));
   return {
+    createExecTool,
     execCalls,
     privateReplies,
     deps: {
@@ -126,6 +128,26 @@ function execCallRecord(
 describe("buildExportTrajectoryCommandReply", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(isMemoryIsolationCutoverAgent).mockReturnValue(false);
+  });
+
+  it("blocks exec approval and private delivery after scoped-memory cutover", async () => {
+    vi.mocked(isMemoryIsolationCutoverAgent).mockReturnValue(true);
+    const { createExecTool, execCalls, privateReplies, deps } = createExecDeps({
+      privateTargets: [{ channel: "telegram", to: "owner-dm", accountId: "account-1" }],
+    });
+    const params = makeParams();
+    params.isGroup = true;
+
+    await expect(buildExportTrajectoryCommandReply(params, deps)).resolves.toEqual({
+      text: expect.stringContaining("Scoped transcript export with lineage is not available yet."),
+    });
+
+    expect(createExecTool).not.toHaveBeenCalled();
+    expect(execCalls).toHaveLength(0);
+    expect(deps.resolvePrivateTrajectoryTargets).not.toHaveBeenCalled();
+    expect(deps.deliverPrivateTrajectoryReply).not.toHaveBeenCalled();
+    expect(privateReplies).toHaveLength(0);
   });
 
   it("requests per-run exec approval for trajectory exports", async () => {

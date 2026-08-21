@@ -13,6 +13,8 @@ import type {
   MemoryAccessContext,
   MemoryWriteResult,
   AuthorizedMemoryRuntime,
+  IssuedMemoryChildDelegation,
+  MemoryChildDelegationIssue,
   AuthorizedSealedCompactionArtifact,
   AuthorizedResourceDerivationPurpose,
   AuthorizedTranscriptDerivationSource,
@@ -60,7 +62,10 @@ export const MEMORY_INVOCATION_UNAVAILABLE: MemoryInvocationUnavailable = Object
 });
 
 const memoryReadInvocationBrand: unique symbol = Symbol("openclaw.memory-read-invocation");
-const memoryDerivationInvocationBrand: unique symbol = Symbol("openclaw.memory-derivation-invocation");
+const memoryDerivationInvocationBrand: unique symbol = Symbol(
+  "openclaw.memory-derivation-invocation",
+);
+const memoryExportInvocationBrand: unique symbol = Symbol("openclaw.memory-export-invocation");
 const memoryWriteInvocationBrand: unique symbol = Symbol("openclaw.memory-write-invocation");
 
 export type AuthorizedMemoryReadInvocation = Readonly<{
@@ -76,15 +81,24 @@ export type AuthorizedMemoryDerivationInvocation = Readonly<{
   readonly [memoryDerivationInvocationBrand]: true;
 }>;
 
+/**
+ * Opaque host-only export admission. It deliberately carries no resource
+ * handle or payload: transcript export has its own captured-source path and
+ * must never turn a generic read handle into an artifact capability.
+ */
+export type AuthorizedMemoryExportInvocation = Readonly<{
+  readonly [memoryExportInvocationBrand]: true;
+}>;
+
 /** Opaque host-owned write continuation; a caller cannot supply context or a selected runtime. */
 export type AuthorizedMemoryWriteInvocation = Readonly<{
   readonly [memoryWriteInvocationBrand]: true;
 }>;
 
-type InvocationState = Readonly<{
+type ContentInvocationState<Operation extends MemoryContentAccessOperation> = Readonly<{
   trustedContext: TrustedMemoryAccessContext;
-  context: MemoryContentAccessContext;
-  plan: AuthorizedMemoryPlan & Readonly<{ operation: MemoryContentAccessOperation }>;
+  context: MemoryContentAccessContext<Operation>;
+  plan: AuthorizedMemoryContentPlan<Operation>;
   authorizationStartedAtMs: number;
   runtime: AdmittedAuthorizedMemoryReadRuntime;
   /** Bound at admission; registry changes cannot replace this run's provider. */
@@ -99,36 +113,57 @@ type InvocationState = Readonly<{
   runExposureRevisions: Set<string>;
 }>;
 
-type DerivationInvocationState = Omit<InvocationState, "context" | "plan" | "runtime"> &
+type DerivationInvocationState = Omit<ContentInvocationState<"derive">, "runtime"> &
   Readonly<{
-    context: MemoryContentAccessContext<"derive">;
-    plan: AuthorizedMemoryContentPlan<"derive">;
     runtime: Readonly<AuthorizedMemoryRuntime>;
     /** Every resource whose snippet or text reached the derivation model. */
     observedSourceHandles: Map<string, AuthorizedResourceHandle>;
   }>;
 
-type ContentInvocationState = InvocationState | DerivationInvocationState;
-
-type ReadInvocationState = Omit<InvocationState, "context" | "plan"> &
-  Readonly<{
-    context: MemoryContentAccessContext<"read">;
-    plan: AuthorizedMemoryContentPlan<"read">;
-  }>;
+type ReadInvocationState = ContentInvocationState<"read">;
+type AnyContentInvocationState = ReadInvocationState | DerivationInvocationState;
 
 const VIRTUAL_ROOT_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 
-const invocationStates = new WeakMap<object, InvocationState>();
+const invocationStates = new WeakMap<object, ReadInvocationState>();
 const derivationInvocationStates = new WeakMap<object, DerivationInvocationState>();
 
-type WriteInvocationState = Readonly<{
+type ExportInvocationState = Readonly<{
   trustedContext: TrustedMemoryAccessContext;
-  context: MemoryAccessContext;
-  plan: AuthorizedMemoryPlan;
+  context: MemoryAccessContext & Readonly<{ operation: "export" }>;
+  plan: AuthorizedMemoryPlan & Readonly<{ operation: "export" }>;
   runtime: Readonly<AuthorizedMemoryRuntime>;
 }>;
 
-const writeInvocationStates = new WeakMap<object, WriteInvocationState>();
+const exportInvocationStates = new WeakMap<object, ExportInvocationState>();
+
+type WriteOperation = Extract<
+  MemoryAccessContext["operation"],
+  | "append"
+  | "replace"
+  | "derive"
+  | "deposit"
+  | "project"
+  | "publish"
+  | "import"
+  | "delete"
+  | "sync"
+  | "policy-admin"
+>;
+
+type WriteInvocationState<Operation extends WriteOperation> = Readonly<{
+  trustedContext: TrustedMemoryAccessContext;
+  context: MemoryAccessContext & Readonly<{ operation: Operation }>;
+  plan: AuthorizedMemoryPlan & Readonly<{ operation: Operation }>;
+  runtime: Readonly<AuthorizedMemoryRuntime>;
+}>;
+
+// Preserve the current operation on both plan and context. The state itself
+// stays broad until a caller proves one operation; a mapped union cannot be
+// narrowed by a generic type predicate under TypeScript's assignability rules.
+type AnyWriteInvocationState = WriteInvocationState<WriteOperation>;
+
+const writeInvocationStates = new WeakMap<object, AnyWriteInvocationState>();
 
 type MemoryInvocationDiagnostic =
   | "admission-rejected"
@@ -175,11 +210,51 @@ function isCurrentPlan(params: {
   );
 }
 
-function readCurrentWriteContext(state: WriteInvocationState): MemoryAccessContext | undefined {
+function isContentContextForOperation<Operation extends MemoryContentAccessOperation>(
+  context: MemoryAccessContext,
+  operation: Operation,
+): context is MemoryContentAccessContext<Operation> {
+  return context.operation === operation;
+}
+
+function isContextForOperation<Operation extends MemoryAccessContext["operation"]>(
+  context: MemoryAccessContext,
+  operation: Operation,
+): context is MemoryAccessContext & Readonly<{ operation: Operation }> {
+  return context.operation === operation;
+}
+
+function isWriteContext(context: MemoryAccessContext): context is MemoryAccessContext & {
+  operation: WriteOperation;
+} {
+  return (
+    context.operation === "append" ||
+    context.operation === "replace" ||
+    context.operation === "derive" ||
+    context.operation === "deposit" ||
+    context.operation === "project" ||
+    context.operation === "publish" ||
+    context.operation === "import" ||
+    context.operation === "delete" ||
+    context.operation === "sync" ||
+    context.operation === "policy-admin"
+  );
+}
+
+function isWriteInvocationStateFor<Operation extends WriteOperation>(
+  state: AnyWriteInvocationState,
+  operation: Operation,
+): state is WriteInvocationState<Operation> {
+  return state.context.operation === operation && state.plan.operation === operation;
+}
+
+function readCurrentWriteContext<Operation extends WriteOperation>(
+  state: WriteInvocationState<Operation>,
+): (MemoryAccessContext & Readonly<{ operation: Operation }>) | undefined {
   const current = materializeTrustedMemoryAccessContext(state.trustedContext);
   if (
     !current ||
-    current.operation !== state.context.operation ||
+    !isContextForOperation(current, state.context.operation) ||
     current.contextFingerprint !== state.context.contextFingerprint ||
     current.runId !== state.context.runId ||
     current.agentId !== state.context.agentId ||
@@ -195,48 +270,76 @@ function readCurrentWriteContext(state: WriteInvocationState): MemoryAccessConte
   return current;
 }
 
-function readCurrentContext(state: ContentInvocationState): MemoryContentAccessContext | undefined {
+function readCurrentExportContext(
+  state: ExportInvocationState,
+): (MemoryAccessContext & Readonly<{ operation: "export" }>) | undefined {
   const current = materializeTrustedMemoryAccessContext(state.trustedContext);
-  if (!current || (current.operation !== "read" && current.operation !== "derive")) {
-    return undefined;
-  }
-  const readContext = current as MemoryContentAccessContext;
   if (
-    readContext.operation !== state.context.operation ||
-    readContext.contextFingerprint !== state.context.contextFingerprint ||
-    readContext.runId !== state.context.runId ||
-    readContext.agentId !== state.context.agentId ||
-    readContext.sessionId !== state.context.sessionId ||
-    readContext.sessionIdentityRevision !== state.context.sessionIdentityRevision ||
-    readContext.subjectRevision !== state.context.subjectRevision ||
-    readContext.delivery.deliveryRevision !== state.context.delivery.deliveryRevision ||
-    readContext.delivery.egressRegistryRevision !== state.context.delivery.egressRegistryRevision ||
-    !sameAudiences(readContext.delivery.audiences, state.context.delivery.audiences)
+    !current ||
+    !isContextForOperation(current, "export") ||
+    current.contextFingerprint !== state.context.contextFingerprint ||
+    current.runId !== state.context.runId ||
+    current.agentId !== state.context.agentId ||
+    current.sessionId !== state.context.sessionId ||
+    current.sessionIdentityRevision !== state.context.sessionIdentityRevision ||
+    current.subjectRevision !== state.context.subjectRevision ||
+    current.delivery.deliveryRevision !== state.context.delivery.deliveryRevision ||
+    current.delivery.egressRegistryRevision !== state.context.delivery.egressRegistryRevision ||
+    !sameAudiences(current.delivery.audiences, state.context.delivery.audiences)
   ) {
     return undefined;
   }
-  return readContext;
+  return current;
+}
+
+function readCurrentContext<Operation extends MemoryContentAccessOperation>(
+  state: ContentInvocationState<Operation>,
+): MemoryContentAccessContext<Operation> | undefined {
+  const current = materializeTrustedMemoryAccessContext(state.trustedContext);
+  if (!current || !isContentContextForOperation(current, state.context.operation)) {
+    return undefined;
+  }
+  if (
+    current.contextFingerprint !== state.context.contextFingerprint ||
+    current.runId !== state.context.runId ||
+    current.agentId !== state.context.agentId ||
+    current.sessionId !== state.context.sessionId ||
+    current.sessionIdentityRevision !== state.context.sessionIdentityRevision ||
+    current.subjectRevision !== state.context.subjectRevision ||
+    current.delivery.deliveryRevision !== state.context.delivery.deliveryRevision ||
+    current.delivery.egressRegistryRevision !== state.context.delivery.egressRegistryRevision ||
+    !sameAudiences(current.delivery.audiences, state.context.delivery.audiences)
+  ) {
+    return undefined;
+  }
+  return current;
 }
 
 function isReadContentContext(
-  context: MemoryContentAccessContext,
+  context: MemoryContentAccessContext<MemoryContentAccessOperation>,
 ): context is MemoryContentAccessContext<"read"> {
   return context.operation === "read";
 }
 
-function isReadInvocationState(state: ContentInvocationState): state is ReadInvocationState {
+function isReadInvocationState(state: AnyContentInvocationState): state is ReadInvocationState {
   return state.context.operation === "read" && state.plan.operation === "read";
 }
 
 function isDerivationInvocationState(
-  state: ContentInvocationState,
+  state: AnyContentInvocationState,
 ): state is DerivationInvocationState {
   return state.context.operation === "derive" && state.plan.operation === "derive";
 }
 
+function isDeriveWriteInvocationState(
+  state: AnyWriteInvocationState,
+): state is WriteInvocationState<"derive"> {
+  return isWriteInvocationStateFor(state, "derive");
+}
+
 function validateEnvelope<T>(params: {
-  state: ContentInvocationState;
-  context: MemoryContentAccessContext;
+  state: AnyContentInvocationState;
+  context: MemoryContentAccessContext<MemoryContentAccessOperation>;
   expectedRevisionHandles: readonly string[];
   envelope: AuthorizedMemoryResultEnvelope<T>;
 }): boolean {
@@ -288,7 +391,7 @@ function validateEnvelope<T>(params: {
 }
 
 function mergeEnvelope(
-  state: ContentInvocationState,
+  state: AnyContentInvocationState,
   envelope: AuthorizedMemoryResultEnvelope<unknown>,
 ): void {
   const { exposureReceipt, egressReceipt } = envelope;
@@ -302,8 +405,8 @@ function mergeEnvelope(
 }
 
 function readTranscriptExposure(params: {
-  state: ContentInvocationState;
-  context: MemoryContentAccessContext;
+  state: AnyContentInvocationState;
+  context: MemoryContentAccessContext<MemoryContentAccessOperation>;
   pendingEnvelope?: AuthorizedMemoryResultEnvelope<unknown>;
 }) {
   const { state, context, pendingEnvelope } = params;
@@ -346,8 +449,8 @@ function readTranscriptExposure(params: {
  * this broker. A recording failure leaves the invocation state unchanged and fails the read closed.
  */
 function recordEnvelopeExposure(params: {
-  state: ContentInvocationState;
-  context: MemoryContentAccessContext;
+  state: AnyContentInvocationState;
+  context: MemoryContentAccessContext<MemoryContentAccessOperation>;
   envelope: AuthorizedMemoryResultEnvelope<unknown>;
 }): void {
   if (
@@ -374,14 +477,14 @@ function recordEnvelopeExposure(params: {
 
 function readState(
   invocation: AuthorizedMemoryReadInvocation | AuthorizedMemoryDerivationInvocation,
-): ContentInvocationState | undefined {
+): AnyContentInvocationState | undefined {
   return invocationStates.get(invocation) ?? derivationInvocationStates.get(invocation);
 }
 
 function canonicalizeAuthorizedVirtualView(params: {
   view: AuthorizedMemoryVirtualView;
-  context: MemoryContentAccessContext;
-  plan: AuthorizedMemoryPlan & Readonly<{ operation: MemoryContentAccessOperation }>;
+  context: MemoryContentAccessContext<"read">;
+  plan: AuthorizedMemoryContentPlan<"read">;
 }): AuthorizedMemoryVirtualView | undefined {
   const { view, context, plan } = params;
   const mountHandles = new Set(plan.mounts.map((mount) => mount.mountHandle));
@@ -463,14 +566,13 @@ function canonicalizeAuthorizedVirtualView(params: {
 async function createAuthorizedMemoryContentInvocation(params: {
   context: TrustedMemoryAccessContext;
   capability?: MemoryPluginCapability;
-  operation: MemoryContentAccessOperation;
 }): Promise<AuthorizedMemoryReadInvocation | MemoryInvocationUnavailable> {
   const materialized = materializeTrustedMemoryAccessContext(params.context);
-  if (!materialized || materialized.operation !== params.operation) {
+  if (!materialized || !isContentContextForOperation(materialized, "read")) {
     logMemoryInvocationDiagnostic("materialization-rejected");
     return MEMORY_INVOCATION_UNAVAILABLE;
   }
-  const context = materialized as MemoryContentAccessContext;
+  const context = materialized;
   const capability =
     params.capability ??
     resolveSelectedMemoryCapabilityRegistration(requireActivePluginRegistry())?.capability;
@@ -481,8 +583,7 @@ async function createAuthorizedMemoryContentInvocation(params: {
   }
   try {
     const authorizationStartedAtMs = Date.now();
-    const plan = (await admission.runtime.authorize(context)) as AuthorizedMemoryPlan &
-      Readonly<{ operation: MemoryContentAccessOperation }>;
+    const plan = await admission.runtime.authorize(context);
     if (!isCurrentPlan({ context, plan, nowMs: Date.now() })) {
       logMemoryInvocationDiagnostic("invalid-plan");
       return MEMORY_INVOCATION_UNAVAILABLE;
@@ -517,7 +618,60 @@ export async function createAuthorizedMemoryReadInvocation(params: {
   context: TrustedMemoryAccessContext;
   capability?: MemoryPluginCapability;
 }): Promise<AuthorizedMemoryReadInvocation | MemoryInvocationUnavailable> {
-  return await createAuthorizedMemoryContentInvocation({ ...params, operation: "read" });
+  return await createAuthorizedMemoryContentInvocation(params);
+}
+
+/**
+ * The selected plugin mints the opaque store capability. Core only binds that
+ * result to durable parent/child lifecycle facts and never resolves a store id.
+ */
+export async function issueAuthorizedMemoryChildDelegationForInvocation(params: {
+  context: TrustedMemoryAccessContext;
+  issue: Omit<MemoryChildDelegationIssue, "parentContext">;
+}): Promise<IssuedMemoryChildDelegation | MemoryInvocationUnavailable> {
+  const parentContext = materializeTrustedMemoryAccessContext(params.context);
+  if (
+    !parentContext ||
+    parentContext.operation !== "read" ||
+    parentContext.delegation ||
+    params.issue.child.agentId !== parentContext.agentId
+  ) {
+    return MEMORY_INVOCATION_UNAVAILABLE;
+  }
+  const capability = resolveSelectedMemoryCapabilityRegistration(
+    requireActivePluginRegistry(),
+  )?.capability;
+  const admission = await admitMemoryAuthorizationRuntime(capability);
+  if (!admission.ok || !admission.runtime.issueChildDelegation) {
+    return MEMORY_INVOCATION_UNAVAILABLE;
+  }
+  try {
+    return await admission.runtime.issueChildDelegation({
+      ...params.issue,
+      parentContext,
+    });
+  } catch {
+    logMemoryInvocationDiagnostic("authorization-failed");
+    return MEMORY_INVOCATION_UNAVAILABLE;
+  }
+}
+
+/** Best-effort revocation closes the plugin token alongside the durable core grant. */
+export async function revokeAuthorizedMemoryChildDelegationForInvocation(params: {
+  agentId: string;
+  storeCapToken: string;
+}): Promise<void> {
+  try {
+    const capability = resolveSelectedMemoryCapabilityRegistration(
+      requireActivePluginRegistry(),
+    )?.capability;
+    const admission = await admitMemoryAuthorizationRuntime(capability);
+    if (admission.ok) {
+      await admission.runtime.revokeChildDelegation?.(params);
+    }
+  } catch {
+    // The core grant is already revoked and is the mandatory enforcement path.
+  }
 }
 
 /**
@@ -530,7 +684,7 @@ export async function createAuthorizedMemoryDeriveInvocation(params: {
   capability?: MemoryPluginCapability;
 }): Promise<AuthorizedMemoryDerivationInvocation | MemoryInvocationUnavailable> {
   const context = materializeTrustedMemoryAccessContext(params.context);
-  if (!context || context.operation !== "derive") {
+  if (!context || !isContentContextForOperation(context, "derive")) {
     logMemoryInvocationDiagnostic("materialization-rejected");
     return MEMORY_INVOCATION_UNAVAILABLE;
   }
@@ -544,7 +698,7 @@ export async function createAuthorizedMemoryDeriveInvocation(params: {
   }
   try {
     const authorizationStartedAtMs = Date.now();
-    const plan = (await admission.runtime.authorize(context)) as AuthorizedMemoryContentPlan<"derive">;
+    const plan = await admission.runtime.authorize(context);
     // A derivation can have exactly one representable destination. Filtering a
     // multi-store result after model exposure would still launder its context.
     if (!isCurrentPlan({ context, plan, nowMs: Date.now() }) || plan.mounts.length !== 1) {
@@ -578,15 +732,17 @@ export async function createAuthorizedMemoryDeriveInvocation(params: {
 }
 
 /**
- * Creates a process-local write invocation from host-minted facts. This is separate from read
- * exposure because a write is a resource lifecycle decision, never a continuation of a search hit.
+ * Creates the authorization fence for a host-owned transcript export. Generic
+ * `exportAuthorized` stays unusable for content until it has opaque export
+ * handles; this operation only proves current export policy before the host
+ * captures and publishes a transcript artifact.
  */
-export async function createAuthorizedMemoryWriteInvocation(params: {
+export async function createAuthorizedMemoryExportInvocation(params: {
   context: TrustedMemoryAccessContext;
   capability?: MemoryPluginCapability;
-}): Promise<AuthorizedMemoryWriteInvocation | MemoryInvocationUnavailable> {
+}): Promise<AuthorizedMemoryExportInvocation | MemoryInvocationUnavailable> {
   const context = materializeTrustedMemoryAccessContext(params.context);
-  if (!context || context.operation === "read") {
+  if (!context || !isContextForOperation(context, "export")) {
     logMemoryInvocationDiagnostic("materialization-rejected");
     return MEMORY_INVOCATION_UNAVAILABLE;
   }
@@ -600,12 +756,14 @@ export async function createAuthorizedMemoryWriteInvocation(params: {
   }
   try {
     const plan = await admission.runtime.authorize(context);
-    if (!isCurrentPlan({ context, plan, nowMs: Date.now() })) {
+    // One transcript policy set is the only currently representable source.
+    // A multi-store export would need an explicit partitioned artifact format.
+    if (!isCurrentPlan({ context, plan, nowMs: Date.now() }) || plan.mounts.length !== 1) {
       logMemoryInvocationDiagnostic("invalid-plan");
       return MEMORY_INVOCATION_UNAVAILABLE;
     }
-    const invocation = Object.freeze({}) as AuthorizedMemoryWriteInvocation;
-    writeInvocationStates.set(
+    const invocation = Object.freeze({}) as AuthorizedMemoryExportInvocation;
+    exportInvocationStates.set(
       invocation,
       Object.freeze({
         trustedContext: params.context,
@@ -621,10 +779,213 @@ export async function createAuthorizedMemoryWriteInvocation(params: {
   }
 }
 
+/** Reauthorizes the fixed export context before every durable export transition. */
+export async function recheckAuthorizedMemoryExportInvocation(params: {
+  invocation: AuthorizedMemoryExportInvocation;
+}): Promise<boolean> {
+  const state = exportInvocationStates.get(params.invocation);
+  const context = state ? readCurrentExportContext(state) : undefined;
+  if (!state || !context || !isCurrentPlan({ context, plan: state.plan, nowMs: Date.now() })) {
+    return false;
+  }
+  try {
+    const current = await state.runtime.authorize(context);
+    return Boolean(
+      isCurrentPlan({ context, plan: current, nowMs: Date.now() }) && current.mounts.length === 1,
+    );
+  } catch {
+    logMemoryInvocationDiagnostic("authorization-failed");
+    return false;
+  }
+}
+
+async function authorizeWriteInvocation<Operation extends WriteOperation>(params: {
+  context: MemoryAccessContext & Readonly<{ operation: Operation }>;
+  trustedContext: TrustedMemoryAccessContext;
+  runtime: Readonly<AuthorizedMemoryRuntime>;
+}): Promise<WriteInvocationState<Operation> | undefined> {
+  const plan = await params.runtime.authorize(params.context);
+  if (!isCurrentPlan({ context: params.context, plan, nowMs: Date.now() })) {
+    logMemoryInvocationDiagnostic("invalid-plan");
+    return undefined;
+  }
+  return Object.freeze({
+    trustedContext: params.trustedContext,
+    context: params.context,
+    plan,
+    runtime: params.runtime,
+  });
+}
+
+async function createWriteInvocationState(params: {
+  context: MemoryAccessContext & Readonly<{ operation: WriteOperation }>;
+  trustedContext: TrustedMemoryAccessContext;
+  runtime: Readonly<AuthorizedMemoryRuntime>;
+}): Promise<AnyWriteInvocationState | undefined> {
+  const shared = { trustedContext: params.trustedContext, runtime: params.runtime };
+  switch (params.context.operation) {
+    case "append":
+      return await authorizeWriteInvocation({ ...shared, context: params.context });
+    case "replace":
+      return await authorizeWriteInvocation({ ...shared, context: params.context });
+    case "derive":
+      return await authorizeWriteInvocation({ ...shared, context: params.context });
+    case "deposit":
+      return await authorizeWriteInvocation({ ...shared, context: params.context });
+    case "project":
+      return await authorizeWriteInvocation({ ...shared, context: params.context });
+    case "publish":
+      return await authorizeWriteInvocation({ ...shared, context: params.context });
+    case "import":
+      return await authorizeWriteInvocation({ ...shared, context: params.context });
+    case "delete":
+      return await authorizeWriteInvocation({ ...shared, context: params.context });
+    case "sync":
+      return await authorizeWriteInvocation({ ...shared, context: params.context });
+    case "policy-admin":
+      return await authorizeWriteInvocation({ ...shared, context: params.context });
+  }
+}
+
+/**
+ * Creates a process-local write invocation from host-minted facts. This is separate from read
+ * exposure because a write is a resource lifecycle decision, never a continuation of a search hit.
+ */
+export async function createAuthorizedMemoryWriteInvocation(params: {
+  context: TrustedMemoryAccessContext;
+  capability?: MemoryPluginCapability;
+}): Promise<AuthorizedMemoryWriteInvocation | MemoryInvocationUnavailable> {
+  const context = materializeTrustedMemoryAccessContext(params.context);
+  if (!context || !isWriteContext(context)) {
+    logMemoryInvocationDiagnostic("materialization-rejected");
+    return MEMORY_INVOCATION_UNAVAILABLE;
+  }
+  const capability =
+    params.capability ??
+    resolveSelectedMemoryCapabilityRegistration(requireActivePluginRegistry())?.capability;
+  const admission = await admitMemoryAuthorizationRuntime(capability);
+  if (!admission.ok) {
+    logMemoryInvocationDiagnostic("admission-rejected");
+    return MEMORY_INVOCATION_UNAVAILABLE;
+  }
+  try {
+    const state = await createWriteInvocationState({
+      context,
+      trustedContext: params.context,
+      runtime: admission.runtime,
+    });
+    if (!state) {
+      return MEMORY_INVOCATION_UNAVAILABLE;
+    }
+    const invocation = Object.freeze({}) as AuthorizedMemoryWriteInvocation;
+    writeInvocationStates.set(invocation, state);
+    return invocation;
+  } catch {
+    logMemoryInvocationDiagnostic("authorization-failed");
+    return MEMORY_INVOCATION_UNAVAILABLE;
+  }
+}
+
 /**
  * The host supplies the opaque invocation and mutation identity. Runtime arguments remain limited
  * to a closed mutation DTO, so content cannot retarget a store, owner, root, or broader audience.
  */
+async function invokeAuthorizedMemoryWrite(params: {
+  state: AnyWriteInvocationState;
+  context: MemoryAccessContext & Readonly<{ operation: WriteOperation }>;
+  mutation: AuthorizedMemoryMutation;
+}): Promise<MemoryWriteResult | undefined> {
+  const { state, context, mutation } = params;
+  if (
+    isWriteInvocationStateFor(state, "append") &&
+    isContextForOperation(context, "append") &&
+    (mutation.kind === "remember" || mutation.kind === "append")
+  ) {
+    return await writeAuthorizedMemoryForCurrentState({ state, context, mutation });
+  }
+  if (
+    isWriteInvocationStateFor(state, "replace") &&
+    isContextForOperation(context, "replace") &&
+    mutation.kind === "replace"
+  ) {
+    return await writeAuthorizedMemoryForCurrentState({ state, context, mutation });
+  }
+  if (
+    isWriteInvocationStateFor(state, "derive") &&
+    isContextForOperation(context, "derive") &&
+    mutation.kind === "derive"
+  ) {
+    return await writeAuthorizedMemoryForCurrentState({ state, context, mutation });
+  }
+  if (
+    isWriteInvocationStateFor(state, "deposit") &&
+    isContextForOperation(context, "deposit") &&
+    mutation.kind === "deposit"
+  ) {
+    return await writeAuthorizedMemoryForCurrentState({ state, context, mutation });
+  }
+  if (
+    isWriteInvocationStateFor(state, "project") &&
+    isContextForOperation(context, "project") &&
+    mutation.kind === "project"
+  ) {
+    return await writeAuthorizedMemoryForCurrentState({ state, context, mutation });
+  }
+  if (
+    isWriteInvocationStateFor(state, "publish") &&
+    isContextForOperation(context, "publish") &&
+    mutation.kind === "publish"
+  ) {
+    return await writeAuthorizedMemoryForCurrentState({ state, context, mutation });
+  }
+  if (
+    isWriteInvocationStateFor(state, "import") &&
+    isContextForOperation(context, "import") &&
+    mutation.kind === "import"
+  ) {
+    return await writeAuthorizedMemoryForCurrentState({ state, context, mutation });
+  }
+  if (
+    isWriteInvocationStateFor(state, "delete") &&
+    isContextForOperation(context, "delete") &&
+    (mutation.kind === "delete" || mutation.kind === "tombstone")
+  ) {
+    return await writeAuthorizedMemoryForCurrentState({ state, context, mutation });
+  }
+  if (
+    isWriteInvocationStateFor(state, "sync") &&
+    isContextForOperation(context, "sync") &&
+    mutation.kind === "sync"
+  ) {
+    return await writeAuthorizedMemoryForCurrentState({ state, context, mutation });
+  }
+  if (
+    isWriteInvocationStateFor(state, "policy-admin") &&
+    isContextForOperation(context, "policy-admin") &&
+    mutation.kind === "admin-reclassify"
+  ) {
+    return await writeAuthorizedMemoryForCurrentState({ state, context, mutation });
+  }
+  return undefined;
+}
+
+/**
+ * `invokeAuthorizedMemoryWrite` has already narrowed this triple to one SDK
+ * operation. Its private distributed parameter union cannot retain that fact
+ * at the runtime call boundary, so keep the bridge at this single boundary.
+ */
+async function writeAuthorizedMemoryForCurrentState(params: {
+  state: AnyWriteInvocationState;
+  context: MemoryAccessContext & Readonly<{ operation: WriteOperation }>;
+  mutation: AuthorizedMemoryMutation;
+}): Promise<MemoryWriteResult> {
+  return await params.state.runtime.writeAuthorized({
+    context: params.context,
+    plan: params.state.plan,
+    mutation: params.mutation,
+  } as never);
+}
+
 export async function writeAuthorizedMemoryForInvocation(params: {
   invocation: AuthorizedMemoryWriteInvocation;
   mutation: AuthorizedMemoryMutation;
@@ -635,15 +996,28 @@ export async function writeAuthorizedMemoryForInvocation(params: {
     return MEMORY_INVOCATION_UNAVAILABLE;
   }
   try {
-    return await state.runtime.writeAuthorized({
-      context,
-      plan: state.plan,
-      mutation: params.mutation,
-    } as never);
+    return (
+      (await invokeAuthorizedMemoryWrite({ state, context, mutation: params.mutation })) ??
+      MEMORY_INVOCATION_UNAVAILABLE
+    );
   } catch {
     logMemoryInvocationDiagnostic("authorization-failed");
     return MEMORY_INVOCATION_UNAVAILABLE;
   }
+}
+
+/** Reissues host facts for a derive write before its transcript source reaches a provider. */
+export function recheckAuthorizedMemoryDeriveWriteInvocation(params: {
+  invocation: AuthorizedMemoryWriteInvocation;
+}): boolean {
+  const state = writeInvocationStates.get(params.invocation);
+  const context = state ? readCurrentWriteContext(state) : undefined;
+  return Boolean(
+    state &&
+    context &&
+    isDeriveWriteInvocationState(state) &&
+    isCurrentPlan({ context, plan: state.plan, nowMs: Date.now() }),
+  );
 }
 
 function deriveMutationId(params: {
@@ -711,6 +1085,56 @@ export async function commitAuthorizedMemoryDerivationForInvocation(params: {
   }
 }
 
+/**
+ * Revalidates every source already released to a derivation model without
+ * releasing their bytes again. A revoked, tombstoned, or reclassified source
+ * must fail before the next provider dispatch, not only during commit.
+ */
+export async function recheckAuthorizedMemoryDerivationSources(params: {
+  invocation: AuthorizedMemoryDerivationInvocation;
+}): Promise<boolean> {
+  const state = derivationInvocationStates.get(params.invocation);
+  const context = state ? readCurrentContext(state) : undefined;
+  const sourceHandles = state ? [...state.observedSourceHandles.values()] : [];
+  if (
+    !state ||
+    !context ||
+    context.operation !== "derive" ||
+    !isCurrentPlan({ context, plan: state.plan, nowMs: Date.now() }) ||
+    sourceHandles.length === 0
+  ) {
+    return false;
+  }
+  try {
+    for (const handle of sourceHandles) {
+      if (state.handles.get(handle.handleId) !== handle) {
+        return false;
+      }
+      const envelope = await readAuthorizedMemoryWithCurrentState({
+        state,
+        context,
+        handle,
+        from: 1,
+        lines: 1,
+      });
+      if (
+        !envelope ||
+        !validateEnvelope({
+          state,
+          context,
+          expectedRevisionHandles: [handle.resourceRevision],
+          envelope,
+        })
+      ) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const MAXIMUM_DERIVATION_SOURCE_CHARACTERS = 32_000;
 
 /**
@@ -766,11 +1190,12 @@ export async function stageAuthorizedMemorySealedCompactionForInvocation(params:
   transcriptSource: AuthorizedTranscriptDerivationSource;
 }): Promise<AuthorizedSealedCompactionArtifact | MemoryInvocationUnavailable> {
   const state = writeInvocationStates.get(params.invocation);
-  const context = state ? readCurrentWriteContext(state) : undefined;
+  if (!state || !isDeriveWriteInvocationState(state)) {
+    return MEMORY_INVOCATION_UNAVAILABLE;
+  }
+  const context = readCurrentWriteContext(state);
   if (
-    !state ||
     !context ||
-    context.operation !== "derive" ||
     !state.runtime.stageSealedCompaction ||
     !isCurrentPlan({ context, plan: state.plan, nowMs: Date.now() })
   ) {
@@ -779,7 +1204,7 @@ export async function stageAuthorizedMemorySealedCompactionForInvocation(params:
   try {
     return await state.runtime.stageSealedCompaction({
       context,
-      plan: state.plan as AuthorizedMemoryPlan & Readonly<{ operation: "derive" }>,
+      plan: state.plan,
       content: params.content,
       transcriptSource: params.transcriptSource,
     });
@@ -876,6 +1301,72 @@ export async function readAuthorizedMemoryVirtualFile(params: {
   }
 }
 
+async function searchAuthorizedMemoryWithCurrentState(params: {
+  state: AnyContentInvocationState;
+  context: MemoryContentAccessContext<MemoryContentAccessOperation>;
+  query: string;
+  sources?: readonly MemorySource[];
+  limit: number;
+  signal?: AbortSignal;
+}) {
+  const input = {
+    query: params.query,
+    ...(params.sources ? { sources: params.sources } : {}),
+    limit: params.limit,
+    ...(params.signal ? { signal: params.signal } : {}),
+  };
+  if (isReadInvocationState(params.state) && isReadContentContext(params.context)) {
+    return await params.state.runtime.searchAuthorized({
+      context: params.context,
+      plan: params.state.plan,
+      ...input,
+    });
+  }
+  if (
+    isDerivationInvocationState(params.state) &&
+    isContentContextForOperation(params.context, "derive")
+  ) {
+    return await params.state.runtime.searchAuthorized({
+      context: params.context,
+      plan: params.state.plan,
+      ...input,
+    });
+  }
+  return undefined;
+}
+
+async function readAuthorizedMemoryWithCurrentState(params: {
+  state: AnyContentInvocationState;
+  context: MemoryContentAccessContext<MemoryContentAccessOperation>;
+  handle: AuthorizedResourceHandle;
+  from?: number;
+  lines?: number;
+}) {
+  const input = {
+    handle: params.handle,
+    ...(params.from !== undefined ? { from: params.from } : {}),
+    ...(params.lines !== undefined ? { lines: params.lines } : {}),
+  };
+  if (isReadInvocationState(params.state) && isReadContentContext(params.context)) {
+    return await params.state.runtime.readAuthorized({
+      context: params.context,
+      plan: params.state.plan,
+      ...input,
+    });
+  }
+  if (
+    isDerivationInvocationState(params.state) &&
+    isContentContextForOperation(params.context, "derive")
+  ) {
+    return await params.state.runtime.readAuthorized({
+      context: params.context,
+      plan: params.state.plan,
+      ...input,
+    });
+  }
+  return undefined;
+}
+
 export async function searchAuthorizedMemoryForInvocation(params: {
   invocation: AuthorizedMemoryReadInvocation | AuthorizedMemoryDerivationInvocation;
   query: string;
@@ -894,14 +1385,17 @@ export async function searchAuthorizedMemoryForInvocation(params: {
     return MEMORY_INVOCATION_UNAVAILABLE;
   }
   try {
-    const envelope = await state.runtime.searchAuthorized({
+    const envelope = await searchAuthorizedMemoryWithCurrentState({
+      state,
       context,
-      plan: state.plan,
       query: params.query,
-      ...(params.sources ? { sources: params.sources } : {}),
       limit: Math.max(1, Math.min(100, Math.trunc(params.limit ?? 10))),
+      ...(params.sources ? { sources: params.sources } : {}),
       ...(params.signal ? { signal: params.signal } : {}),
-    } as never);
+    });
+    if (!envelope) {
+      return MEMORY_INVOCATION_UNAVAILABLE;
+    }
     const revisionHandles = envelope.value.map((result) => result.resourceHandle.resourceRevision);
     if (
       !validateEnvelope({
@@ -949,13 +1443,16 @@ export async function readAuthorizedMemoryForInvocation(params: {
     return MEMORY_INVOCATION_UNAVAILABLE;
   }
   try {
-    const envelope = await state.runtime.readAuthorized({
+    const envelope = await readAuthorizedMemoryWithCurrentState({
+      state,
       context,
-      plan: state.plan,
       handle,
       ...(params.from !== undefined ? { from: params.from } : {}),
       ...(params.lines !== undefined ? { lines: params.lines } : {}),
-    } as never);
+    });
+    if (!envelope) {
+      return MEMORY_INVOCATION_UNAVAILABLE;
+    }
     if (
       !validateEnvelope({
         state,

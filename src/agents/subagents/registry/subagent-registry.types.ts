@@ -225,6 +225,12 @@ export type SubagentRunRecord = {
   /** Cleanup retirement deferred until requesterTurnRunId settles. */
   retireAfterRequesterTurn?: boolean;
   childSessionKey: string;
+  /** Exact initial child generation for lifecycle-owned capability revocation. */
+  childSessionGeneration?: {
+    agentId: string;
+    sessionId: string;
+    lifecycleRevision: string;
+  };
   controllerSessionKey?: string;
   requesterSessionKey: string;
   requesterOrigin?: DeliveryContext;

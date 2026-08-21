@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Command } from "commander";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { resolveSessionTranscriptsDirForAgent as resolveTestSessionTranscriptsDirForAgent } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import { upsertSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import { appendSessionTranscriptMessageByIdentity } from "openclaw/plugin-sdk/session-transcript-runtime";
@@ -31,6 +32,14 @@ const resolveCommandSecretRefsViaGateway = vi.hoisted(() =>
     diagnostics: [] as string[],
   })),
 );
+
+// Workspace admission reads the public runtime-core predicate directly, while
+// the CLI facade reads the same predicate through cli.host.runtime. Keep both
+// paths on this fixture so shared-owner cutover stays a real admission check.
+vi.mock("openclaw/plugin-sdk/memory-core-host-runtime-core", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("openclaw/plugin-sdk/memory-core-host-runtime-core")>()),
+  isLegacyMemorySurfaceDisabled,
+}));
 
 async function expectPathMissing(targetPath: string): Promise<void> {
   let error: unknown;
@@ -209,6 +218,16 @@ describe("memory cli", () => {
     });
   }
 
+  function configureCliWorkspace(workspaceDir: string, config: OpenClawConfig = {}) {
+    getRuntimeConfig.mockReturnValue({
+      ...config,
+      agents: {
+        ...config.agents,
+        list: [{ id: "main", default: true, workspace: workspaceDir }],
+      },
+    });
+  }
+
   function setupMemoryStatusWithInactiveSecretDiagnostics(close: ReturnType<typeof vi.fn>) {
     resolveCommandSecretRefsViaGateway.mockResolvedValueOnce({
       resolvedConfig: {},
@@ -282,6 +301,7 @@ describe("memory cli", () => {
     vi.stubEnv("OPENCLAW_STATE_DIR", path.join(workspaceDir, "state"));
     vi.stubEnv("OPENCLAW_CONFIG_PATH", path.join(workspaceDir, "openclaw.json"));
     await fs.mkdir(workspaceDir, { recursive: true });
+    configureCliWorkspace(workspaceDir);
     await seedCliBackfillTranscript("drain", ["2026-01-01", "2026-01-02", "2026-01-03"]);
 
     mockManager({ status: () => makeMemoryStatus({ workspaceDir }), close: vi.fn() });
@@ -351,6 +371,27 @@ describe("memory cli", () => {
       expect(process.exitCode).toBe(1);
     },
   );
+
+  it("blocks session backfill before acquiring a manager when another shared-workspace owner has cut over", async () => {
+    getRuntimeConfig.mockReturnValue({
+      agents: {
+        list: [
+          { id: "alpha", default: true, workspace: "/tmp/shared-workspace" },
+          { id: "beta", workspace: "/tmp/shared-workspace" },
+        ],
+      },
+    });
+    isLegacyMemorySurfaceDisabled.mockImplementation((agentId: string) => agentId === "alpha");
+    const error = spyRuntimeErrors(defaultRuntime);
+
+    await runMemoryCli(["session-backfill", "--agent", "beta", "--apply"]);
+
+    expect(getMemorySearchManager).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith(
+      "Legacy memory CLI access is unavailable after scoped-memory cutover.",
+    );
+    expect(process.exitCode).toBe(1);
+  });
 
   it("does not scan legacy memory sources for a cut-over agent", async () => {
     isLegacyMemorySurfaceDisabled.mockReturnValue(true);
@@ -484,6 +525,7 @@ describe("memory cli", () => {
   async function withTempWorkspace(run: (workspaceDir: string) => Promise<void>) {
     const workspaceDir = path.join(workspaceFixtureRoot, `case-${workspaceCaseId++}`);
     await fs.mkdir(path.join(workspaceDir, "memory", ".dreams"), { recursive: true });
+    configureCliWorkspace(workspaceDir);
     await run(workspaceDir);
   }
 
@@ -2541,7 +2583,7 @@ describe("memory cli", () => {
           source: "memory",
         },
       ]);
-      getRuntimeConfig.mockReturnValue({
+      configureCliWorkspace(workspaceDir, {
         plugins: {
           entries: {
             "memory-core": {
@@ -2621,7 +2663,7 @@ describe("memory cli", () => {
           source: "memory",
         },
       ]);
-      getRuntimeConfig.mockReturnValue({
+      configureCliWorkspace(workspaceDir, {
         plugins: {
           entries: {
             "memory-core": {

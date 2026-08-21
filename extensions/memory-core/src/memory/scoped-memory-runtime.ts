@@ -19,7 +19,9 @@ import type {
   MemoryWriteResult,
   AuthorizedResourceHandle,
   AuthorizedMemoryVirtualView,
+  IssuedMemoryChildDelegation,
   MemoryAccessContext,
+  MemoryChildDelegationIssue,
   MemoryContentAccessContext,
 } from "openclaw/plugin-sdk/memory-authorization";
 import type {
@@ -94,6 +96,96 @@ function audienceKey(audience: AudienceRef): string {
   return `${audience.kind}\0${audience.id}`;
 }
 
+function canonicalAudiencesJson(audiences: readonly AudienceRef[]): string {
+  return JSON.stringify(
+    audiences
+      .map((audience) => ({ kind: audience.kind, id: audience.id }))
+      .toSorted((left, right) => audienceKey(left).localeCompare(audienceKey(right))),
+  );
+}
+
+function canonicalOperationsJson(operations: readonly string[]): string {
+  return JSON.stringify([...new Set(operations)].toSorted());
+}
+
+function delegationTokenHash(token: string): string {
+  return createHash("sha256").update(token).digest("base64url");
+}
+
+function delegationRootPrincipalId(context: MemoryAccessContext): string | undefined {
+  switch (context.subject.kind) {
+    case "user":
+      return context.subject.principalId;
+    case "conversation":
+      return context.subject.conversationPrincipalId;
+    case "service":
+    case "agent":
+    case "system":
+      return context.subject.principalId;
+  }
+}
+
+/** The opaque token binds a delegated child to its exact generation and parent plan. */
+function isCurrentChildDelegation(context: MemoryAccessContext): boolean {
+  const delegation = context.delegation;
+  if (!delegation) {
+    return true;
+  }
+  if (
+    context.operation !== "read" ||
+    delegation.allowedOperations.length !== 1 ||
+    delegation.allowedOperations[0] !== "read" ||
+    !context.delivery.audiences.every((audience) =>
+      delegation.maximumAudiences.some((maximum) => audienceKey(maximum) === audienceKey(audience)),
+    )
+  ) {
+    return false;
+  }
+  const rootPrincipalId = delegationRootPrincipalId(context);
+  if (!rootPrincipalId || rootPrincipalId !== delegation.rootPrincipalId) {
+    return false;
+  }
+  return withScopedMemoryDatabase(context.agentId, (database) => {
+    const row = database
+      .prepare(
+        `SELECT allowed_operations_json, maximum_audiences_json, expires_at, revoked_at
+           FROM memory_child_delegation_capabilities
+          WHERE agent_id = ?
+            AND child_session_id = ?
+            AND child_session_identity_revision = ?
+            AND child_subject_revision = ?
+            AND root_principal_id = ?
+            AND parent_memory_plan_id = ?
+            AND capability_snapshot_id = ?
+            AND token_hash = ?`,
+      )
+      .get(
+        context.agentId,
+        context.sessionId,
+        context.sessionIdentityRevision,
+        context.subjectRevision,
+        rootPrincipalId,
+        delegation.parentMemoryPlanId,
+        delegation.capabilitySnapshotId,
+        delegationTokenHash(delegation.storeCapToken),
+      ) as
+      | {
+          allowed_operations_json: string;
+          maximum_audiences_json: string;
+          expires_at: number;
+          revoked_at: number | null;
+        }
+      | undefined;
+    return Boolean(
+      row &&
+        row.revoked_at === null &&
+        row.expires_at > Date.now() &&
+        row.allowed_operations_json === canonicalOperationsJson(delegation.allowedOperations) &&
+        row.maximum_audiences_json === canonicalAudiencesJson(delegation.maximumAudiences),
+    );
+  });
+}
+
 function hasAudience(context: MemoryAccessContext, kind: AudienceRef["kind"], id: string): boolean {
   return context.delivery.audiences.some(
     (audience) => audience.kind === kind && audience.id === id,
@@ -137,6 +229,9 @@ function listAuthorizedStores(params: {
   context: MemoryAccessContext;
   nowMs: number;
 }): readonly AuthorizedStore[] {
+  if (!isCurrentChildDelegation(params.context)) {
+    return [];
+  }
   return withScopedMemoryDatabase(params.context.agentId, (database) => {
     const rows = database
       .prepare(
@@ -2440,6 +2535,89 @@ const builtinScopedMemoryRuntime = {
     const state = createPlan(context);
     plans.set(state.plan.planId, state);
     return state.plan;
+  },
+
+  async issueChildDelegation(
+    issue: MemoryChildDelegationIssue,
+  ): Promise<IssuedMemoryChildDelegation> {
+    const expiresAtMs = Date.parse(issue.expiresAt);
+    if (
+      issue.version !== 1 ||
+      issue.parentContext.operation !== "read" ||
+      issue.parentContext.delegation ||
+      issue.child.agentId !== issue.parentContext.agentId ||
+      issue.allowedOperations.length !== 1 ||
+      issue.allowedOperations[0] !== "read" ||
+      !Number.isFinite(expiresAtMs) ||
+      expiresAtMs <= Date.now() ||
+      canonicalAudiencesJson(issue.maximumAudiences) !==
+        canonicalAudiencesJson(issue.parentContext.delivery.audiences)
+    ) {
+      throw new Error("memory child delegation is unavailable");
+    }
+    const rootPrincipalId = delegationRootPrincipalId(issue.parentContext);
+    if (!rootPrincipalId) {
+      throw new Error("memory child delegation is unavailable");
+    }
+    const parentPlan = createPlan(issue.parentContext);
+    if (parentPlan.stores.length === 0) {
+      throw new Error("memory child delegation is unavailable");
+    }
+    const storeCapToken = `mchildcap1_${randomUUID()}`;
+    withScopedMemoryDatabase(issue.parentContext.agentId, (database) => {
+      runSqliteImmediateTransactionSync(database, () => {
+        database
+          .prepare(
+            `INSERT INTO memory_child_delegation_capabilities (
+               delegation_id, agent_id,
+               child_session_id, child_session_identity_revision, child_subject_revision,
+               root_principal_id, parent_memory_plan_id, capability_snapshot_id,
+               allowed_operations_json, maximum_audiences_json, token_hash,
+               expires_at, revoked_at, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+          )
+          .run(
+            issue.delegationId,
+            issue.parentContext.agentId,
+            issue.child.sessionId,
+            issue.child.sessionIdentityRevision,
+            issue.child.subjectRevision,
+            rootPrincipalId,
+            parentPlan.plan.planId,
+            issue.child.capabilitySnapshotId,
+            canonicalOperationsJson(issue.allowedOperations),
+            canonicalAudiencesJson(issue.maximumAudiences),
+            delegationTokenHash(storeCapToken),
+            expiresAtMs,
+            Date.now(),
+          );
+      });
+    });
+    return Object.freeze({
+      version: 1,
+      storeCapToken,
+      parentMemoryPlanId: parentPlan.plan.planId,
+    });
+  },
+
+  async revokeChildDelegation(
+    params: Readonly<{ agentId: string; storeCapToken: string }>,
+  ): Promise<void> {
+    if (!params.agentId.trim() || !params.storeCapToken.trim()) {
+      return;
+    }
+    const tokenHash = delegationTokenHash(params.storeCapToken);
+    withScopedMemoryDatabase(params.agentId, (database) => {
+      runSqliteImmediateTransactionSync(database, () => {
+        database
+          .prepare(
+            `UPDATE memory_child_delegation_capabilities
+                SET revoked_at = COALESCE(revoked_at, ?)
+              WHERE token_hash = ? AND revoked_at IS NULL`,
+          )
+          .run(Date.now(), tokenHash);
+      });
+    });
   },
 
   async searchAuthorized(

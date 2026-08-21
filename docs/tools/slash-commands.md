@@ -177,6 +177,15 @@ plugins.
     Explicit `/export-session` paths replace existing files inside the
     workspace. Omit the path to generate a collision-safe filename.
 
+    For a session using scoped-memory cutover, `/export-session` exports only a
+    complete, currently authorized transcript. OpenClaw stages immutable source
+    lineage before writing the HTML and embeds its export id in the document.
+    If its owner identity, delivery route, source policy, or source transcript
+    changes before the final publication check, publication is cancelled. A
+    completed export remains valid if those facts change afterward. Scoped
+    exports omit the live system prompt and tool schemas; `/export-trajectory`
+    remains unavailable for scoped-memory sessions.
+
     <Note>
       Control UI intercepts typed `/new` to create and switch to a fresh
       dashboard session, except when `session.dmScope: "main"` is configured

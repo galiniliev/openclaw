@@ -6,6 +6,10 @@ import {
   type AuthorizedMemorySearchResult,
   type MemoryAccessContext,
 } from "../plugin-sdk/memory-authorization.js";
+import type {
+  AuthorizedMemoryReadInvocation,
+  MemoryInvocationUnavailable,
+} from "./memory-invocation.js";
 
 const mocks = vi.hoisted(() => ({
   admit: vi.fn(),
@@ -45,7 +49,9 @@ const {
   readAuthorizedMemoryVirtualFile,
   readAuthorizedMemoryForInvocation,
   readAuthorizedMemoryRunExposure,
+  recheckAuthorizedMemoryDerivationSources,
   searchAuthorizedMemoryForInvocation,
+  stageAuthorizedMemorySealedCompactionForInvocation,
   writeAuthorizedMemoryForInvocation,
 } = await import("./memory-invocation.js");
 const { clearMemoryRunExposureForTest } = await import("./memory-run-exposure.js");
@@ -132,7 +138,9 @@ function createEnvelope<T>(
   const receiptSequenceValue = ++receiptSequence;
   return {
     version: 1,
-    value,
+    // The SDK freezes result envelopes at the host boundary; mutable test
+    // fixture input is otherwise compatible with that readonly result shape.
+    value: value as AuthorizedMemoryResultEnvelope<T>["value"],
     exposureReceipt: {
       version: 1,
       receiptId: `exposure-${receiptSequenceValue}`,
@@ -160,6 +168,10 @@ function createEnvelope<T>(
       ...overrides?.egressReceipt,
     },
   };
+}
+
+function isMemoryInvocationUnavailable(value: unknown): value is MemoryInvocationUnavailable {
+  return value === MEMORY_INVOCATION_UNAVAILABLE;
 }
 
 describe("authorized memory read invocation", () => {
@@ -246,7 +258,7 @@ describe("authorized memory read invocation", () => {
       },
     });
     expect(invocation).not.toBe(MEMORY_INVOCATION_UNAVAILABLE);
-    if (invocation === MEMORY_INVOCATION_UNAVAILABLE) {
+    if (isMemoryInvocationUnavailable(invocation)) {
       return;
     }
     await expect(
@@ -314,7 +326,7 @@ describe("authorized memory read invocation", () => {
       capability: { authorization: COMPLETE_MEMORY_AUTHORIZATION_CAPABILITIES },
     });
     expect(invocation).not.toBe(MEMORY_INVOCATION_UNAVAILABLE);
-    if (invocation === MEMORY_INVOCATION_UNAVAILABLE) {
+    if (isMemoryInvocationUnavailable(invocation)) {
       return;
     }
 
@@ -368,7 +380,7 @@ describe("authorized memory read invocation", () => {
       capability: { authorization: COMPLETE_MEMORY_AUTHORIZATION_CAPABILITIES },
     });
     expect(invocation).not.toBe(MEMORY_INVOCATION_UNAVAILABLE);
-    if (invocation === MEMORY_INVOCATION_UNAVAILABLE) {
+    if (isMemoryInvocationUnavailable(invocation)) {
       return;
     }
     await expect(
@@ -429,7 +441,7 @@ describe("authorized memory read invocation", () => {
       capability: { authorization: COMPLETE_MEMORY_AUTHORIZATION_CAPABILITIES },
     });
     expect(invocation).not.toBe(MEMORY_INVOCATION_UNAVAILABLE);
-    if (invocation === MEMORY_INVOCATION_UNAVAILABLE) {
+    if (isMemoryInvocationUnavailable(invocation)) {
       return;
     }
     await expect(
@@ -488,7 +500,7 @@ describe("authorized memory read invocation", () => {
       capability: { authorization: COMPLETE_MEMORY_AUTHORIZATION_CAPABILITIES },
     });
     expect(invocation).not.toBe(MEMORY_INVOCATION_UNAVAILABLE);
-    if (invocation === MEMORY_INVOCATION_UNAVAILABLE) {
+    if (isMemoryInvocationUnavailable(invocation)) {
       return;
     }
     await expect(searchAuthorizedMemoryForInvocation({ invocation, query: "first" })).resolves.toBe(
@@ -537,7 +549,7 @@ describe("authorized memory read invocation", () => {
       capability: { authorization: COMPLETE_MEMORY_AUTHORIZATION_CAPABILITIES },
     });
     expect(invocation).not.toBe(MEMORY_INVOCATION_UNAVAILABLE);
-    if (invocation === MEMORY_INVOCATION_UNAVAILABLE) {
+    if (isMemoryInvocationUnavailable(invocation)) {
       return;
     }
     await expect(
@@ -562,7 +574,7 @@ describe("authorized memory read invocation", () => {
       capability: { authorization: COMPLETE_MEMORY_AUTHORIZATION_CAPABILITIES },
     });
     expect(invocation).not.toBe(MEMORY_INVOCATION_UNAVAILABLE);
-    if (invocation === MEMORY_INVOCATION_UNAVAILABLE) {
+    if (isMemoryInvocationUnavailable(invocation)) {
       return;
     }
 
@@ -614,7 +626,7 @@ describe("authorized memory read invocation", () => {
       capability: { authorization: COMPLETE_MEMORY_AUTHORIZATION_CAPABILITIES },
     });
     expect(invocation).not.toBe(MEMORY_INVOCATION_UNAVAILABLE);
-    if (invocation === MEMORY_INVOCATION_UNAVAILABLE) {
+    if (isMemoryInvocationUnavailable(invocation)) {
       return;
     }
     await expect(
@@ -692,7 +704,7 @@ describe("authorized memory read invocation", () => {
       capability: { authorization: COMPLETE_MEMORY_AUTHORIZATION_CAPABILITIES },
     });
     expect(invocation).not.toBe(MEMORY_INVOCATION_UNAVAILABLE);
-    if (invocation === MEMORY_INVOCATION_UNAVAILABLE) {
+    if (isMemoryInvocationUnavailable(invocation)) {
       return;
     }
     await expect(
@@ -750,11 +762,11 @@ describe("authorized memory read invocation", () => {
     mocks.admit.mockResolvedValue({ ok: true, runtime });
 
     const invocation = await createAuthorizedMemoryReadInvocation({ context: {} as never });
-    if (invocation === MEMORY_INVOCATION_UNAVAILABLE) {
+    if (isMemoryInvocationUnavailable(invocation)) {
       throw new Error("fixture failed to admit virtual provider");
     }
     const view = await materializeAuthorizedMemoryVirtualView({ invocation });
-    if (view === MEMORY_INVOCATION_UNAVAILABLE) {
+    if (isMemoryInvocationUnavailable(view)) {
       throw new Error("fixture failed to materialize virtual view");
     }
     await expect(
@@ -797,13 +809,17 @@ describe("authorized memory read invocation", () => {
     });
 
     const invocation = await createAuthorizedMemoryDeriveInvocation({ context: {} as never });
-    if (invocation === MEMORY_INVOCATION_UNAVAILABLE) {
+    if (isMemoryInvocationUnavailable(invocation)) {
       throw new Error("fixture failed to admit derive invocation");
     }
 
-    await expect(materializeAuthorizedMemoryVirtualView({ invocation })).resolves.toBe(
-      MEMORY_INVOCATION_UNAVAILABLE,
-    );
+    // JavaScript callers can bypass the opaque TypeScript brand, so prove the
+    // runtime boundary still refuses a derive invocation on the generic FS path.
+    await expect(
+      materializeAuthorizedMemoryVirtualView({
+        invocation: invocation as unknown as AuthorizedMemoryReadInvocation,
+      }),
+    ).resolves.toBe(MEMORY_INVOCATION_UNAVAILABLE);
     expect(admittedVirtualView.materializeAuthorizedVirtualView).not.toHaveBeenCalled();
   });
 
@@ -852,7 +868,7 @@ describe("authorized memory read invocation", () => {
     mocks.admit.mockResolvedValue({ ok: true, runtime });
 
     const invocation = await createAuthorizedMemoryReadInvocation({ context: {} as never });
-    if (invocation === MEMORY_INVOCATION_UNAVAILABLE) {
+    if (isMemoryInvocationUnavailable(invocation)) {
       throw new Error("fixture failed to admit virtual provider");
     }
     await expect(materializeAuthorizedMemoryVirtualView({ invocation })).resolves.toBe(
@@ -906,11 +922,11 @@ describe("authorized memory read invocation", () => {
     mocks.admit.mockResolvedValue({ ok: true, runtime });
 
     const invocation = await createAuthorizedMemoryReadInvocation({ context: {} as never });
-    if (invocation === MEMORY_INVOCATION_UNAVAILABLE) {
+    if (isMemoryInvocationUnavailable(invocation)) {
       throw new Error("fixture failed to admit virtual provider");
     }
     const view = await materializeAuthorizedMemoryVirtualView({ invocation });
-    if (view === MEMORY_INVOCATION_UNAVAILABLE) {
+    if (isMemoryInvocationUnavailable(view)) {
       throw new Error("fixture failed to materialize virtual view");
     }
     issuedView.revision = "replacement-revision";
@@ -927,10 +943,12 @@ describe("authorized memory read invocation", () => {
       }),
     ).resolves.toBe(MEMORY_INVOCATION_UNAVAILABLE);
     expect(admittedVirtualView.readAuthorizedVirtualFile).toHaveBeenCalledOnce();
-    expect(admittedVirtualView.readAuthorizedVirtualFile.mock.calls[0]?.[0]).toMatchObject({
-      view: expect.objectContaining({ revision: "revision-1" }),
-      virtualPath: "private/1.md",
-    });
+    expect(admittedVirtualView.readAuthorizedVirtualFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        view: expect.objectContaining({ revision: "revision-1" }),
+        virtualPath: "private/1.md",
+      }),
+    );
   });
 
   it("keeps the admitted virtual provider when the mutable runtime registry object is replaced", async () => {
@@ -979,7 +997,7 @@ describe("authorized memory read invocation", () => {
     mocks.admit.mockResolvedValue({ ok: true, runtime });
 
     const invocation = await createAuthorizedMemoryReadInvocation({ context: {} as never });
-    if (invocation === MEMORY_INVOCATION_UNAVAILABLE) {
+    if (isMemoryInvocationUnavailable(invocation)) {
       throw new Error("fixture failed to admit virtual provider");
     }
     runtime.virtualView = replacement;
@@ -1061,9 +1079,9 @@ describe("authorized resource derivation invocation", () => {
     mocks.materialize.mockReturnValue(createDeriveContext());
     mocks.admit.mockResolvedValue({ ok: true, runtime });
 
-    await expect(
-      createAuthorizedMemoryDeriveInvocation({ context: {} as never }),
-    ).resolves.toBe(MEMORY_INVOCATION_UNAVAILABLE);
+    await expect(createAuthorizedMemoryDeriveInvocation({ context: {} as never })).resolves.toBe(
+      MEMORY_INVOCATION_UNAVAILABLE,
+    );
     expect(runtime.readAuthorized).not.toHaveBeenCalled();
     expect(runtime.searchAuthorized).not.toHaveBeenCalled();
     expect(runtime.writeAuthorized).not.toHaveBeenCalled();
@@ -1075,7 +1093,9 @@ describe("authorized resource derivation invocation", () => {
       authorize: vi.fn().mockResolvedValue(createDerivePlan([handle])),
       readAuthorized: vi
         .fn()
-        .mockImplementation(async () => createEnvelope({ text: "scoped source", path: "memory/a.md" })),
+        .mockImplementation(async () =>
+          createEnvelope({ text: "scoped source", path: "memory/a.md" }),
+        ),
       searchAuthorized: vi.fn(),
       writeAuthorized: vi.fn().mockResolvedValue({
         version: 1,
@@ -1089,12 +1109,18 @@ describe("authorized resource derivation invocation", () => {
     mocks.admit.mockResolvedValue({ ok: true, runtime });
 
     const invocation = await createAuthorizedMemoryDeriveInvocation({ context: {} as never });
-    if (invocation === MEMORY_INVOCATION_UNAVAILABLE) {
+    if (isMemoryInvocationUnavailable(invocation)) {
       throw new Error("fixture failed to create a derive invocation");
     }
     await expect(collectAuthorizedMemoryDerivationSources({ invocation })).resolves.toEqual([
       { text: "scoped source", path: "memory/a.md" },
     ]);
+    expect(runtime.readAuthorized).toHaveBeenCalledWith(
+      expect.objectContaining({
+        context: expect.objectContaining({ operation: "derive" }),
+        plan: expect.objectContaining({ operation: "derive" }),
+      }),
+    );
     await expect(
       commitAuthorizedMemoryDerivationForInvocation({
         invocation,
@@ -1119,6 +1145,32 @@ describe("authorized resource derivation invocation", () => {
     );
   });
 
+  it("fails source freshness before model dispatch when a recorded source is revoked", async () => {
+    const handle = createSourceHandle();
+    const runtime = {
+      authorize: vi.fn().mockResolvedValue(createDerivePlan([handle])),
+      readAuthorized: vi
+        .fn()
+        .mockResolvedValueOnce(createEnvelope({ text: "scoped source", path: "memory/a.md" }))
+        .mockRejectedValueOnce(new Error("source revoked")),
+      searchAuthorized: vi.fn(),
+      writeAuthorized: vi.fn(),
+    };
+    mocks.materialize.mockReturnValue(createDeriveContext());
+    mocks.admit.mockResolvedValue({ ok: true, runtime });
+
+    const invocation = await createAuthorizedMemoryDeriveInvocation({ context: {} as never });
+    if (isMemoryInvocationUnavailable(invocation)) {
+      throw new Error("fixture failed to create a derive invocation");
+    }
+    const sources = await collectAuthorizedMemoryDerivationSources({ invocation });
+    expect(runtime.readAuthorized).toHaveBeenCalledOnce();
+    expect(sources).toHaveLength(1);
+    await expect(recheckAuthorizedMemoryDerivationSources({ invocation })).resolves.toBe(false);
+    expect(runtime.readAuthorized).toHaveBeenCalledTimes(2);
+    expect(runtime.writeAuthorized).not.toHaveBeenCalled();
+  });
+
   it("does not write when this derive invocation has exposed no source content", async () => {
     const runtime = {
       authorize: vi.fn().mockResolvedValue(createDerivePlan()),
@@ -1130,7 +1182,7 @@ describe("authorized resource derivation invocation", () => {
     mocks.admit.mockResolvedValue({ ok: true, runtime });
 
     const invocation = await createAuthorizedMemoryDeriveInvocation({ context: {} as never });
-    if (invocation === MEMORY_INVOCATION_UNAVAILABLE) {
+    if (isMemoryInvocationUnavailable(invocation)) {
       throw new Error("fixture failed to create a derive invocation");
     }
     await expect(
@@ -1141,6 +1193,62 @@ describe("authorized resource derivation invocation", () => {
       }),
     ).resolves.toBe(MEMORY_INVOCATION_UNAVAILABLE);
     expect(runtime.writeAuthorized).not.toHaveBeenCalled();
+  });
+
+  it("stages a sealed compaction only through a derive write invocation", async () => {
+    const transcriptSource = {
+      kind: "transcript" as const,
+      sessionId: "session-1",
+      eventSeqs: [1],
+      sourcePolicySetId: "policy-set-1",
+      deliveryAudiencesJson: '[{"kind":"user","id":"alice"}]',
+    };
+    const staged = {
+      resourceRevisionId: "sealed-revision-1",
+      commitInTransaction: vi.fn(),
+    };
+    const deriveRuntime = {
+      authorize: vi.fn().mockResolvedValue(createDerivePlan()),
+      stageSealedCompaction: vi.fn().mockResolvedValue(staged),
+    };
+    mocks.materialize.mockReturnValue(createDeriveContext());
+    mocks.admit.mockResolvedValue({ ok: true, runtime: deriveRuntime });
+    const deriveInvocation = await createAuthorizedMemoryWriteInvocation({ context: {} as never });
+    if (isMemoryInvocationUnavailable(deriveInvocation)) {
+      throw new Error("fixture failed to create a derive write invocation");
+    }
+    await expect(
+      stageAuthorizedMemorySealedCompactionForInvocation({
+        invocation: deriveInvocation,
+        content: "sealed summary",
+        transcriptSource,
+      }),
+    ).resolves.toBe(staged);
+    expect(deriveRuntime.stageSealedCompaction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        context: expect.objectContaining({ operation: "derive" }),
+        plan: expect.objectContaining({ operation: "derive" }),
+      }),
+    );
+
+    const appendRuntime = {
+      authorize: vi.fn().mockResolvedValue(createWritePlan()),
+      stageSealedCompaction: vi.fn(),
+    };
+    mocks.materialize.mockReturnValue(createWriteContext());
+    mocks.admit.mockResolvedValue({ ok: true, runtime: appendRuntime });
+    const appendInvocation = await createAuthorizedMemoryWriteInvocation({ context: {} as never });
+    if (isMemoryInvocationUnavailable(appendInvocation)) {
+      throw new Error("fixture failed to create an append write invocation");
+    }
+    await expect(
+      stageAuthorizedMemorySealedCompactionForInvocation({
+        invocation: appendInvocation,
+        content: "must not stage",
+        transcriptSource,
+      }),
+    ).resolves.toBe(MEMORY_INVOCATION_UNAVAILABLE);
+    expect(appendRuntime.stageSealedCompaction).not.toHaveBeenCalled();
   });
 });
 
@@ -1166,7 +1274,7 @@ describe("authorized memory write invocation", () => {
     mocks.admit.mockResolvedValue({ ok: true, runtime });
     const invocation = await createAuthorizedMemoryWriteInvocation({ context: {} as never });
     expect(invocation).not.toBe(MEMORY_INVOCATION_UNAVAILABLE);
-    if (invocation === MEMORY_INVOCATION_UNAVAILABLE) {
+    if (isMemoryInvocationUnavailable(invocation)) {
       return;
     }
     await expect(
@@ -1194,6 +1302,63 @@ describe("authorized memory write invocation", () => {
         }),
       }),
     );
+    await expect(
+      writeAuthorizedMemoryForInvocation({
+        invocation,
+        mutation: {
+          version: 1,
+          kind: "derive",
+          mutationId: "derive-through-append",
+          idempotencyKey: "derive-through-append",
+          content: "must not write",
+          contentType: "markdown",
+          derivationPurpose: "dreaming",
+          sourceHandles: [],
+        },
+      }),
+    ).resolves.toBe(MEMORY_INVOCATION_UNAVAILABLE);
+    expect(runtime.writeAuthorized).toHaveBeenCalledTimes(1);
+  });
+
+  it("never converts a derive writer into an append remember operation", async () => {
+    const deriveContext = { ...createContext(), operation: "derive" as const };
+    const derivePlan = {
+      ...createPlan(),
+      operation: "derive" as const,
+      mounts: [
+        {
+          version: 1 as const,
+          agentId: "main",
+          mountHandle: "derive-mount",
+          capabilities: ["retrieve", "read", "derive"] as const,
+          audienceRevision: "derive-audience",
+        },
+      ],
+    };
+    const runtime = {
+      authorize: vi.fn().mockResolvedValue(derivePlan),
+      writeAuthorized: vi.fn(),
+    };
+    mocks.materialize.mockReturnValue(deriveContext);
+    mocks.admit.mockResolvedValue({ ok: true, runtime });
+    const invocation = await createAuthorizedMemoryWriteInvocation({ context: {} as never });
+    if (isMemoryInvocationUnavailable(invocation)) {
+      throw new Error("fixture failed to create a derive write invocation");
+    }
+    await expect(
+      writeAuthorizedMemoryForInvocation({
+        invocation,
+        mutation: {
+          version: 1,
+          kind: "remember",
+          mutationId: "remember-through-derive",
+          idempotencyKey: "remember-through-derive",
+          content: "must not write",
+          contentType: "markdown",
+        },
+      }),
+    ).resolves.toBe(MEMORY_INVOCATION_UNAVAILABLE);
+    expect(runtime.writeAuthorized).not.toHaveBeenCalled();
   });
 
   it("fails closed after the trusted write facts are no longer current", async () => {
@@ -1205,7 +1370,7 @@ describe("authorized memory write invocation", () => {
     mocks.materialize.mockReturnValueOnce(context).mockReturnValueOnce(undefined);
     mocks.admit.mockResolvedValue({ ok: true, runtime });
     const invocation = await createAuthorizedMemoryWriteInvocation({ context: {} as never });
-    if (invocation === MEMORY_INVOCATION_UNAVAILABLE) {
+    if (isMemoryInvocationUnavailable(invocation)) {
       throw new Error("fixture failed to create a write invocation");
     }
     await expect(

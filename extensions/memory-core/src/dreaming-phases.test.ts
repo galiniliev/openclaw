@@ -6,6 +6,7 @@ import { expectDefined } from "@openclaw/normalization-core";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { RequestScopedSubagentRuntimeError } from "openclaw/plugin-sdk/error-runtime";
 import {
+  isLegacyMemorySurfaceDisabled,
   resolveMemoryDreamingPluginConfig,
   resolveSessionTranscriptsDirForAgent,
 } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
@@ -13,8 +14,10 @@ import { clearRuntimeConfigSnapshot } from "openclaw/plugin-sdk/runtime-config-s
 import { upsertSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import { appendSessionTranscriptMessageByIdentity } from "openclaw/plugin-sdk/session-transcript-runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { filterToOnePromotionAuthorizedView } from "./dreaming-consolidation-candidates.js";
 import {
   filterRecallEntriesWithinLookback,
+  issueLegacyDreamingWorkspaceLease,
   previewRemDreaming,
   runDreamingSweepPhases,
   seedHistoricalDailyMemorySignals,
@@ -23,7 +26,6 @@ import {
   DREAMING_DAILY_PROVENANCE_NAMESPACE,
   writeMemoryCoreWorkspaceEntry,
 } from "./dreaming-state.js";
-import { filterToOnePromotionAuthorizedView } from "./dreaming-consolidation-candidates.js";
 import { previewRemHarness } from "./rem-harness.js";
 import { writeSessionIngestionState } from "./session-ingestion.js";
 import {
@@ -38,6 +40,10 @@ import {
   shortTermTestState as shortTermTesting,
 } from "./test-helpers.js";
 
+vi.mock("openclaw/plugin-sdk/memory-core-host-runtime-core", { spy: true });
+
+const isLegacyMemorySurfaceDisabledMock = vi.mocked(isLegacyMemorySurfaceDisabled);
+isLegacyMemorySurfaceDisabledMock.mockReturnValue(false);
 const { createTempWorkspace } = createMemoryCoreTestHarness();
 const DREAMING_TEST_BASE_TIME = new Date("2026-04-05T10:00:00.000Z");
 const DREAMING_TEST_DAY = "2026-04-05";
@@ -94,6 +100,60 @@ function restoreDreamingTestEnv(): void {
 
 afterEach(() => {
   restoreDreamingTestEnv();
+  isLegacyMemorySurfaceDisabledMock.mockReset();
+  isLegacyMemorySurfaceDisabledMock.mockReturnValue(false);
+});
+
+function runLegacyDreamingSweepPhases(
+  params: Omit<Parameters<typeof runDreamingSweepPhases>[0], "lease"> & {
+    agentId: string;
+    workspaceDir: string;
+  },
+) {
+  const cfg = params.cfg?.agents
+    ? params.cfg
+    : ({
+        ...params.cfg,
+        agents: {
+          list: [{ id: params.agentId, workspace: params.workspaceDir }],
+        },
+      } as OpenClawConfig);
+  const lease = issueLegacyDreamingWorkspaceLease({
+    agentId: params.agentId,
+    cfg,
+  });
+  if (!lease) {
+    throw new Error("expected legacy dreaming workspace lease");
+  }
+  const { agentId: _agentId, workspaceDir: _workspaceDir, ...phaseParams } = params;
+  return runDreamingSweepPhases({ ...phaseParams, lease });
+}
+
+it("rejects direct legacy workspace dreaming after cut-over", async () => {
+  const workspaceDir = await createTempWorkspace("openclaw-dreaming-cutover-");
+  isLegacyMemorySurfaceDisabledMock.mockImplementation((agentId) => agentId === "alpha");
+
+  expect(
+    issueLegacyDreamingWorkspaceLease({
+      agentId: "beta",
+      cfg: {
+        agents: {
+          list: [
+            { id: "alpha", workspace: workspaceDir },
+            { id: "beta", workspace: workspaceDir },
+          ],
+        },
+      },
+    }),
+  ).toBeUndefined();
+  const forgedLease = Object.freeze({}) as Parameters<typeof runDreamingSweepPhases>[0]["lease"];
+  await expect(
+    runDreamingSweepPhases({
+      lease: forgedLease,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    }),
+  ).rejects.toThrow("legacy memory workspace access is unavailable");
+  expect(await fs.readdir(workspaceDir)).toEqual([]);
 });
 
 function requireCandidateByKey<T extends { key: string }>(candidates: T[], key: string): T {
@@ -347,7 +407,7 @@ function createHarness(
         },
       },
     };
-    await runDreamingSweepPhases({
+    await runLegacyDreamingSweepPhases({
       agentId: "main",
       workspaceDir: activeWorkspace,
       pluginConfig: selectedPluginConfig,
@@ -576,7 +636,7 @@ describe("memory-core dreaming phases", () => {
     const workspaceHash = createHash("sha1").update(workspaceDir).digest("hex").slice(0, 12);
     const expectedSessionKey = `agent:main:dreaming-narrative-memory-core-v2-light-${workspaceHash}`;
 
-    await runDreamingSweepPhases({
+    await runLegacyDreamingSweepPhases({
       agentId: "main",
       workspaceDir,
       cfg: testConfig,
@@ -644,7 +704,7 @@ describe("memory-core dreaming phases", () => {
     };
 
     await expect(
-      runDreamingSweepPhases({
+      runLegacyDreamingSweepPhases({
         agentId: "main",
         workspaceDir,
         cfg: testConfig,
@@ -879,7 +939,7 @@ describe("memory-core dreaming phases", () => {
       error: vi.fn(),
     };
 
-    await runDreamingSweepPhases({
+    await runLegacyDreamingSweepPhases({
       agentId: "main",
       workspaceDir,
       cfg: testConfig,
@@ -3200,7 +3260,7 @@ describe("memory-core dreaming phases", () => {
 
     await withDreamingTestClock(async () => {
       setDreamingTestTime();
-      await runDreamingSweepPhases({
+      await runLegacyDreamingSweepPhases({
         agentId: "main",
         workspaceDir,
         pluginConfig: {

@@ -18,6 +18,7 @@ import {
   resolveMemoryDreamingWorkspaces,
   resolveMemoryRemDreamingConfig,
 } from "../../memory-host-sdk/dreaming.js";
+import { isMemoryIsolationCutoverAgent } from "../../plugins/memory-cutover.js";
 import { getActiveMemorySearchManager } from "../../plugins/memory-runtime.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
 import { formatError } from "../server-utils.js";
@@ -393,13 +394,14 @@ function trimDreamingEntries(
   return selected;
 }
 
-async function loadDreamingStoreStats(
-  workspaceDir: string,
-  nowMs: number,
-  timezone?: string,
-): Promise<DreamingStoreStats> {
+async function loadDreamingStoreStats(params: {
+  cfg: OpenClawConfig;
+  agentId: string;
+  nowMs: number;
+  timezone?: string;
+}): Promise<DreamingStoreStats> {
   try {
-    return await loadShortTermPromotionDreamingStats({ workspaceDir, nowMs, timezone });
+    return await loadShortTermPromotionDreamingStats(params);
   } catch (err) {
     return {
       shortTermCount: 0,
@@ -418,6 +420,26 @@ async function loadDreamingStoreStats(
       storeError: formatError(err),
     };
   }
+}
+
+function resolveLegacyDoctorMemoryWorkspace(
+  cfg: OpenClawConfig,
+  agentId: string,
+): { workspaceDir: string } | null {
+  if (isMemoryIsolationCutoverAgent(agentId)) {
+    return null;
+  }
+  const workspace = resolveMemoryDreamingWorkspaces(cfg, {
+    primaryWorkspaceDir: resolveAgentWorkspaceDir(cfg, agentId),
+    primaryAgentId: agentId,
+  }).find((entry) => entry.agentIds.includes(agentId));
+  if (
+    !workspace ||
+    workspace.agentIds.some((ownerAgentId) => isMemoryIsolationCutoverAgent(ownerAgentId))
+  ) {
+    return null;
+  }
+  return { workspaceDir: workspace.workspaceDir };
 }
 
 function mergeDreamingStoreStats(stats: DreamingStoreStats[]): DreamingStoreStats {
@@ -681,16 +703,30 @@ function resolveDoctorMemoryTarget(
 ): {
   cfg: OpenClawConfig;
   agentId: string;
+  requestedAgentId?: string;
   workspaceDir: string;
 } | null {
   const resolved = resolveDoctorMemoryAgent(context, params, respond);
   if (!resolved) {
     return null;
   }
+  const workspace = resolveLegacyDoctorMemoryWorkspace(resolved.cfg, resolved.agentId);
+  if (!workspace) {
+    respond(
+      false,
+      undefined,
+      errorShape(
+        ErrorCodes.UNAVAILABLE,
+        "Legacy dreaming maintenance is unavailable after scoped-memory cutover.",
+      ),
+    );
+    return null;
+  }
   return {
     cfg: resolved.cfg,
     agentId: resolved.agentId,
-    workspaceDir: resolveAgentWorkspaceDir(resolved.cfg, resolved.agentId),
+    ...(resolved.requestedAgentId ? { requestedAgentId: resolved.requestedAgentId } : {}),
+    workspaceDir: workspace.workspaceDir,
   };
 }
 
@@ -702,11 +738,11 @@ const SKIPPED_MEMORY_EMBEDDING_PROBE = {
 
 export const doctorHandlers: GatewayRequestHandlers = {
   "doctor.memory.status": async ({ respond, context, params }) => {
-    const resolved = resolveDoctorMemoryAgent(context, params, respond);
-    if (!resolved) {
+    const target = resolveDoctorMemoryTarget(context, params, respond);
+    if (!target) {
       return;
     }
-    const { cfg, agentId, requestedAgentId } = resolved;
+    const { cfg, agentId, requestedAgentId, workspaceDir } = target;
     const { manager, error } = await getActiveMemorySearchManager({
       cfg,
       agentId,
@@ -738,24 +774,33 @@ export const doctorHandlers: GatewayRequestHandlers = {
       }
       const nowMs = Date.now();
       const dreamingConfig = resolveDreamingConfig(cfg);
-      const workspaceDir = normalizeTrimmedString((status as Record<string, unknown>).workspaceDir);
-      const configuredWorkspaces = requestedAgentId
-        ? workspaceDir
-          ? [workspaceDir]
-          : []
-        : resolveMemoryDreamingWorkspaces(cfg, {
-            primaryWorkspaceDir: workspaceDir,
-            primaryAgentId: agentId,
-          }).map((entry) => entry.workspaceDir);
-      const allWorkspaces =
-        configuredWorkspaces.length > 0 ? configuredWorkspaces : workspaceDir ? [workspaceDir] : [];
+      const allWorkspaces = resolveMemoryDreamingWorkspaces(cfg, {
+        primaryWorkspaceDir: status.workspaceDir ?? workspaceDir,
+        primaryAgentId: agentId,
+      }).filter(
+        (entry) =>
+          (!requestedAgentId || entry.agentIds.includes(agentId)) &&
+          !entry.agentIds.some((ownerAgentId) => isMemoryIsolationCutoverAgent(ownerAgentId)),
+      );
       const storeStats =
         allWorkspaces.length > 0
           ? mergeDreamingStoreStats(
               await Promise.all(
-                allWorkspaces.map((entry) =>
-                  loadDreamingStoreStats(entry, nowMs, dreamingConfig.timezone),
-                ),
+                allWorkspaces.flatMap((entry) => {
+                  const workspaceAgentId = entry.agentIds[0];
+                  return workspaceAgentId
+                    ? [
+                        loadDreamingStoreStats({
+                          cfg,
+                          agentId: workspaceAgentId,
+                          nowMs,
+                          ...(dreamingConfig.timezone !== undefined
+                            ? { timezone: dreamingConfig.timezone }
+                            : {}),
+                        }),
+                      ]
+                    : [];
+                }),
               ),
             )
           : {
@@ -871,7 +916,8 @@ export const doctorHandlers: GatewayRequestHandlers = {
       })
       .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
     const written = await writeBackfillDiaryEntries({
-      workspaceDir,
+      cfg,
+      agentId,
       entries,
       timezone: remConfig.timezone,
     });
@@ -892,8 +938,8 @@ export const doctorHandlers: GatewayRequestHandlers = {
     if (!target) {
       return;
     }
-    const { agentId, workspaceDir } = target;
-    const removed = await removeBackfillDiaryEntries({ workspaceDir });
+    const { cfg, agentId, workspaceDir } = target;
+    const removed = await removeBackfillDiaryEntries({ cfg, agentId });
     const dreamDiary = await readDreamDiary(workspaceDir);
     const payload: DoctorMemoryDreamActionPayload = {
       agentId,
@@ -909,8 +955,8 @@ export const doctorHandlers: GatewayRequestHandlers = {
     if (!target) {
       return;
     }
-    const { agentId, workspaceDir } = target;
-    const removed = await removeGroundedShortTermCandidates({ workspaceDir });
+    const { cfg, agentId } = target;
+    const removed = await removeGroundedShortTermCandidates({ cfg, agentId });
     const payload: DoctorMemoryDreamActionPayload = {
       agentId,
       action: "resetGroundedShortTerm",
@@ -923,8 +969,8 @@ export const doctorHandlers: GatewayRequestHandlers = {
     if (!target) {
       return;
     }
-    const { agentId, workspaceDir } = target;
-    const repair = await repairDreamingArtifacts({ workspaceDir });
+    const { cfg, agentId } = target;
+    const repair = await repairDreamingArtifacts({ cfg, agentId });
     const payload: DoctorMemoryDreamActionPayload = {
       agentId,
       action: "repairDreamingArtifacts",
@@ -942,8 +988,8 @@ export const doctorHandlers: GatewayRequestHandlers = {
     if (!target) {
       return;
     }
-    const { agentId, workspaceDir } = target;
-    const dedupe = await dedupeDreamDiaryEntries({ workspaceDir });
+    const { cfg, agentId, workspaceDir } = target;
+    const dedupe = await dedupeDreamDiaryEntries({ cfg, agentId });
     const dreamDiary = await readDreamDiary(workspaceDir);
     const payload: DoctorMemoryDreamActionPayload = {
       agentId,

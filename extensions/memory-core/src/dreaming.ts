@@ -30,8 +30,8 @@ import {
 import { peekSystemEventEntries } from "openclaw/plugin-sdk/system-event-runtime";
 import { appendFailedDreamingEvent } from "./dreaming-events.js";
 import type { NarrativePhaseData } from "./dreaming-narrative.js";
-import { runScopedDreamingConsolidation } from "./scoped-dreaming.js";
 import { formatErrorMessage, includesSystemEventToken } from "./dreaming-shared.js";
+import { runScopedDreamingConsolidation, runScopedDreamingPromotion } from "./scoped-dreaming.js";
 
 const RUNTIME_CRON_RECONCILE_INTERVAL_MS = 60_000;
 const STARTUP_CRON_RETRY_DELAY_MS = 5_000;
@@ -477,13 +477,16 @@ async function runScopedDreamingPromotionIfTriggered(params: {
   if (!agentId) {
     return { handled: true, reason: "memory-core: scoped dreaming unavailable" };
   }
-  const host = await prepareAuthorizedMemoryBackgroundDerivationHost({
+  const hostParams = {
     agentId,
     ...(params.sessionKey ? { sessionKey: params.sessionKey } : {}),
     ...(params.sessionId ? { sessionId: params.sessionId } : {}),
     ...(params.runId ? { runId: params.runId } : {}),
     ...(params.messageChannel ? { messageChannel: params.messageChannel } : {}),
     ...(params.agentAccountId ? { agentAccountId: params.agentAccountId } : {}),
+  };
+  const host = await prepareAuthorizedMemoryBackgroundDerivationHost({
+    ...hostParams,
     purpose: "dreaming",
   });
   if (!host) {
@@ -496,8 +499,24 @@ async function runScopedDreamingPromotionIfTriggered(params: {
   if (result.status === "unavailable") {
     return { handled: true, reason: "memory-core: scoped dreaming unavailable" };
   }
+  // Promotion gets a fresh operational subject, derive plan, and source receipts. Reusing the
+  // consolidation host would let an output phase retain authority across a separate model turn.
+  const promotionHost = await prepareAuthorizedMemoryBackgroundDerivationHost({
+    ...hostParams,
+    purpose: "promotion",
+  });
+  if (!promotionHost) {
+    return { handled: true, reason: "memory-core: scoped dreaming unavailable" };
+  }
+  const promotion = await runScopedDreamingPromotion({
+    host: promotionHost,
+    complete: params.complete,
+  });
+  if (promotion.status !== "completed") {
+    return { handled: true, reason: "memory-core: scoped dreaming unavailable" };
+  }
   params.logger.info(
-    `memory-core: scoped dreaming committed one derived revision from ${result.sourceCount} source resource(s).`,
+    `memory-core: scoped dreaming committed consolidation and promotion revisions from ${result.sourceCount} and ${promotion.sourceCount} source resource(s).`,
   );
   return { handled: true, reason: "memory-core: scoped dreaming completed" };
 }
@@ -644,6 +663,12 @@ async function runShortTermDreamingPromotionIfTriggered(params: {
   if (!params.config.enabled) {
     return { handled: true, reason: "memory-core: short-term dreaming disabled" };
   }
+  if (!params.cfg) {
+    params.logger.warn(
+      "memory-core: dreaming promotion skipped because configured memory authority is unavailable.",
+    );
+    return { handled: true, reason: "memory-core: short-term dreaming missing authority" };
+  }
 
   const recencyHalfLifeDays =
     params.config.recencyHalfLifeDays ?? DEFAULT_MEMORY_DREAMING_RECENCY_HALF_LIFE_DAYS;
@@ -684,18 +709,13 @@ async function runShortTermDreamingPromotionIfTriggered(params: {
     }
     return agentIds.toSorted()[0] ?? triggerAgentId;
   };
-  if (params.cfg) {
-    for (const entry of resolveMemoryDreamingWorkspaces(params.cfg, {
-      primaryWorkspaceDir: fallbackWorkspaceDir,
-      // Attribute the hook's own workspace to the agent whose turn triggered the sweep;
-      // the host falls back to the roster default agent when the turn has no id.
-      ...(triggerAgentId ? { primaryAgentId: triggerAgentId } : {}),
-    })) {
-      addWorkspace(entry.workspaceDir, entry.agentIds);
-    }
-  }
-  if (workspaces.length === 0 && fallbackWorkspaceDir && triggerAgentId) {
-    addWorkspace(fallbackWorkspaceDir, [triggerAgentId]);
+  for (const entry of resolveMemoryDreamingWorkspaces(params.cfg, {
+    primaryWorkspaceDir: fallbackWorkspaceDir,
+    // Attribute the hook's own workspace to the agent whose turn triggered the sweep;
+    // the host falls back to the roster default agent when the turn has no id.
+    ...(triggerAgentId ? { primaryAgentId: triggerAgentId } : {}),
+  })) {
+    addWorkspace(entry.workspaceDir, entry.agentIds);
   }
   if (workspaces.length === 0) {
     if (skippedIsolatedWorkspace) {
@@ -730,7 +750,11 @@ async function runShortTermDreamingPromotionIfTriggered(params: {
   const [
     { writeDeepDreamingReport },
     { appendFallbackNarrativeEntry, runDreamNarrative },
-    { runDreamingSweepPhases },
+    {
+      isLegacyDreamingWorkspaceLeaseCurrent,
+      issueLegacyDreamingWorkspaceLease,
+      runDreamingSweepPhases,
+    },
     {
       applyShortTermPromotions,
       repairShortTermPromotionArtifacts,
@@ -744,10 +768,20 @@ async function runShortTermDreamingPromotionIfTriggered(params: {
   ]);
   for (const { agentId, workspaceDir } of workspaces) {
     const sweepNowMs = Date.now();
+    const lease = issueLegacyDreamingWorkspaceLease({
+      agentId,
+      cfg: params.cfg,
+    });
+    if (!lease) {
+      failedWorkspaces += 1;
+      params.logger.warn(
+        `memory-core: dreaming sweep skipped because workspace access is unavailable [workspace=${workspaceDir}].`,
+      );
+      continue;
+    }
     try {
       const phaseResult = await runDreamingSweepPhases({
-        agentId,
-        workspaceDir,
+        lease,
         pluginConfig,
         cfg: params.cfg,
         logger: params.logger,
@@ -765,6 +799,17 @@ async function runShortTermDreamingPromotionIfTriggered(params: {
       continue;
     }
 
+    // The raw compatibility sweep is valid only while the owner remains out of cut-over. Recheck
+    // before each later reader/writer so a direct phase call cannot turn a newly enforced agent
+    // back into a workspace-backed producer.
+    if (!isLegacyDreamingWorkspaceLeaseCurrent(lease)) {
+      failedWorkspaces += 1;
+      params.logger.warn(
+        `memory-core: dreaming promotion skipped because workspace access is unavailable [workspace=${workspaceDir}].`,
+      );
+      continue;
+    }
+
     try {
       const reportLines: string[] = [];
       const repair = await repairShortTermPromotionArtifacts({ workspaceDir });
@@ -773,6 +818,9 @@ async function runShortTermDreamingPromotionIfTriggered(params: {
           `memory-core: normalized recall artifacts before dreaming (${formatRepairSummary(repair)}) [workspace=${workspaceDir}].`,
         );
         reportLines.push(`- Repaired recall artifacts: ${formatRepairSummary(repair)}.`);
+      }
+      if (!isLegacyDreamingWorkspaceLeaseCurrent(lease)) {
+        throw new Error("legacy dreaming workspace access is unavailable");
       }
       const candidates = await rankShortTermPromotionCandidates({
         workspaceDir,
@@ -799,6 +847,9 @@ async function runShortTermDreamingPromotionIfTriggered(params: {
         params.logger.info(
           `memory-core: dreaming candidate details [workspace=${workspaceDir}] ${candidateSummary}`,
         );
+      }
+      if (!isLegacyDreamingWorkspaceLeaseCurrent(lease)) {
+        throw new Error("legacy dreaming workspace access is unavailable");
       }
       const applied = await applyShortTermPromotions({
         workspaceDir,
@@ -834,6 +885,9 @@ async function runShortTermDreamingPromotionIfTriggered(params: {
           `memory-core: dreaming applied details [workspace=${workspaceDir}] ${appliedSummary}`,
         );
       }
+      if (!isLegacyDreamingWorkspaceLeaseCurrent(lease)) {
+        throw new Error("legacy dreaming workspace access is unavailable");
+      }
       await writeDeepDreamingReport({
         workspaceDir,
         bodyLines: reportLines,
@@ -848,6 +902,9 @@ async function runShortTermDreamingPromotionIfTriggered(params: {
           snippets: candidates.map((c) => c.snippet).filter(Boolean),
           promotions: applied.appliedCandidates.map((c) => c.snippet).filter(Boolean),
         };
+        if (!isLegacyDreamingWorkspaceLeaseCurrent(lease)) {
+          throw new Error("legacy dreaming workspace access is unavailable");
+        }
         if (!params.subagent) {
           await appendFallbackNarrativeEntry({
             workspaceDir,
@@ -882,14 +939,16 @@ async function runShortTermDreamingPromotionIfTriggered(params: {
       params.logger.error(
         `memory-core: dreaming promotion failed for workspace ${workspaceDir}: ${error}`,
       );
-      await appendFailedDreamingEvent({
-        workspaceDir,
-        phase: "deep",
-        error,
-        storageMode: params.config.storage?.mode ?? "separate",
-        nowMs: sweepNowMs,
-        logger: params.logger,
-      });
+      if (isLegacyDreamingWorkspaceLeaseCurrent(lease)) {
+        await appendFailedDreamingEvent({
+          workspaceDir,
+          phase: "deep",
+          error,
+          storageMode: params.config.storage?.mode ?? "separate",
+          nowMs: sweepNowMs,
+          logger: params.logger,
+        });
+      }
     }
   }
   // A summary that reads identically whether the sweep worked or failed everywhere is how

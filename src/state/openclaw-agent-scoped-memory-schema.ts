@@ -12,6 +12,7 @@ export const AGENT_SCOPED_MEMORY_TABLES = [
   "memory_resource_revisions",
   "memory_revision_policy_requirements",
   "memory_lineage_edges",
+  "memory_child_delegation_capabilities",
   "memory_resource_subjects",
   "memory_scoped_chunks",
   "memory_scoped_chunk_vectors",
@@ -29,6 +30,9 @@ export const AGENT_SCOPED_MEMORY_TABLES = [
   "transcript_event_memory_policy_transitions",
   "memory_compaction_policies",
   "memory_compaction_policy_sources",
+  "memory_transcript_export_artifacts",
+  "memory_transcript_export_artifact_sources",
+  "memory_transcript_export_artifact_events",
 ] as const;
 
 export const AGENT_SCOPED_MEMORY_FTS_TABLE = "memory_scoped_chunks_fts";
