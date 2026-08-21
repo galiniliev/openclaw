@@ -449,6 +449,48 @@ describe("admitAuthorizedMemoryDerivation", () => {
     );
   });
 
+  it.each(["service", "agent", "system"] as const)(
+    "gives a foreground %s host an internal agent audience without resolving egress",
+    (subjectKind) => {
+      mocks.currentSession.mockReturnValue({
+        kind: "current",
+        context: {
+          agentId: "main",
+          fingerprint: `${subjectKind}-session-fingerprint`,
+          principalId: `${subjectKind}:main`,
+          sessionId: `${subjectKind}-session`,
+          sessionKey: `agent:main:${subjectKind}:session`,
+          authorityRevision: `${subjectKind}-authority-1`,
+          subject: { kind: subjectKind, principalId: `${subjectKind}:main` },
+        },
+      });
+      mocks.resolveEgressDeliveryFacts.mockReset();
+
+      expect(
+        createAuthorizedMemoryReadHost({
+          agentId: "main",
+          sessionKey: `agent:main:${subjectKind}:session`,
+          sessionId: `${subjectKind}-session`,
+          runId: "run-1",
+        }),
+      ).toBeDefined();
+
+      expect(mocks.resolveEgressDeliveryFacts).not.toHaveBeenCalled();
+      expect(mocks.createTrustedContext).toHaveBeenCalledWith(
+        expect.objectContaining({
+          facts: expect.objectContaining({
+            delivery: expect.objectContaining({
+              sink: "internal",
+              audiences: [{ kind: "agent", id: "main" }],
+              egressCapabilityIds: [],
+              egressRegistryRevision: "mer1_internal-no-egress",
+            }),
+          }),
+        }),
+      );
+    },
+  );
+
   it("rechecks background derivation sources through the host-owned invocation", async () => {
     const invocation = {};
     mocks.createDeriveInvocation.mockResolvedValue(invocation);

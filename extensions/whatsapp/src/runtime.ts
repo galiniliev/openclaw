@@ -23,8 +23,9 @@ function setWhatsAppRuntime(next: PluginRuntime): void {
 
 const getWhatsAppRuntime = runtimeStore.getRuntime;
 const getOptionalWhatsAppRuntime = runtimeStore.tryGetRuntime;
-const getWhatsAppChannelRuntime = channelRuntimeStore.getRuntime;
-const getOptionalWhatsAppChannelRuntime = channelRuntimeStore.tryGetRuntime;
+const getWhatsAppChannelRuntime: () => PluginRuntime["channel"] = channelRuntimeStore.getRuntime;
+const getOptionalWhatsAppChannelRuntime: () => PluginRuntime["channel"] | null =
+  channelRuntimeStore.tryGetRuntime;
 
 export {
   getOptionalWhatsAppChannelRuntime,

@@ -251,11 +251,11 @@ function hasCurrentEnterpriseMemoryFacts(params: {
 }
 
 /**
- * A maintenance derivation has no recipient-visible delivery path. It can use
- * only the owning agent's internal audience; reusing egress facts here would
- * make a delivery-less cron unable to derive, or let it borrow a stale route.
+ * Operational subjects have no recipient-visible delivery path. They use only
+ * the owning agent's internal audience, so cron-like work cannot borrow a
+ * stale route and a foreground autonomous run cannot be denied for lacking one.
  */
-function backgroundDeliveryFacts(context: CurrentMemorySessionContext) {
+function operationalInternalDeliveryFacts(context: CurrentMemorySessionContext) {
   return {
     sink: "internal" as const,
     audiences: [{ kind: "agent" as const, id: context.agentId }],
@@ -510,8 +510,11 @@ function createTrustedMemoryHostContext(
         egressCapabilityIds: childDelegation.facts.delivery.egressCapabilityIds,
         egressRegistryRevision: childDelegation.facts.delivery.egressRegistryRevision,
       }
-    : params.background === true
-      ? backgroundDeliveryFacts(context)
+    : params.background === true ||
+        context.subject.kind === "service" ||
+        context.subject.kind === "agent" ||
+        context.subject.kind === "system"
+      ? operationalInternalDeliveryFacts(context)
       : deliveryFacts({
           context,
           deliveryContext: params.deliveryContext,

@@ -144,6 +144,11 @@ confidential web application and store its client secret as a SecretRef.
   callback URL. Provider authority policy is sealed at startup.
 - An issuer, audience, signature, nonce, tenant, assurance, group-snapshot,
   freshness, or directory failure denies private-memory access.
+- Role and group snapshots expire at the earliest of the provider token expiry,
+  `maxSnapshotAgeMs`, and `maxAuthenticationAgeMs`. Both limits default to one
+  hour and may be configured only from one second through 24 hours. There is no
+  background refresh: a provider or directory outage therefore removes role
+  access when the current snapshot reaches that bound.
 - Membership evidence stores reduced stable references and revisions, not raw
   JWTs, access tokens, email addresses, or unconfigured groups.
 - Gateway collaboration membership and enterprise membership are separate.

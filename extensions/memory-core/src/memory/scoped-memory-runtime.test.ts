@@ -1080,6 +1080,27 @@ describe("builtin scoped authorized runtime", () => {
   });
 
   it("admits one scoped derivation store for each private or group subject", async () => {
+    const groupSession = {
+      sessionKey: "agent:main:telegram:group:derive",
+      sessionId: "group-derive-session",
+    };
+    const groupConversationPrincipalId = createConversationSession({
+      ...groupSession,
+      conversationId: "telegram-group-derive",
+      conversationTarget: "group-derive-target",
+    });
+    const currentGroupSession = createCurrentMemorySessionContext({
+      ...groupSession,
+      options: { agentId: "main" },
+    });
+    if (
+      currentGroupSession.kind !== "current" ||
+      currentGroupSession.context.subject.kind !== "conversation" ||
+      !currentGroupSession.context.conversation
+    ) {
+      throw new Error("fixture failed to admit current group conversation evidence");
+    }
+    const groupConversation = currentGroupSession.context.conversation;
     const aliceStore = createBuiltinScopedMemoryStore({
       agentId: "main",
       scopeKind: "user",
@@ -1106,9 +1127,9 @@ describe("builtin scoped authorized runtime", () => {
       agentId: "main",
       scopeKind: "conversation",
       audienceKind: "conversation",
-      audienceId: "telegram-group-derive",
+      audienceId: groupConversationPrincipalId,
       authorityKind: "conversation",
-      authorityOwnerId: "telegram-group-derive",
+      authorityOwnerId: groupConversationPrincipalId,
       defaultCapabilities: ["retrieve", "read", "derive"],
       actor: { kind: "unattributed" },
       reason: "group derivation fixture",
@@ -1144,24 +1165,34 @@ describe("builtin scoped authorized runtime", () => {
     } satisfies MemoryContentAccessContext<"derive">;
     const groupContext = {
       ...createContext("group-sender"),
-      sessionKey: "agent:main:telegram:group:derive",
-      sessionId: "group-derive-session",
+      sessionKey: groupSession.sessionKey,
+      sessionId: groupSession.sessionId,
+      sessionIdentityRevision: currentGroupSession.context.sessionIdentityRevision,
+      subjectRevision: currentGroupSession.context.subjectRevision,
       subject: {
         version: 1 as const,
         kind: "conversation" as const,
-        conversationPrincipalId: "telegram-group-derive",
-        channel: "telegram",
-        accountId: "default",
+        conversationPrincipalId: groupConversationPrincipalId,
+        channel: groupConversation.channel,
+        accountId: groupConversation.accountId,
       },
       actor: {
         kind: "unattributed" as const,
         transportAuditRef: "group-derive-audit",
-        evidenceRevision: "group-derive-revision",
+        evidenceRevision: groupConversation.evidenceRevision,
+      },
+      conversation: {
+        conversationPrincipalId: groupConversationPrincipalId,
+        channel: groupConversation.channel,
+        accountId: groupConversation.accountId,
+        evidenceRevision: groupConversation.evidenceRevision,
+        observedAt: new Date(groupConversation.observedAt).toISOString(),
+        expiresAt: new Date(groupConversation.expiresAt).toISOString(),
       },
       verifiedPrincipals: [],
       delivery: {
         sinkKind: "channel" as const,
-        audiences: [{ kind: "conversation" as const, id: "telegram-group-derive" }],
+        audiences: [{ kind: "conversation" as const, id: groupConversationPrincipalId }],
         egressCapabilityIds: ["reply.final"],
         egressRegistryRevision: "egress-group-derive",
         deliveryRevision: "delivery-group-derive",

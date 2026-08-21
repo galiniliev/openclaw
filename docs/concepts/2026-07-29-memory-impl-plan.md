@@ -1772,30 +1772,30 @@ matching GitHub labels as part of the plugin PR.
 
 Phase 4 is complete only when all of the following are demonstrated:
 
-- [x] Every enabled enterprise adapter is operator-allowlisted, manifest
+- [ ] Every enabled enterprise adapter is operator-allowlisted, manifest
       declared, unique for its provider prefix, and registered before the
       registry seals.
-- [x] Core, not the adapter, validates issuer/audience/signature or registered
+- [ ] Core, not the adapter, validates issuer/audience/signature or registered
       attestation, tenant binding, assurance, expiry, and snapshot freshness
       before constructing principals.
-- [x] Private stores never open for forged, wrong-issuer, wrong-audience,
+- [ ] Private stores never open for forged, wrong-issuer, wrong-audience,
       expired, revoked, conflicting, or unbound identities.
 - [ ] Role and native-channel evidence is revisioned, bounded by documented
       staleness, and removed fail-closed during expiry or provider outage.
-- [x] Existing `session_members` remains authoritative only for Gateway
+- [ ] Existing `session_members` remains authoritative only for Gateway
       collaborative sessions; provider membership does not create a competing
       session-sharing store.
-- [x] Operators can explain allow/deny decisions from redacted revisions,
+- [ ] Operators can explain allow/deny decisions from redacted revisions,
       subject/store kinds, collaboration roles, evidence, and rules without
       storing or revealing unauthorized memory content.
-- [x] Audit retention/export behavior is approved and implemented: there is no
+- [ ] Audit retention/export behavior is approved and implemented: there is no
       scheduled purge or access-review job; profile owners can export and
       explicitly delete their redacted audit projection, while `operator.admin`
       has the same cross-profile control without direct private-memory reads.
 - [ ] Provider verification, outage/expiry, group removal, registry sealing,
       audit explanation, and scale/fan-out tests pass, including required live
       official-provider proof.
-- [x] Any new plugin surface has matching labeler paths, GitHub labels, SDK
+- [ ] Any new plugin surface has matching labeler paths, GitHub labels, SDK
       contracts, docs, and package ownership metadata.
 
 ### Phase 4 rollback

@@ -221,12 +221,13 @@ function hasCurrentRoleMembership(params: {
   groupId: string;
   nowMs: number;
 }): boolean {
-  if (params.context.subject.kind !== "user") {
+  const subject = params.context.subject;
+  if (subject.kind !== "user") {
     return false;
   }
   return params.context.verifiedMemberships.some((membership) => {
     if (
-      membership.principalId !== params.context.subject.principalId ||
+      membership.principalId !== subject.principalId ||
       membership.groupId !== params.groupId ||
       Date.parse(membership.observedAt) > params.nowMs ||
       Date.parse(membership.expiresAt) <= params.nowMs
@@ -341,18 +342,19 @@ function listAuthorizedStores(params: {
       current_revision_id: string;
       revocation_epoch: number;
     }>;
+    const subject = params.context.subject;
     const principalIds =
-      params.context.subject.kind === "user"
-        ? [params.context.subject.principalId]
+      subject.kind === "user"
+        ? [subject.principalId]
         : params.context.verifiedPrincipals.map((principal) => principal.principalId);
     const enterpriseRoleDecisions: AuthorizedStoreSelection["enterpriseRoleDecisions"][number][] =
       [];
     const stores = rows.flatMap((row) => {
       const roleMembership =
-        row.audience_kind === "role" && params.context.subject.kind === "user"
+        row.audience_kind === "role" && subject.kind === "user"
           ? params.context.verifiedMemberships.find(
               (membership) =>
-                membership.principalId === params.context.subject.principalId &&
+                membership.principalId === subject.principalId &&
                 membership.groupId === row.audience_id &&
                 Date.parse(membership.observedAt) <= params.nowMs &&
                 Date.parse(membership.expiresAt) > params.nowMs,
