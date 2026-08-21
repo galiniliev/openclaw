@@ -1318,6 +1318,19 @@ describe("authorized memory write invocation", () => {
     expect(runtime.writeAuthorized).toHaveBeenCalledTimes(1);
   });
 
+  it("rejects project before a generic model write invocation can reach a runtime", async () => {
+    mocks.materialize.mockReturnValue({
+      ...createWriteContext(),
+      operation: "project",
+    } as unknown as MemoryAccessContext);
+
+    await expect(createAuthorizedMemoryWriteInvocation({ context: {} as never })).resolves.toBe(
+      MEMORY_INVOCATION_UNAVAILABLE,
+    );
+
+    expect(mocks.admit).not.toHaveBeenCalled();
+  });
+
   it("never converts a derive writer into an append remember operation", async () => {
     const deriveContext = { ...createContext(), operation: "derive" as const };
     const derivePlan = {
@@ -1399,7 +1412,10 @@ describe("authorized memory write invocation", () => {
     mocks.materialize.mockReturnValue(createDeriveContext());
     mocks.admit.mockResolvedValue({ ok: true, runtime: deriveRuntime });
     const deriveInvocation = await createAuthorizedMemoryWriteInvocation({ context: {} as never });
-    assertMemoryInvocationAvailable(deriveInvocation, "fixture failed to create a derive invocation");
+    assertMemoryInvocationAvailable(
+      deriveInvocation,
+      "fixture failed to create a derive invocation",
+    );
     const transcriptSource = {
       kind: "transcript" as const,
       sessionId: "session-1",
@@ -1429,7 +1445,10 @@ describe("authorized memory write invocation", () => {
     mocks.materialize.mockReturnValue(createWriteContext());
     mocks.admit.mockResolvedValue({ ok: true, runtime: appendRuntime });
     const appendInvocation = await createAuthorizedMemoryWriteInvocation({ context: {} as never });
-    assertMemoryInvocationAvailable(appendInvocation, "fixture failed to create an append invocation");
+    assertMemoryInvocationAvailable(
+      appendInvocation,
+      "fixture failed to create an append invocation",
+    );
     await expect(
       stageAuthorizedMemorySealedCompactionForInvocation({
         invocation: appendInvocation,

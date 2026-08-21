@@ -123,6 +123,12 @@ type DerivationInvocationState = Omit<ContentInvocationState<"derive">, "runtime
 type ReadInvocationState = ContentInvocationState<"read">;
 type AnyContentInvocationState = ReadInvocationState | DerivationInvocationState;
 
+function isReadMemoryAccessContext(
+  context: MemoryAccessContext,
+): context is MemoryAccessContext & Readonly<{ operation: "read" }> {
+  return context.operation === "read";
+}
+
 const VIRTUAL_ROOT_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 
 const invocationStates = new WeakMap<object, ReadInvocationState>();
@@ -143,7 +149,6 @@ type WriteOperation = Extract<
   | "replace"
   | "derive"
   | "deposit"
-  | "project"
   | "publish"
   | "import"
   | "delete"
@@ -232,7 +237,6 @@ function isWriteContext(context: MemoryAccessContext): context is MemoryAccessCo
     context.operation === "replace" ||
     context.operation === "derive" ||
     context.operation === "deposit" ||
-    context.operation === "project" ||
     context.operation === "publish" ||
     context.operation === "import" ||
     context.operation === "delete" ||
@@ -632,7 +636,7 @@ export async function issueAuthorizedMemoryChildDelegationForInvocation(params: 
   const parentContext = materializeTrustedMemoryAccessContext(params.context);
   if (
     !parentContext ||
-    parentContext.operation !== "read" ||
+    !isReadMemoryAccessContext(parentContext) ||
     parentContext.delegation ||
     params.issue.child.agentId !== parentContext.agentId
   ) {
@@ -832,8 +836,6 @@ async function createWriteInvocationState(params: {
       return await authorizeWriteInvocation({ ...shared, context: params.context });
     case "deposit":
       return await authorizeWriteInvocation({ ...shared, context: params.context });
-    case "project":
-      return await authorizeWriteInvocation({ ...shared, context: params.context });
     case "publish":
       return await authorizeWriteInvocation({ ...shared, context: params.context });
     case "import":
@@ -921,13 +923,6 @@ async function invokeAuthorizedMemoryWrite(params: {
     isWriteInvocationStateFor(state, "deposit") &&
     isContextForOperation(context, "deposit") &&
     mutation.kind === "deposit"
-  ) {
-    return await writeAuthorizedMemoryForCurrentState({ state, context, mutation });
-  }
-  if (
-    isWriteInvocationStateFor(state, "project") &&
-    isContextForOperation(context, "project") &&
-    mutation.kind === "project"
   ) {
     return await writeAuthorizedMemoryForCurrentState({ state, context, mutation });
   }

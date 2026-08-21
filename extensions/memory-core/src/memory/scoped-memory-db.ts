@@ -286,6 +286,26 @@ export type MemoryProjectionRow = {
   revoked_at: number | null;
 };
 
+/** Immutable projection metadata paired with the generic pending-write record until activation. */
+export type MemoryProjectionWriteIntentRow = {
+  intent_id: string;
+  agent_id: string;
+  projection_id: string;
+  target_store_id: string;
+  target_audience_kind: "conversation" | "role" | "agent-shared";
+  target_audience_id: string;
+  source_revision_id: string;
+  publisher_principal_id: string;
+  reviewed_by_principal_id: string;
+  purpose: string;
+  preview: string;
+  expiry_kind: "expires" | "no-expiry";
+  expiry_audit_reason: string | null;
+  expires_at: number | null;
+  replace_active_projection_id: string | null;
+  created_at: number;
+};
+
 export type MemoryPostboxSettingRow = {
   agent_id: string;
   target_store_id: string;
@@ -338,6 +358,17 @@ export type MemoryPostboxReviewedCopyRow = {
   agent_id: string;
   resource_id: string;
   revision_id: string;
+  reviewed_content_hash: string;
+  created_at: number;
+};
+
+/** Immutable approval metadata paired with the pending reviewed-copy write. */
+export type MemoryPostboxReviewWriteIntentRow = {
+  intent_id: string;
+  agent_id: string;
+  item_id: string;
+  target_store_id: string;
+  reviewed_by_principal_id: string;
   reviewed_content_hash: string;
   created_at: number;
 };
@@ -415,11 +446,13 @@ export type ScopedMemoryDatabase = {
   memory_write_intents: MemoryWriteIntentRow;
   memory_projection_targets: MemoryProjectionTargetRow;
   memory_projections: MemoryProjectionRow;
+  memory_projection_write_intents: MemoryProjectionWriteIntentRow;
   memory_postbox_settings: MemoryPostboxSettingRow;
   memory_postbox_source_handles: MemoryPostboxSourceHandleRow;
   memory_postbox_rate_limits: MemoryPostboxRateLimitRow;
   memory_postbox_items: MemoryPostboxItemRow;
   memory_postbox_reviewed_copies: MemoryPostboxReviewedCopyRow;
+  memory_postbox_review_write_intents: MemoryPostboxReviewWriteIntentRow;
   memory_audit_outbox: MemoryAuditOutboxRow;
   memory_migrations: MemoryMigrationRow;
 };

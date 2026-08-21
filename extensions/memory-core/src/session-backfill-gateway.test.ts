@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { registerSessionBackfillGatewayMethods } from "./session-backfill-gateway.js";
 import { executeSessionBackfill, executeSessionBackfillBatch } from "./session-backfill.js";
 
-const isLegacyMemorySurfaceDisabled = vi.hoisted(() => vi.fn(() => false));
+const isLegacyMemorySurfaceDisabled = vi.hoisted(() => vi.fn((_agentId: string) => false));
 
 vi.mock("openclaw/plugin-sdk/memory-core-host-runtime-core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("openclaw/plugin-sdk/memory-core-host-runtime-core")>()),

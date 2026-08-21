@@ -48,10 +48,18 @@ import {
   resolveBuiltinScopedMemoryArtifactPath,
 } from "./scoped-memory-resources.js";
 import {
-  createBuiltinMemoryProjection,
   expireBuiltinMemoryProjections,
+  recoverBuiltinMemoryPostboxReviewWrites,
+  recoverBuiltinMemoryProjectionWrites,
 } from "./scoped-memory-sharing.js";
 import { createScopedMemorySourcePolicySetId } from "./scoped-memory-store.js";
+import {
+  hashScopedMemoryWriteContent as contentHash,
+  quarantineScopedMemoryWriteArtifact as quarantineArtifact,
+  readVerifiedScopedMemoryWriteArtifact as readVerifiedFile,
+  requireOneScopedMemoryWriteRow as requireExactlyOneAffected,
+  syncScopedMemoryWriteDirectory as syncDirectory,
+} from "./scoped-memory-write-artifact.js";
 
 const PLAN_TTL_MS = 60_000;
 const MAXIMUM_CANDIDATES_PER_RESULT = 12;
@@ -126,6 +134,8 @@ function delegationRootPrincipalId(context: MemoryAccessContext): string | undef
     case "agent":
     case "system":
       return context.subject.principalId;
+    case "ambiguous":
+      return undefined;
   }
 }
 
@@ -182,10 +192,10 @@ function isCurrentChildDelegation(context: MemoryAccessContext): boolean {
       | undefined;
     return Boolean(
       row &&
-        row.revoked_at === null &&
-        row.expires_at > Date.now() &&
-        row.allowed_operations_json === canonicalOperationsJson(delegation.allowedOperations) &&
-        row.maximum_audiences_json === canonicalAudiencesJson(delegation.maximumAudiences),
+      row.revoked_at === null &&
+      row.expires_at > Date.now() &&
+      row.allowed_operations_json === canonicalOperationsJson(delegation.allowedOperations) &&
+      row.maximum_audiences_json === canonicalAudiencesJson(delegation.maximumAudiences),
     );
   });
 }
@@ -612,30 +622,6 @@ function createHandle(params: {
   return handle;
 }
 
-/** A projection accepts only an opaque handle minted by a still-live authorized content view. */
-function resolveProjectionSourceHandle(params: {
-  agentId: string;
-  handle: AuthorizedResourceHandle;
-}): string | undefined {
-  for (const state of plans.values()) {
-    if (state.expiresAtMs <= Date.now() || state.context.agentId !== params.agentId) {
-      continue;
-    }
-    const stored = state.handles.get(params.handle.handleId);
-    if (
-      stored &&
-      stored.planId === params.handle.planId &&
-      stored.contextFingerprint === params.handle.contextFingerprint &&
-      stored.resourceRevision === params.handle.resourceRevision &&
-      stored.policyRevision === params.handle.policyRevision &&
-      stored.expiresAt === params.handle.expiresAt
-    ) {
-      return stored.resourceRevision;
-    }
-  }
-  return undefined;
-}
-
 function createEnvelope<T>(params: {
   state: PlanState;
   context: MemoryAccessContext;
@@ -725,6 +711,20 @@ const CALLER_SELECTED_DESTINATION_FIELDS = new Set([
   "storeId",
 ]);
 
+const GENERIC_AUTHORIZED_MUTATION_KINDS = new Set<AuthorizedMemoryMutation["kind"]>([
+  "remember",
+  "append",
+  "replace",
+  "delete",
+  "tombstone",
+  "derive",
+  "deposit",
+  "publish",
+  "import",
+  "sync",
+  "admin-reclassify",
+]);
+
 type MutableScopedRevision = Readonly<{
   resourceId: string;
   revisionId: string;
@@ -754,10 +754,6 @@ type TranscriptDerivationSource = Readonly<{
   }>[];
 }>;
 
-function contentHash(content: string): string {
-  return createHash("sha256").update(content).digest("hex");
-}
-
 function auditActorRef(context: MemoryAccessContext): string {
   const source =
     context.actor.kind === "principal"
@@ -768,61 +764,6 @@ function auditActorRef(context: MemoryAccessContext): string {
 
 function auditSubjectRef(context: MemoryAccessContext): string {
   return `sha256:${contentHash(JSON.stringify(context.subject))}`;
-}
-
-function syncDirectory(directory: string): void {
-  try {
-    const descriptor = fs.openSync(directory, "r");
-    try {
-      fs.fsyncSync(descriptor);
-    } finally {
-      fs.closeSync(descriptor);
-    }
-  } catch (error) {
-    // Directory fsync is unsupported on Windows. The revision file itself is
-    // always fsynced before rename, which remains the durability boundary.
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "EINVAL" && code !== "EPERM" && code !== "EISDIR") {
-      throw error;
-    }
-  }
-}
-
-function readVerifiedFile(params: {
-  pathname: string;
-  contentHash: string;
-  contentBytes: number;
-}): string | undefined {
-  try {
-    const content = fs.readFileSync(params.pathname, "utf8");
-    return Buffer.byteLength(content) === params.contentBytes &&
-      contentHash(content) === params.contentHash
-      ? content
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function requireExactlyOneAffected(
-  result: Readonly<{ numAffectedRows?: bigint }>,
-  operation: string,
-): void {
-  if (result.numAffectedRows !== 1n) {
-    throw new Error(`authorized memory ${operation} lost its authoritative row`);
-  }
-}
-
-/** Remove an untrusted artifact from every store root before a later recovery can inspect it. */
-function quarantineArtifact(params: { directory: string; pathname: string }): void {
-  if (!fs.existsSync(params.pathname)) {
-    return;
-  }
-  const quarantine = path.join(path.dirname(params.directory), ".quarantine");
-  fs.mkdirSync(quarantine, { recursive: true, mode: 0o700 });
-  fs.renameSync(params.pathname, path.join(quarantine, `orphan_${randomUUID()}`));
-  syncDirectory(quarantine);
-  syncDirectory(params.directory);
 }
 
 function chunkContent(content: string): readonly {
@@ -869,6 +810,7 @@ function mutationOperation(mutation: AuthorizedMemoryMutation): MemoryAccessCont
 
 function assertMutationShape(mutation: AuthorizedMemoryMutation): void {
   if (
+    !GENERIC_AUTHORIZED_MUTATION_KINDS.has(mutation.kind) ||
     Object.keys(mutation).some((key) => CALLER_SELECTED_DESTINATION_FIELDS.has(key)) ||
     !mutation.mutationId.trim() ||
     !mutation.idempotencyKey.trim()
@@ -1423,6 +1365,10 @@ function indexRecoveredRevision(params: {
 
 /** Complete a verified write or quarantine its evidence before any read plan is issued. */
 function recoverPendingWrites(agentId: string): void {
+  // Sharing control-plane activations own source/reviewer/item fences that the generic recovery
+  // path cannot reconstruct. Recover them first, before any plan can read a copy.
+  recoverBuiltinMemoryProjectionWrites(agentId);
+  recoverBuiltinMemoryPostboxReviewWrites(agentId);
   withScopedMemoryDatabase(agentId, (database, databasePath) => {
     const db = getNodeSqliteKysely<ScopedMemoryDatabase>(database);
     const knownByDirectory = new Map<string, Set<string>>(
@@ -1474,6 +1420,11 @@ function recoverPendingWrites(agentId: string): void {
       database,
       db
         .selectFrom("memory_write_intents as intent")
+        .leftJoin(
+          "memory_postbox_review_write_intents as postbox_review",
+          "postbox_review.intent_id",
+          "intent.intent_id",
+        )
         .innerJoin("memory_stores as store", "store.store_id", "intent.store_id")
         .innerJoin("memory_storage_roots as root", "root.storage_root_id", "store.storage_root_id")
         .innerJoin("memory_policies as policy", "policy.policy_id", "store.policy_id")
@@ -1491,6 +1442,8 @@ function recoverPendingWrites(agentId: string): void {
           "policy.revocation_epoch",
         ])
         .where("intent.agent_id", "=", agentId)
+        .where("intent.mutation_kind", "!=", "project")
+        .where("postbox_review.intent_id", "is", null)
         .where("intent.state", "in", ["pending", "renamed", "active"])
         .orderBy("intent.created_at")
         .orderBy("intent.intent_id"),
@@ -1734,70 +1687,6 @@ async function writeAuthorizedMutation(params: {
       mutationId: params.mutation.mutationId,
       status: "unchanged",
       policyRevision: params.plan.memoryPolicyRevision,
-      committedAt: new Date(nowMs).toISOString(),
-    });
-  }
-
-  if (params.mutation.kind === "project") {
-    if (params.context.actor.kind !== "principal" || params.mutation.sourceHandles.length !== 1) {
-      throw new Error("authorized memory projection is unavailable");
-    }
-    const sourceRevisionId = resolveProjectionSourceHandle({
-      agentId,
-      handle: params.mutation.sourceHandles[0]!,
-    });
-    if (!sourceRevisionId) {
-      throw new Error("authorized memory projection is unavailable");
-    }
-    const expiry =
-      params.mutation.target.expiry.kind === "expires"
-        ? (() => {
-            const expiresAt = Date.parse(params.mutation.target.expiry.expiresAt);
-            if (!Number.isSafeInteger(expiresAt)) {
-              throw new Error("authorized memory projection is unavailable");
-            }
-            return { kind: "expires" as const, expiresAt };
-          })()
-        : {
-            kind: "no-expiry" as const,
-            auditReason: params.mutation.target.expiry.auditReason,
-          };
-    const projection = createBuiltinMemoryProjection({
-      agentId,
-      sourceRevisionId,
-      target: params.mutation.target.audience,
-      publisherPrincipalId: params.context.actor.principalId,
-      reviewedByPrincipalId: params.context.actor.principalId,
-      purpose: params.mutation.target.purpose,
-      preview: params.mutation.target.preview,
-      content: params.mutation.content,
-      expiry,
-      nowMs,
-    });
-    const targetSnapshot = withScopedMemoryDatabase(agentId, (database) => {
-      const db = getNodeSqliteKysely<ScopedMemoryDatabase>(database);
-      return executeSqliteQueryTakeFirstSync(
-        database,
-        db
-          .selectFrom("memory_resource_revisions")
-          .select("policy_revision_id")
-          .where("revision_id", "=", projection.copyRevisionId),
-      );
-    });
-    if (!targetSnapshot) {
-      throw new Error("authorized memory projection is unavailable");
-    }
-    const handle = createHandle({
-      plan: state,
-      revisionId: projection.copyRevisionId,
-      policyRevision: targetSnapshot.policy_revision_id,
-    });
-    return Object.freeze({
-      version: 1,
-      mutationId: params.mutation.mutationId,
-      status: "committed" as const,
-      resourceHandle: handle,
-      policyRevision: targetSnapshot.policy_revision_id,
       committedAt: new Date(nowMs).toISOString(),
     });
   }

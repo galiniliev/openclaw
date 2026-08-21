@@ -379,6 +379,16 @@ export interface MemoryPostboxReviewedCopies {
   revision_id: string;
 }
 
+export interface MemoryPostboxReviewWriteIntents {
+  agent_id: string;
+  created_at: number;
+  intent_id: string;
+  item_id: string;
+  reviewed_by_principal_id: string;
+  reviewed_content_hash: string;
+  target_store_id: string;
+}
+
 export interface MemoryPostboxSettings {
   agent_id: string;
   mode: string;
@@ -438,6 +448,25 @@ export interface MemoryProjectionTargets {
   configured_by_principal_id: string;
   created_at: number;
   store_id: string;
+}
+
+export interface MemoryProjectionWriteIntents {
+  agent_id: string;
+  created_at: number;
+  expires_at: number | null;
+  expiry_audit_reason: string | null;
+  expiry_kind: string;
+  intent_id: string;
+  preview: string;
+  projection_id: string;
+  publisher_principal_id: string;
+  purpose: string;
+  replace_active_projection_id: string | null;
+  reviewed_by_principal_id: string;
+  source_revision_id: string;
+  target_audience_id: string;
+  target_audience_kind: string;
+  target_store_id: string;
 }
 
 export interface MemoryProjections {
@@ -1015,11 +1044,13 @@ export interface DB {
   memory_postbox_items: MemoryPostboxItems;
   memory_postbox_rate_limits: MemoryPostboxRateLimits;
   memory_postbox_reviewed_copies: MemoryPostboxReviewedCopies;
+  memory_postbox_review_write_intents: MemoryPostboxReviewWriteIntents;
   memory_postbox_settings: MemoryPostboxSettings;
   memory_postbox_source_handles: MemoryPostboxSourceHandles;
   memory_preoutput_exposure_authorization_facts: MemoryPreoutputExposureAuthorizationFacts;
   memory_preoutput_exposure_ledger: MemoryPreoutputExposureLedger;
   memory_projection_targets: MemoryProjectionTargets;
+  memory_projection_write_intents: MemoryProjectionWriteIntents;
   memory_projections: MemoryProjections;
   memory_resource_revisions: MemoryResourceRevisions;
   memory_resource_subjects: MemoryResourceSubjects;

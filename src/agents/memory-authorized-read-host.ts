@@ -248,6 +248,8 @@ function delegationRootPrincipalId(subject: MemoryAccessContext["subject"]): str
     case "agent":
     case "system":
       return subject.principalId;
+    case "ambiguous":
+      return undefined;
   }
 }
 
@@ -468,16 +470,15 @@ function createTrustedMemoryHostContext(
   ) {
     return undefined;
   }
-  const delivery =
-    childDelegation
-      ? {
-          sink: childDelegation.facts.delivery.sinkKind,
-          audiences: childDelegation.facts.delivery.audiences,
-          routeRevision: childDelegation.facts.delivery.deliveryRevision,
-          egressCapabilityIds: childDelegation.facts.delivery.egressCapabilityIds,
-          egressRegistryRevision: childDelegation.facts.delivery.egressRegistryRevision,
-        }
-      : params.background === true
+  const delivery = childDelegation
+    ? {
+        sink: childDelegation.facts.delivery.sinkKind,
+        audiences: childDelegation.facts.delivery.audiences,
+        routeRevision: childDelegation.facts.delivery.deliveryRevision,
+        egressCapabilityIds: childDelegation.facts.delivery.egressCapabilityIds,
+        egressRegistryRevision: childDelegation.facts.delivery.egressRegistryRevision,
+      }
+    : params.background === true
       ? backgroundDeliveryFacts(context)
       : deliveryFacts({
           context,
@@ -489,12 +490,7 @@ function createTrustedMemoryHostContext(
     return undefined;
   }
   let actor: MemoryActorEvidence;
-  let verifiedPrincipals: Array<{
-    principalId: string;
-    assurance: "gateway-profile" | "service";
-    evidenceRevision: string;
-    expiresAt?: string;
-  }> = [];
+  let verifiedPrincipals: Array<MemoryAccessContext["verifiedPrincipals"][number]> = [];
   if (childDelegation) {
     actor = childDelegation.facts.actor;
     verifiedPrincipals = [...childDelegation.facts.verifiedPrincipals];

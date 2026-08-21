@@ -377,29 +377,9 @@ describe("memory authorization SDK contract", () => {
     expectTypeOf(assertActionOperationContract).toBeFunction();
   });
 
-  it("keeps project mutations limited to one named non-private audience", () => {
+  it("keeps reviewed projections out of the generic model mutation contract", () => {
     type ProjectMutation = Extract<AuthorizedMemoryMutation, { kind: "project" }>;
-    type ProjectTarget = ProjectMutation["target"];
-    type ProjectAudience = ProjectTarget["audience"];
-    type PrivateProjectAudience = Extract<ProjectAudience, { kind: "user" }>;
-
-    expectTypeOf<ProjectTarget>().toEqualTypeOf<
-      Readonly<{
-        audience: Readonly<{
-          kind: "conversation" | "role" | "agent-shared";
-          id: string;
-        }>;
-        purpose: string;
-        preview: string;
-        expiry:
-          | Readonly<{ kind: "expires"; expiresAt: string }>
-          | Readonly<{ kind: "no-expiry"; auditReason: string }>;
-      }>
-    >();
-    expectTypeOf<PrivateProjectAudience>().toEqualTypeOf<never>();
-    expectTypeOf<ProjectMutation["sourceHandles"]>().toEqualTypeOf<
-      readonly AuthorizedResourceHandle[]
-    >();
+    expectTypeOf<ProjectMutation>().toEqualTypeOf<never>();
   });
 
   it("declares authorization on the selected capability and methods on its optional runtime", () => {

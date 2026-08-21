@@ -427,6 +427,18 @@ export function isBuiltinScopedMemoryRevisionLineageCurrent(params: {
   );
 }
 
+/** Recovery callers already hold the activation transaction and must not reopen the database. */
+export function isBuiltinScopedMemoryRevisionLineageCurrentInDatabase(params: {
+  database: Parameters<typeof getNodeSqliteKysely<ScopedMemoryDatabase>>[0];
+  revisionId: string;
+}): boolean {
+  return isRevisionLineageCurrent({
+    database: params.database,
+    revisionId: normalizeScopedMemoryRequiredText(params.revisionId, "revisionId"),
+    visited: new Set(),
+  });
+}
+
 /**
  * Resolve a revision only while its immutable catalog evidence is current.
  * The Phase 1C runtime supplies the authorized store view; this foundation

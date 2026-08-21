@@ -110,10 +110,11 @@ function runLegacyDreamingSweepPhases(
     workspaceDir: string;
   },
 ) {
-  const cfg = params.cfg?.agents
-    ? params.cfg
+  const configured = params.cfg as OpenClawConfig | undefined;
+  const cfg = configured?.agents
+    ? configured
     : ({
-        ...params.cfg,
+        ...(configured ?? {}),
         agents: {
           list: [{ id: params.agentId, workspace: params.workspaceDir }],
         },

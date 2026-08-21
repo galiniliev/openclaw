@@ -507,23 +507,6 @@ export type AuthorizedMemoryMutation =
         kind: "publish";
         sourceHandles: readonly AuthorizedResourceHandle[];
       }>)
-  | (AuthorizedMemoryContentMutation &
-      Readonly<{
-        /** A reviewed copy may target only a named non-private audience, never a store id. */
-        kind: "project";
-        sourceHandles: readonly AuthorizedResourceHandle[];
-        target: Readonly<{
-          audience: Readonly<{
-            kind: "conversation" | "role" | "agent-shared";
-            id: string;
-          }>;
-          purpose: string;
-          preview: string;
-          expiry:
-            | Readonly<{ kind: "expires"; expiresAt: string }>
-            | Readonly<{ kind: "no-expiry"; auditReason: string }>;
-        }>;
-      }>)
   | Readonly<{
       version: 1;
       kind: "delete" | "tombstone" | "admin-reclassify";

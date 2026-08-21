@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { expectDefined } from "openclaw/plugin-sdk/expect-runtime";
 import type {
   MemoryAccessContext,
   MemoryContentAccessContext,
@@ -550,153 +551,6 @@ describe("builtin scoped authorized runtime", () => {
     ).rejects.toThrow("unavailable");
   });
 
-  it("projects only from an opaque source handle into a registered non-private target", async () => {
-    const principalId = "projection-owner";
-    const sourceStore = createBuiltinScopedMemoryStore({
-      agentId: "main",
-      scopeKind: "user",
-      audienceKind: "user",
-      audienceId: principalId,
-      authorityKind: "user",
-      authorityOwnerId: principalId,
-      defaultCapabilities: ["retrieve", "read", "project"],
-      actor: { kind: "human", id: principalId },
-      reason: "projection source",
-    });
-    createBuiltinScopedMemoryResource({
-      agentId: "main",
-      store: sourceStore,
-      logicalLocator: "private.md",
-      content: "PROJECT_SOURCE_SENTINEL",
-      actor: { kind: "human", id: principalId },
-    });
-    const targetStore = createBuiltinScopedMemoryStore({
-      agentId: "main",
-      scopeKind: "conversation",
-      audienceKind: "conversation",
-      audienceId: "projection-channel",
-      authorityKind: "conversation",
-      authorityOwnerId: "projection-channel",
-      defaultCapabilities: ["retrieve", "read"],
-      policyEntries: [
-        {
-          kind: "publish",
-          effect: "allow",
-          principalId,
-          operation: "publish",
-          grantorPrincipalId: principalId,
-          reason: "named publisher",
-        },
-        {
-          effect: "allow",
-          principalId,
-          operation: "policy-admin",
-          grantorPrincipalId: principalId,
-          reason: "target administrator",
-        },
-      ],
-      actor: { kind: "human", id: principalId },
-      reason: "projection target",
-    });
-    registerBuiltinMemoryProjectionTarget({
-      agentId: "main",
-      target: { kind: "conversation", id: "projection-channel" },
-      store: targetStore,
-      operatorPrincipalId: principalId,
-    });
-
-    const readContext = createContext(principalId);
-    const readPlan = await builtinScopedMemoryAuthorizedRuntime.authorize(readContext);
-    const source = await builtinScopedMemoryAuthorizedRuntime.searchAuthorized({
-      context: readContext,
-      plan: readPlan,
-      query: "PROJECT_SOURCE_SENTINEL",
-      limit: 1,
-    });
-    const sourceHandle = source.value[0]?.resourceHandle;
-    if (!sourceHandle) {
-      throw new Error("fixture expected an opaque projection source handle");
-    }
-    const projectContext = {
-      ...readContext,
-      operation: "project" as const,
-    } satisfies MemoryAccessContext;
-    const projectPlan = await builtinScopedMemoryAuthorizedRuntime.authorize(projectContext);
-    const projected = await builtinScopedMemoryAuthorizedRuntime.writeAuthorized({
-      context: projectContext,
-      plan: projectPlan,
-      mutation: {
-        version: 1,
-        kind: "project",
-        mutationId: "project-output",
-        idempotencyKey: "project-output-request",
-        content: "PROJECT_COPY_SENTINEL",
-        contentType: "markdown",
-        sourceHandles: [sourceHandle],
-        target: {
-          audience: { kind: "conversation", id: "projection-channel" },
-          purpose: "approved channel reference",
-          preview: "approved reference",
-          expiry: { kind: "no-expiry", auditReason: "fixture owner approval" },
-        },
-      },
-    });
-    const copyRevisionId = projected.resourceHandle?.resourceRevision;
-    if (!copyRevisionId) {
-      throw new Error("fixture expected a projection copy");
-    }
-    expect(
-      readBuiltinScopedMemoryRevisionSnapshot({
-        agentId: "main",
-        storeIds: [targetStore.storeId],
-        revisionId: copyRevisionId,
-      })?.content,
-    ).toBe("PROJECT_COPY_SENTINEL");
-    await expect(
-      builtinScopedMemoryAuthorizedRuntime.writeAuthorized({
-        context: projectContext,
-        plan: projectPlan,
-        mutation: {
-          version: 1,
-          kind: "project",
-          mutationId: "project-forged",
-          idempotencyKey: "project-forged-request",
-          content: "forged",
-          contentType: "markdown",
-          sourceHandles: [{ ...sourceHandle, handleId: "forged" }],
-          target: {
-            audience: { kind: "conversation", id: "projection-channel" },
-            purpose: "forged",
-            preview: "forged",
-            expiry: { kind: "expires", expiresAt: new Date(Date.now() + 60_000).toISOString() },
-          },
-        },
-      }),
-    ).rejects.toThrow("projection is unavailable");
-    await expect(
-      builtinScopedMemoryAuthorizedRuntime.writeAuthorized({
-        context: projectContext,
-        plan: projectPlan,
-        mutation: {
-          version: 1,
-          kind: "project",
-          mutationId: "project-private-target",
-          idempotencyKey: "project-private-target-request",
-          content: "PRIVATE_TARGET_MUST_NOT_CREATE_A_COPY",
-          contentType: "markdown",
-          sourceHandles: [sourceHandle],
-          target: {
-            // A JS caller can bypass the SDK union. The runtime remains the final boundary.
-            audience: { kind: "user", id: "principal-other" },
-            purpose: "forged private share",
-            preview: "forged private share",
-            expiry: { kind: "no-expiry", auditReason: "forged" },
-          },
-        } as never,
-      }),
-    ).rejects.toThrow("memory projection target is unavailable");
-  });
-
   it("authorizes compaction sources with derive rather than downgrading them to read", async () => {
     const principalId = "derive-owner";
     const store = createBuiltinScopedMemoryStore({
@@ -1229,7 +1083,11 @@ describe("builtin scoped authorized runtime", () => {
       ]);
     });
 
-    const staged = await builtinScopedMemoryAuthorizedRuntime.stageSealedCompaction({
+    const stageSealedCompaction = expectDefined(
+      builtinScopedMemoryAuthorizedRuntime.stageSealedCompaction,
+      "builtin scoped memory sealed compaction runtime",
+    );
+    const staged = await stageSealedCompaction({
       context,
       plan,
       content: "SEALED_COMPACTION_DERIVED_OUTPUT_SENTINEL",
@@ -1486,8 +1344,10 @@ describe("builtin scoped authorized runtime", () => {
       expiresAt: Date.now() + 60_000,
       deliveryContext: { channel: "telegram", accountId: "default", to: "alice" },
     });
-    expect(lease).toBeDefined();
-    await expect(lease?.activate()).resolves.toBe(true);
+    if (!lease) {
+      throw new Error("fixture failed to stage a child memory delegation");
+    }
+    await expect(lease.activate()).resolves.toBe(true);
 
     const childHost = createAuthorizedMemoryReadHost({
       agentId: "main",
@@ -1540,7 +1400,15 @@ describe("builtin scoped authorized runtime", () => {
       subjectRevision: "child-subject",
       capabilitySnapshotId: "mcap1_child-tools",
     };
-    const issued = await builtinScopedMemoryAuthorizedRuntime.issueChildDelegation({
+    const issueChildDelegation = expectDefined(
+      builtinScopedMemoryAuthorizedRuntime.issueChildDelegation,
+      "builtin scoped memory child delegation runtime",
+    );
+    const revokeChildDelegation = expectDefined(
+      builtinScopedMemoryAuthorizedRuntime.revokeChildDelegation,
+      "builtin scoped memory child delegation revocation runtime",
+    );
+    const issued = await issueChildDelegation({
       version: 1,
       delegationId: "child-delegation",
       parentContext: parent,
@@ -1604,7 +1472,7 @@ describe("builtin scoped authorized runtime", () => {
       ).resolves.toMatchObject({ value: [] });
     }
 
-    await builtinScopedMemoryAuthorizedRuntime.revokeChildDelegation({
+    await revokeChildDelegation({
       agentId: "main",
       storeCapToken: issued.storeCapToken,
     });
@@ -1621,7 +1489,7 @@ describe("builtin scoped authorized runtime", () => {
     vi.useFakeTimers();
     try {
       const expiresAt = Date.now() + 1_000;
-      const expiredIssue = await builtinScopedMemoryAuthorizedRuntime.issueChildDelegation({
+      const expiredIssue = await issueChildDelegation({
         version: 1,
         delegationId: "expiring-child-delegation",
         parentContext: parent,

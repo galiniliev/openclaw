@@ -58,6 +58,7 @@ const AGENT_SCHEMA_COMPATIBILITY = {
     CONTEXT_ENGINE_TURN_OUTBOX_TABLE,
     "session_memory_subjects",
     "session_memory_subject_snapshots",
+    "memory_child_delegations",
     ...AGENT_SCOPED_MEMORY_TABLES,
     AGENT_SCOPED_MEMORY_FTS_TABLE,
     ...AGENT_SCOPED_MEMORY_FTS_SHADOW_TABLES,

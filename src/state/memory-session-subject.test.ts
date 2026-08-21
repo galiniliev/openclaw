@@ -432,6 +432,9 @@ describe("memory session subject", () => {
     const { agentOptions } = fixture();
     const original = openOpenClawAgentDatabase(agentOptions);
     original.db.exec(`
+      DROP INDEX IF EXISTS idx_memory_child_delegations_parent_generation;
+      DROP INDEX IF EXISTS idx_memory_child_delegations_child_generation;
+      DROP TABLE memory_child_delegations;
       DROP TRIGGER IF EXISTS session_memory_subject_snapshots_immutable;
       DROP TRIGGER IF EXISTS session_memory_subjects_immutable;
       DROP TABLE session_memory_subject_snapshots;
@@ -444,6 +447,13 @@ describe("memory session subject", () => {
       reopened.db
         .prepare(
           "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'session_memory_subjects'",
+        )
+        .get(),
+    ).toBeUndefined();
+    expect(
+      reopened.db
+        .prepare(
+          "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'memory_child_delegations'",
         )
         .get(),
     ).toBeUndefined();
@@ -460,6 +470,13 @@ describe("memory session subject", () => {
         )
         .get(),
     ).toEqual({ name: "session_memory_subjects" });
+    expect(
+      reopened.db
+        .prepare(
+          "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'memory_child_delegations'",
+        )
+        .get(),
+    ).toEqual({ name: "memory_child_delegations" });
   });
 
   it("quarantines an imported session without provable subject lineage", async () => {

@@ -24,7 +24,7 @@ import {
 
 const getMemorySearchManager = vi.hoisted(() => vi.fn());
 const getRuntimeConfig = vi.hoisted(() => vi.fn(() => ({})));
-const isLegacyMemorySurfaceDisabled = vi.hoisted(() => vi.fn(() => false));
+const isLegacyMemorySurfaceDisabled = vi.hoisted(() => vi.fn((_agentId: string) => false));
 const resolveDefaultAgentId = vi.hoisted(() => vi.fn(() => "main"));
 const resolveCommandSecretRefsViaGateway = vi.hoisted(() =>
   vi.fn(async ({ config }: { config: unknown }) => ({

@@ -1676,6 +1676,13 @@ Phase 3 is complete only when all of the following are demonstrated:
 - [x] Projection, publisher, postbox, expiry, revocation, forged-handle, and
       prior-exposure tests pass.
 
+Proof (2026-08-20): Blacksmith Testbox `tbx_01m0hd70pc8zrrqtp1e4mxhbr7` passed
+the core, extension, and extension-test TypeScript lanes. It also passed 165
+focused tests covering projection/postbox recovery, expiry/revocation and
+prior-exposure impact, forged source-turn capabilities, selected-runtime and
+schema integration, generic-write denial, Gateway API and CLI authentication,
+and the Control UI sharing workflow.
+
 ### Phase 3 rollback
 
 Disable new projection/deposit operations. Tombstone projection reads and keep

@@ -23,10 +23,14 @@ import {
   inspectBuiltinMemorySharingStatus,
   inspectBuiltinMemoryPostboxItem,
   previewBuiltinMemoryProjection,
+  recoverBuiltinMemoryPostboxReviewWrites,
+  recoverBuiltinMemoryProjectionWrites,
   refreshBuiltinMemoryProjection,
   registerBuiltinMemoryProjectionTarget,
   revokeBuiltinMemoryProjection,
   reviewBuiltinMemoryPostboxItem,
+  setBuiltinMemoryPostboxReviewWriteInterruptForTest,
+  setBuiltinMemoryProjectionWriteInterruptForTest,
   setBuiltinMemoryPostboxMode,
   setBuiltinMemoryPostboxModeForPrincipal,
 } from "./scoped-memory-sharing.js";
@@ -60,7 +64,10 @@ describe("builtin scoped memory sharing", () => {
   afterEach(() => {
     closeOpenClawAgentDatabasesForTest();
     resetMemoryPostboxTurnCapabilitiesForTest();
+    setBuiltinMemoryPostboxReviewWriteInterruptForTest(undefined);
+    setBuiltinMemoryProjectionWriteInterruptForTest(undefined);
     createCurrentMemorySessionContext.mockReset();
+    vi.useRealTimers();
     vi.unstubAllEnvs();
     fs.rmSync(stateDir, { recursive: true, force: true });
   });
@@ -149,7 +156,7 @@ describe("builtin scoped memory sharing", () => {
     });
   }
 
-  function privateTargetStore() {
+  function privateTargetStore(params?: { policyAdminExpiresAt?: number }) {
     return createBuiltinScopedMemoryStore({
       agentId,
       scopeKind: "user",
@@ -165,6 +172,9 @@ describe("builtin scoped memory sharing", () => {
           operation: "policy-admin",
           grantorPrincipalId: alice,
           reason: "postbox owner",
+          ...(params?.policyAdminExpiresAt === undefined
+            ? {}
+            : { expiresAt: params.policyAdminExpiresAt }),
         },
       ],
       actor: { kind: "human", id: alice },
@@ -687,6 +697,321 @@ describe("builtin scoped memory sharing", () => {
     ).toBe("approved v2");
   });
 
+  it.each(["after-pending-commit", "after-artifact-rename"] as const)(
+    "keeps a %s projection unreadable until recovery activates its reviewed copy",
+    (point) => {
+      const source = sourceStore();
+      const target = projectionStore();
+      const privateRevision = createBuiltinScopedMemoryResource({
+        agentId,
+        store: source,
+        logicalLocator: `private-${point}.md`,
+        content: "private source",
+        actor: { kind: "human", id: alice },
+      });
+      registerBuiltinMemoryProjectionTarget({
+        agentId,
+        target: { kind: "conversation", id: channel },
+        store: target,
+        operatorPrincipalId: alice,
+      });
+
+      setBuiltinMemoryProjectionWriteInterruptForTest(point);
+      expect(() =>
+        createBuiltinMemoryProjection({
+          agentId,
+          sourceRevisionId: privateRevision.revisionId,
+          target: { kind: "conversation", id: channel },
+          publisherPrincipalId: alice,
+          reviewedByPrincipalId: alice,
+          purpose: "interrupted reviewed share",
+          preview: "interrupted copy",
+          content: "approved recovered copy",
+          expiry: { kind: "no-expiry", auditReason: "owner review" },
+        }),
+      ).toThrow();
+      setBuiltinMemoryProjectionWriteInterruptForTest(undefined);
+
+      const database = openOpenClawAgentDatabase({ agentId });
+      const pending = database.db
+        .prepare(
+          `SELECT intent.intent_id, intent.pending_revision_id
+             FROM memory_write_intents AS intent
+            WHERE intent.mutation_kind = 'project'`,
+        )
+        .get() as { intent_id: string; pending_revision_id: string };
+      expect(
+        readBuiltinScopedMemoryRevisionSnapshot({
+          agentId,
+          storeIds: [target.storeId],
+          revisionId: pending.pending_revision_id,
+        }),
+      ).toBeUndefined();
+      expect(database.db.prepare("SELECT COUNT(*) AS count FROM memory_projections").get()).toEqual(
+        {
+          count: 0,
+        },
+      );
+
+      recoverBuiltinMemoryProjectionWrites(agentId);
+
+      expect(
+        readBuiltinScopedMemoryRevisionSnapshot({
+          agentId,
+          storeIds: [target.storeId],
+          revisionId: pending.pending_revision_id,
+        })?.content,
+      ).toBe("approved recovered copy");
+      expect(
+        database.db
+          .prepare(
+            `SELECT intent.state AS intent_state, revision.lifecycle_state AS revision_state,
+                    audit.decision AS audit_decision
+               FROM memory_write_intents AS intent
+               JOIN memory_resource_revisions AS revision ON revision.revision_id = intent.pending_revision_id
+               JOIN memory_audit_outbox AS audit ON audit.intent_id = intent.intent_id
+              WHERE intent.intent_id = ?`,
+          )
+          .get(pending.intent_id),
+      ).toEqual({
+        intent_state: "active",
+        revision_state: "active",
+        audit_decision: "committed",
+      });
+      expect(
+        database.db
+          .prepare("SELECT COUNT(*) AS count FROM memory_projections WHERE state = 'active'")
+          .get(),
+      ).toEqual({ count: 1 });
+    },
+  );
+
+  it("keeps a refresh's old projection readable until recovery activates its replacement", () => {
+    const source = sourceStore();
+    const target = projectionStore();
+    const firstSource = createBuiltinScopedMemoryResource({
+      agentId,
+      store: source,
+      logicalLocator: "private-refresh-v1.md",
+      content: "private v1",
+      actor: { kind: "human", id: alice },
+    });
+    const secondSource = createBuiltinScopedMemoryResource({
+      agentId,
+      store: source,
+      logicalLocator: "private-refresh-v2.md",
+      content: "private v2",
+      actor: { kind: "human", id: alice },
+    });
+    registerBuiltinMemoryProjectionTarget({
+      agentId,
+      target: { kind: "conversation", id: channel },
+      store: target,
+      operatorPrincipalId: alice,
+    });
+    const original = createBuiltinMemoryProjection({
+      agentId,
+      sourceRevisionId: firstSource.revisionId,
+      target: { kind: "conversation", id: channel },
+      publisherPrincipalId: alice,
+      reviewedByPrincipalId: alice,
+      purpose: "share v1",
+      preview: "v1",
+      content: "approved v1",
+      expiry: { kind: "no-expiry", auditReason: "initial review" },
+    });
+
+    setBuiltinMemoryProjectionWriteInterruptForTest("after-pending-commit");
+    expect(() =>
+      refreshBuiltinMemoryProjection({
+        agentId,
+        projectionId: original.projectionId,
+        sourceRevisionId: secondSource.revisionId,
+        publisherPrincipalId: alice,
+        reviewedByPrincipalId: alice,
+        purpose: "share v2",
+        preview: "v2",
+        content: "approved v2",
+        expiry: { kind: "no-expiry", auditReason: "replacement review" },
+      }),
+    ).toThrow();
+    setBuiltinMemoryProjectionWriteInterruptForTest(undefined);
+
+    expect(
+      readBuiltinScopedMemoryRevisionSnapshot({
+        agentId,
+        storeIds: [target.storeId],
+        revisionId: original.copyRevisionId,
+      })?.content,
+    ).toBe("approved v1");
+    recoverBuiltinMemoryProjectionWrites(agentId);
+
+    const replacement = openOpenClawAgentDatabase({ agentId })
+      .db.prepare(
+        `SELECT copy_revision_id
+           FROM memory_projections
+          WHERE state = 'active' AND projection_id != ?`,
+      )
+      .get(original.projectionId) as { copy_revision_id: string };
+    expect(
+      readBuiltinScopedMemoryRevisionSnapshot({
+        agentId,
+        storeIds: [target.storeId],
+        revisionId: original.copyRevisionId,
+      }),
+    ).toBeUndefined();
+    expect(
+      readBuiltinScopedMemoryRevisionSnapshot({
+        agentId,
+        storeIds: [target.storeId],
+        revisionId: replacement.copy_revision_id,
+      })?.content,
+    ).toBe("approved v2");
+  });
+
+  it.each(["source project", "target publisher", "target reviewer"] as const)(
+    "quarantines a pending projection when %s authority disappears before recovery",
+    (authority) => {
+      const nowMs = Date.UTC(2026, 0, 1);
+      vi.useFakeTimers();
+      vi.setSystemTime(nowMs);
+      const expiresAt = nowMs + 1_000;
+      const reviewer = "principal-reviewer";
+      const source =
+        authority === "source project"
+          ? createBuiltinScopedMemoryStore({
+              agentId,
+              scopeKind: "user",
+              audienceKind: "user",
+              audienceId: alice,
+              authorityKind: "user",
+              authorityOwnerId: alice,
+              defaultCapabilities: ["read"],
+              policyEntries: [
+                {
+                  effect: "allow",
+                  principalId: alice,
+                  operation: "project",
+                  grantorPrincipalId: alice,
+                  reason: "short-lived source projection authority",
+                  expiresAt,
+                },
+              ],
+              actor: { kind: "human", id: alice },
+              reason: "expiring project source",
+            })
+          : sourceStore();
+      const target = createBuiltinScopedMemoryStore({
+        agentId,
+        scopeKind: "conversation",
+        audienceKind: "conversation",
+        audienceId: channel,
+        authorityKind: "conversation",
+        authorityOwnerId: channel,
+        defaultCapabilities: ["read"],
+        policyEntries: [
+          {
+            kind: "publish",
+            effect: "allow",
+            principalId: alice,
+            operation: "publish",
+            grantorPrincipalId: alice,
+            reason: "short-lived publisher authority",
+            ...(authority === "target publisher" ? { expiresAt } : {}),
+          },
+          {
+            effect: "allow",
+            principalId: alice,
+            operation: "policy-admin",
+            grantorPrincipalId: alice,
+            reason: "target administrator",
+          },
+          ...(authority === "target reviewer"
+            ? [
+                {
+                  effect: "allow" as const,
+                  principalId: reviewer,
+                  operation: "policy-admin" as const,
+                  grantorPrincipalId: alice,
+                  reason: "short-lived reviewer authority",
+                  expiresAt,
+                },
+              ]
+            : []),
+        ],
+        actor: { kind: "human", id: alice },
+        reason: "expiring projection target",
+      });
+      const privateRevision = createBuiltinScopedMemoryResource({
+        agentId,
+        store: source,
+        logicalLocator: `private-${authority}.md`,
+        content: "private source",
+        actor: { kind: "human", id: alice },
+      });
+      registerBuiltinMemoryProjectionTarget({
+        agentId,
+        target: { kind: "conversation", id: channel },
+        store: target,
+        operatorPrincipalId: alice,
+      });
+
+      setBuiltinMemoryProjectionWriteInterruptForTest("after-pending-commit");
+      expect(() =>
+        createBuiltinMemoryProjection({
+          agentId,
+          sourceRevisionId: privateRevision.revisionId,
+          target: { kind: "conversation", id: channel },
+          publisherPrincipalId: alice,
+          reviewedByPrincipalId: authority === "target reviewer" ? reviewer : alice,
+          purpose: "expiring authority share",
+          preview: "pending copy",
+          content: "must remain unavailable",
+          expiry: { kind: "no-expiry", auditReason: "owner review" },
+        }),
+      ).toThrow();
+      setBuiltinMemoryProjectionWriteInterruptForTest(undefined);
+      vi.setSystemTime(expiresAt + 1);
+
+      recoverBuiltinMemoryProjectionWrites(agentId);
+
+      const database = openOpenClawAgentDatabase({ agentId });
+      const quarantined = database.db
+        .prepare(
+          `SELECT intent.pending_revision_id, intent.state AS intent_state, revision.lifecycle_state AS revision_state,
+                  audit.decision AS audit_decision
+             FROM memory_write_intents AS intent
+             JOIN memory_resource_revisions AS revision ON revision.revision_id = intent.pending_revision_id
+             JOIN memory_audit_outbox AS audit ON audit.intent_id = intent.intent_id
+            WHERE intent.mutation_kind = 'project'`,
+        )
+        .get() as {
+        pending_revision_id: string;
+        intent_state: string;
+        revision_state: string;
+        audit_decision: string;
+      };
+      expect(quarantined).toEqual({
+        pending_revision_id: expect.any(String),
+        intent_state: "quarantined",
+        revision_state: "quarantined",
+        audit_decision: "quarantined",
+      });
+      expect(
+        readBuiltinScopedMemoryRevisionSnapshot({
+          agentId,
+          storeIds: [target.storeId],
+          revisionId: quarantined.pending_revision_id,
+        }),
+      ).toBeUndefined();
+      expect(database.db.prepare("SELECT COUNT(*) AS count FROM memory_projections").get()).toEqual(
+        {
+          count: 0,
+        },
+      );
+    },
+  );
+
   it("rolls back a replacement when the old projection no longer has the same audience", () => {
     const source = sourceStore();
     const target = projectionStore();
@@ -776,6 +1101,318 @@ describe("builtin scoped memory sharing", () => {
         revisionId: original.copyRevisionId,
       })?.content,
     ).toBe("original approved copy");
+  });
+
+  it.each(["after-pending-commit", "after-artifact-rename"] as const)(
+    "recovers a postbox approval interrupted %s without exposing its copy early",
+    (point) => {
+      const target = privateTargetStore();
+      setBuiltinMemoryPostboxMode({
+        agentId,
+        targetStoreId: target.storeId,
+        operatorPrincipalId: alice,
+        mode: "review-required",
+      });
+      expect(
+        depositFromVerifiedTurn({ content: "quarantined review body", sourceMessageRef: point }),
+      ).toEqual({ accepted: true });
+      const database = openOpenClawAgentDatabase({ agentId });
+      const item = database.db.prepare("SELECT item_id FROM memory_postbox_items").get() as {
+        item_id: string;
+      };
+
+      setBuiltinMemoryPostboxReviewWriteInterruptForTest(point);
+      expect(() =>
+        reviewBuiltinMemoryPostboxItem({
+          agentId,
+          itemId: item.item_id,
+          operatorPrincipalId: alice,
+          decision: "approve",
+          reviewedContent: "owner-reviewed durable copy",
+        }),
+      ).toThrow();
+      setBuiltinMemoryPostboxReviewWriteInterruptForTest(undefined);
+
+      const pending = database.db
+        .prepare(
+          `SELECT intent.intent_id, intent.pending_revision_id, intent.state AS intent_state,
+                  revision.lifecycle_state AS revision_state, item.state AS item_state
+             FROM memory_write_intents AS intent
+             JOIN memory_postbox_review_write_intents AS review ON review.intent_id = intent.intent_id
+             JOIN memory_resource_revisions AS revision ON revision.revision_id = intent.pending_revision_id
+             JOIN memory_postbox_items AS item ON item.item_id = review.item_id`,
+        )
+        .get() as {
+        intent_id: string;
+        pending_revision_id: string;
+        intent_state: string;
+        revision_state: string;
+        item_state: string;
+      };
+      expect(pending).toMatchObject({
+        intent_id: expect.any(String),
+        pending_revision_id: expect.any(String),
+        intent_state: point === "after-pending-commit" ? "pending" : "renamed",
+        revision_state: "pending",
+        item_state: "postbox",
+      });
+      expect(
+        readBuiltinScopedMemoryRevisionSnapshot({
+          agentId,
+          storeIds: [target.storeId],
+          revisionId: pending.pending_revision_id,
+        }),
+      ).toBeUndefined();
+      expect(
+        database.db.prepare("SELECT COUNT(*) AS count FROM memory_postbox_reviewed_copies").get(),
+      ).toEqual({ count: 0 });
+
+      recoverBuiltinMemoryPostboxReviewWrites(agentId);
+
+      expect(
+        readBuiltinScopedMemoryRevisionSnapshot({
+          agentId,
+          storeIds: [target.storeId],
+          revisionId: pending.pending_revision_id,
+        })?.content,
+      ).toBe("owner-reviewed durable copy");
+      expect(
+        database.db
+          .prepare(
+            `SELECT intent.state AS intent_state, revision.lifecycle_state AS revision_state,
+                    audit.decision AS audit_decision, item.state AS item_state, copy.revision_id
+               FROM memory_write_intents AS intent
+               JOIN memory_resource_revisions AS revision ON revision.revision_id = intent.pending_revision_id
+               JOIN memory_audit_outbox AS audit ON audit.intent_id = intent.intent_id
+               JOIN memory_postbox_review_write_intents AS review ON review.intent_id = intent.intent_id
+               JOIN memory_postbox_items AS item ON item.item_id = review.item_id
+               JOIN memory_postbox_reviewed_copies AS copy ON copy.item_id = item.item_id
+              WHERE intent.intent_id = ?`,
+          )
+          .get(pending.intent_id),
+      ).toEqual({
+        intent_state: "active",
+        revision_state: "active",
+        audit_decision: "committed",
+        item_state: "reviewed",
+        revision_id: pending.pending_revision_id,
+      });
+    },
+  );
+
+  it("quarantines an interrupted approval when reviewer authority expires and keeps the item reviewable", () => {
+    const initial = 1_700_000_000_000;
+    const expiry = initial + 1_000;
+    vi.setSystemTime(initial);
+    const target = privateTargetStore({ policyAdminExpiresAt: expiry });
+    setBuiltinMemoryPostboxMode({
+      agentId,
+      targetStoreId: target.storeId,
+      operatorPrincipalId: alice,
+      mode: "review-required",
+      nowMs: initial,
+    });
+    expect(
+      depositFromVerifiedTurn({
+        content: "still quarantined",
+        sourceMessageRef: "reviewer-expiry",
+      }),
+    ).toEqual({ accepted: true });
+    const database = openOpenClawAgentDatabase({ agentId });
+    const item = database.db.prepare("SELECT item_id FROM memory_postbox_items").get() as {
+      item_id: string;
+    };
+
+    setBuiltinMemoryPostboxReviewWriteInterruptForTest("after-pending-commit");
+    expect(() =>
+      reviewBuiltinMemoryPostboxItem({
+        agentId,
+        itemId: item.item_id,
+        operatorPrincipalId: alice,
+        decision: "approve",
+        nowMs: initial,
+      }),
+    ).toThrow();
+    setBuiltinMemoryPostboxReviewWriteInterruptForTest(undefined);
+    vi.setSystemTime(expiry + 1);
+
+    recoverBuiltinMemoryPostboxReviewWrites(agentId);
+
+    const quarantined = database.db
+      .prepare(
+        `SELECT intent.pending_revision_id, intent.state AS intent_state, revision.lifecycle_state AS revision_state,
+                audit.decision AS audit_decision, item.state AS item_state
+           FROM memory_write_intents AS intent
+           JOIN memory_postbox_review_write_intents AS review ON review.intent_id = intent.intent_id
+           JOIN memory_resource_revisions AS revision ON revision.revision_id = intent.pending_revision_id
+           JOIN memory_audit_outbox AS audit ON audit.intent_id = intent.intent_id
+           JOIN memory_postbox_items AS item ON item.item_id = review.item_id`,
+      )
+      .get() as {
+      pending_revision_id: string;
+      intent_state: string;
+      revision_state: string;
+      audit_decision: string;
+      item_state: string;
+    };
+    expect(quarantined).toEqual({
+      pending_revision_id: expect.any(String),
+      intent_state: "quarantined",
+      revision_state: "quarantined",
+      audit_decision: "quarantined",
+      item_state: "postbox",
+    });
+    expect(
+      readBuiltinScopedMemoryRevisionSnapshot({
+        agentId,
+        storeIds: [target.storeId],
+        revisionId: quarantined.pending_revision_id,
+      }),
+    ).toBeUndefined();
+    // The expired administrator cannot inspect it, but recovery did not promote or redact the
+    // deposit. A newly authorized owner can review the preserved postbox item later.
+  });
+
+  it.each(["reject", "purge"] as const)(
+    "terminalizes an interrupted postbox approval before %s",
+    (decision) => {
+      const target = privateTargetStore();
+      setBuiltinMemoryPostboxMode({
+        agentId,
+        targetStoreId: target.storeId,
+        operatorPrincipalId: alice,
+        mode: "review-required",
+      });
+      expect(
+        depositFromVerifiedTurn({
+          content: "do not promote",
+          sourceMessageRef: `terminal-${decision}`,
+        }),
+      ).toEqual({ accepted: true });
+      const database = openOpenClawAgentDatabase({ agentId });
+      const item = database.db.prepare("SELECT item_id FROM memory_postbox_items").get() as {
+        item_id: string;
+      };
+      setBuiltinMemoryPostboxReviewWriteInterruptForTest("after-pending-commit");
+      expect(() =>
+        reviewBuiltinMemoryPostboxItem({
+          agentId,
+          itemId: item.item_id,
+          operatorPrincipalId: alice,
+          decision: "approve",
+        }),
+      ).toThrow();
+      setBuiltinMemoryPostboxReviewWriteInterruptForTest(undefined);
+
+      reviewBuiltinMemoryPostboxItem({
+        agentId,
+        itemId: item.item_id,
+        operatorPrincipalId: alice,
+        decision,
+      });
+      recoverBuiltinMemoryPostboxReviewWrites(agentId);
+
+      expect(
+        database.db
+          .prepare(
+            `SELECT intent.state AS intent_state, revision.lifecycle_state AS revision_state,
+                    audit.decision AS audit_decision, item.state AS item_state
+               FROM memory_write_intents AS intent
+               JOIN memory_postbox_review_write_intents AS review ON review.intent_id = intent.intent_id
+               JOIN memory_resource_revisions AS revision ON revision.revision_id = intent.pending_revision_id
+               JOIN memory_audit_outbox AS audit ON audit.intent_id = intent.intent_id
+               JOIN memory_postbox_items AS item ON item.item_id = review.item_id`,
+          )
+          .get(),
+      ).toEqual({
+        intent_state: "tombstoned",
+        revision_state: "tombstoned",
+        audit_decision: "tombstoned",
+        item_state: decision === "reject" ? "rejected" : "purged",
+      });
+      expect(
+        database.db.prepare("SELECT COUNT(*) AS count FROM memory_postbox_reviewed_copies").get(),
+      ).toEqual({ count: 0 });
+    },
+  );
+
+  it("quarantines a failed activation and allows one later re-review", () => {
+    const target = privateTargetStore();
+    setBuiltinMemoryPostboxMode({
+      agentId,
+      targetStoreId: target.storeId,
+      operatorPrincipalId: alice,
+      mode: "review-required",
+    });
+    expect(
+      depositFromVerifiedTurn({ content: "review retry body", sourceMessageRef: "retry-review" }),
+    ).toEqual({ accepted: true });
+    const database = openOpenClawAgentDatabase({ agentId });
+    const item = database.db.prepare("SELECT item_id FROM memory_postbox_items").get() as {
+      item_id: string;
+    };
+    database.db.exec(`
+      CREATE TRIGGER fail_postbox_review_activation
+      BEFORE UPDATE OF state ON memory_postbox_items
+      WHEN NEW.state = 'reviewed'
+      BEGIN
+        SELECT RAISE(ABORT, 'forced postbox review activation failure');
+      END;
+    `);
+    try {
+      expect(() =>
+        reviewBuiltinMemoryPostboxItem({
+          agentId,
+          itemId: item.item_id,
+          operatorPrincipalId: alice,
+          decision: "approve",
+        }),
+      ).toThrow("forced postbox review activation failure");
+    } finally {
+      database.db.exec("DROP TRIGGER fail_postbox_review_activation");
+    }
+    expect(
+      database.db
+        .prepare(
+          `SELECT intent.state AS intent_state, revision.lifecycle_state AS revision_state, item.state AS item_state
+             FROM memory_write_intents AS intent
+             JOIN memory_postbox_review_write_intents AS review ON review.intent_id = intent.intent_id
+             JOIN memory_resource_revisions AS revision ON revision.revision_id = intent.pending_revision_id
+             JOIN memory_postbox_items AS item ON item.item_id = review.item_id`,
+        )
+        .get(),
+    ).toEqual({
+      intent_state: "quarantined",
+      revision_state: "quarantined",
+      item_state: "postbox",
+    });
+    expect(
+      database.db.prepare("SELECT COUNT(*) AS count FROM memory_postbox_reviewed_copies").get(),
+    ).toEqual({ count: 0 });
+
+    reviewBuiltinMemoryPostboxItem({
+      agentId,
+      itemId: item.item_id,
+      operatorPrincipalId: alice,
+      decision: "approve",
+      reviewedContent: "re-reviewed copy",
+    });
+
+    expect(
+      database.db
+        .prepare(
+          `SELECT COUNT(*) AS count
+             FROM memory_write_intents AS intent
+             JOIN memory_postbox_review_write_intents AS review ON review.intent_id = intent.intent_id
+            WHERE intent.state = 'active' AND review.item_id = ?`,
+        )
+        .get(item.item_id),
+    ).toEqual({ count: 1 });
+    expect(
+      database.db
+        .prepare("SELECT state FROM memory_postbox_items WHERE item_id = ?")
+        .get(item.item_id),
+    ).toEqual({ state: "reviewed" });
   });
 
   it("keeps postbox off by default and promotes only an explicitly approved reviewed copy", () => {

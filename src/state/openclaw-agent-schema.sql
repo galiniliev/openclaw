@@ -1540,6 +1540,48 @@ BEGIN
   SELECT RAISE(ABORT, 'memory projection cannot be reactivated');
 END;
 
+-- A reviewed projection becomes visible only after its staged copy, source authority, target
+-- publisher, reviewer, and (for refresh) replacement are rechecked under one activation fence.
+CREATE TABLE IF NOT EXISTS memory_projection_write_intents (
+  intent_id TEXT NOT NULL PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  projection_id TEXT NOT NULL UNIQUE,
+  target_store_id TEXT NOT NULL,
+  target_audience_kind TEXT NOT NULL CHECK (target_audience_kind IN ('conversation', 'role', 'agent-shared')),
+  target_audience_id TEXT NOT NULL,
+  source_revision_id TEXT NOT NULL,
+  publisher_principal_id TEXT NOT NULL,
+  reviewed_by_principal_id TEXT NOT NULL,
+  purpose TEXT NOT NULL,
+  preview TEXT NOT NULL,
+  expiry_kind TEXT NOT NULL CHECK (expiry_kind IN ('expires', 'no-expiry')),
+  expiry_audit_reason TEXT,
+  expires_at INTEGER,
+  replace_active_projection_id TEXT,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (intent_id) REFERENCES memory_write_intents(intent_id) ON DELETE RESTRICT,
+  FOREIGN KEY (target_store_id) REFERENCES memory_stores(store_id) ON DELETE RESTRICT,
+  FOREIGN KEY (source_revision_id) REFERENCES memory_resource_revisions(revision_id) ON DELETE RESTRICT,
+  FOREIGN KEY (replace_active_projection_id) REFERENCES memory_projections(projection_id) ON DELETE RESTRICT,
+  CHECK ((expiry_kind = 'expires' AND expires_at IS NOT NULL AND expiry_audit_reason IS NULL)
+      OR (expiry_kind = 'no-expiry' AND expires_at IS NULL AND expiry_audit_reason IS NOT NULL))
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_memory_projection_write_intents_recovery
+  ON memory_projection_write_intents(agent_id, created_at, intent_id);
+
+CREATE TRIGGER IF NOT EXISTS memory_projection_write_intents_immutable
+BEFORE UPDATE ON memory_projection_write_intents
+BEGIN
+  SELECT RAISE(ABORT, 'memory projection write intent is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_projection_write_intents_no_delete
+BEFORE DELETE ON memory_projection_write_intents
+BEGIN
+  SELECT RAISE(ABORT, 'memory projection write intent cannot be deleted');
+END;
+
 CREATE TABLE IF NOT EXISTS memory_postbox_settings (
   agent_id TEXT NOT NULL,
   target_store_id TEXT NOT NULL,
@@ -1616,6 +1658,37 @@ CREATE TABLE IF NOT EXISTS memory_postbox_reviewed_copies (
 
 CREATE INDEX IF NOT EXISTS idx_memory_postbox_reviewed_copies_revision
   ON memory_postbox_reviewed_copies(agent_id, revision_id);
+
+-- A postbox approval is a durable promotion boundary. Its specialized intent
+-- prevents generic recovery from activating a copy without moving the source
+-- item out of quarantine in the same transaction.
+CREATE TABLE IF NOT EXISTS memory_postbox_review_write_intents (
+  intent_id TEXT NOT NULL PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  item_id TEXT NOT NULL,
+  target_store_id TEXT NOT NULL,
+  reviewed_by_principal_id TEXT NOT NULL,
+  reviewed_content_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (intent_id) REFERENCES memory_write_intents(intent_id) ON DELETE RESTRICT,
+  FOREIGN KEY (item_id) REFERENCES memory_postbox_items(item_id) ON DELETE RESTRICT,
+  FOREIGN KEY (target_store_id) REFERENCES memory_stores(store_id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_memory_postbox_review_write_intents_recovery
+  ON memory_postbox_review_write_intents(agent_id, created_at, intent_id);
+
+CREATE TRIGGER IF NOT EXISTS memory_postbox_review_write_intents_immutable
+BEFORE UPDATE ON memory_postbox_review_write_intents
+BEGIN
+  SELECT RAISE(ABORT, 'memory postbox review write intent is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_postbox_review_write_intents_no_delete
+BEFORE DELETE ON memory_postbox_review_write_intents
+BEGIN
+  SELECT RAISE(ABORT, 'memory postbox review write intent cannot be deleted');
+END;
 
 CREATE TRIGGER IF NOT EXISTS memory_postbox_items_immutable_provenance
 BEFORE UPDATE OF item_id, agent_id, source_handle_id, target_store_id, source_channel_ref,

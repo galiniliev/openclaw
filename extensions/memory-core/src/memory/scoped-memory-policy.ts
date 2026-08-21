@@ -92,6 +92,25 @@ export function evaluateBuiltinScopedMemoryPolicy(params: {
   nowMs?: number;
 }): ScopedMemoryPolicyEvaluation {
   const agentId = normalizeAgentId(params.agentId);
+  return withScopedMemoryDatabase(agentId, (database) =>
+    evaluateBuiltinScopedMemoryPolicyInDatabase({ ...params, agentId, database }),
+  );
+}
+
+/**
+ * The sharing activation fence already owns an immediate transaction. Reopening the database
+ * there would turn a current-policy check into a stale preflight, so it evaluates in that fence.
+ */
+export function evaluateBuiltinScopedMemoryPolicyInDatabase(params: {
+  database: Parameters<typeof getNodeSqliteKysely<ScopedMemoryDatabase>>[0];
+  agentId: string;
+  storeId: string;
+  principalIds: readonly string[];
+  deliveryAudiences: readonly ScopedMemoryPolicyAudience[];
+  operation: MemoryOperation;
+  nowMs?: number;
+}): ScopedMemoryPolicyEvaluation {
+  const agentId = normalizeAgentId(params.agentId);
   const storeId = normalizePolicyText(params.storeId, "storeId");
   const principalIds = new Set(
     params.principalIds.map((principalId) => normalizePolicyText(principalId, "principalId")),
@@ -106,125 +125,123 @@ export function evaluateBuiltinScopedMemoryPolicy(params: {
   if (!Number.isFinite(nowMs)) {
     throw new TypeError("nowMs must be finite");
   }
-  return withScopedMemoryDatabase(agentId, (database) => {
-    const db = getNodeSqliteKysely<ScopedMemoryDatabase>(database);
-    const current = executeSqliteQueryTakeFirstSync(
-      database,
-      db
-        .selectFrom("memory_stores as store")
-        .innerJoin("memory_storage_roots as root", "root.storage_root_id", "store.storage_root_id")
-        .innerJoin("memory_policies as policy", "policy.policy_id", "store.policy_id")
-        .innerJoin(
-          "memory_policy_revisions as revision",
-          "revision.revision_id",
-          "policy.current_revision_id",
-        )
-        .select([
-          "store.audience_kind",
-          "store.audience_id",
-          "root.authority_kind",
-          "root.authority_owner_id",
-          "root.default_capabilities_json",
-          "policy.current_revision_id",
-          "policy.revocation_epoch",
-        ])
-        .where("store.store_id", "=", storeId)
-        .where("store.agent_id", "=", agentId)
-        .where("store.lifecycle_state", "=", "active")
-        .where("root.lifecycle_state", "=", "active")
-        .where("policy.lifecycle_state", "=", "active")
-        .where("revision.lifecycle_state", "=", "active"),
-    );
-    if (!current) {
-      return Object.freeze({ allowed: false, reasonCode: "revision-stale" });
+  const database = params.database;
+  const db = getNodeSqliteKysely<ScopedMemoryDatabase>(database);
+  const current = executeSqliteQueryTakeFirstSync(
+    database,
+    db
+      .selectFrom("memory_stores as store")
+      .innerJoin("memory_storage_roots as root", "root.storage_root_id", "store.storage_root_id")
+      .innerJoin("memory_policies as policy", "policy.policy_id", "store.policy_id")
+      .innerJoin(
+        "memory_policy_revisions as revision",
+        "revision.revision_id",
+        "policy.current_revision_id",
+      )
+      .select([
+        "store.audience_kind",
+        "store.audience_id",
+        "root.authority_kind",
+        "root.authority_owner_id",
+        "root.default_capabilities_json",
+        "policy.current_revision_id",
+        "policy.revocation_epoch",
+      ])
+      .where("store.store_id", "=", storeId)
+      .where("store.agent_id", "=", agentId)
+      .where("store.lifecycle_state", "=", "active")
+      .where("root.lifecycle_state", "=", "active")
+      .where("policy.lifecycle_state", "=", "active")
+      .where("revision.lifecycle_state", "=", "active"),
+  );
+  if (!current) {
+    return Object.freeze({ allowed: false, reasonCode: "revision-stale" });
+  }
+  if (
+    !audiences.some(
+      (audience) => audience.kind === current.audience_kind && audience.id === current.audience_id,
+    )
+  ) {
+    return Object.freeze({
+      allowed: false,
+      reasonCode: "outside-view",
+      policyRevisionId: current.current_revision_id,
+      policyRevocationEpoch: current.revocation_epoch,
+    });
+  }
+  // A private user mount is self-owned at this phase. Delivery routing cannot substitute for
+  // the verified subject: otherwise a caller could name Alice's audience while acting as Bob.
+  if (current.authority_kind === "user" && !principalIds.has(current.authority_owner_id)) {
+    return Object.freeze({
+      allowed: false,
+      reasonCode: "outside-view",
+      policyRevisionId: current.current_revision_id,
+      policyRevocationEpoch: current.revocation_epoch,
+    });
+  }
+  let defaultCapabilities: readonly MemoryOperation[];
+  try {
+    const parsed = JSON.parse(current.default_capabilities_json) as unknown;
+    if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === "string")) {
+      throw new TypeError("invalid policy capabilities");
     }
+    defaultCapabilities = parsed.filter((entry): entry is MemoryOperation =>
+      Object.hasOwn(OPERATION_REQUIREMENTS, entry),
+    );
+  } catch {
+    return Object.freeze({
+      allowed: false,
+      reasonCode: "revision-stale",
+      policyRevisionId: current.current_revision_id,
+      policyRevocationEpoch: current.revocation_epoch,
+    });
+  }
+  const entries = executeSqliteQuerySync(
+    database,
+    db
+      .selectFrom("memory_policy_entries")
+      .selectAll()
+      .where("policy_revision_id", "=", current.current_revision_id),
+  ).rows;
+  const requirements = OPERATION_REQUIREMENTS[params.operation];
+  for (const operation of requirements) {
     if (
-      !audiences.some(
-        (audience) =>
-          audience.kind === current.audience_kind && audience.id === current.audience_id,
+      entries.some(
+        (entry) =>
+          entry.effect === "deny" &&
+          entryMatchesScopedPolicy({ entry, principalIds, audiences, operation, nowMs }),
       )
     ) {
       return Object.freeze({
         allowed: false,
-        reasonCode: "outside-view",
+        reasonCode: "explicit-deny",
         policyRevisionId: current.current_revision_id,
         policyRevocationEpoch: current.revocation_epoch,
       });
     }
-    // A private user mount is self-owned at this phase. Delivery routing cannot substitute for
-    // the verified subject: otherwise a caller could name Alice's audience while acting as Bob.
-    if (current.authority_kind === "user" && !principalIds.has(current.authority_owner_id)) {
-      return Object.freeze({
-        allowed: false,
-        reasonCode: "outside-view",
-        policyRevisionId: current.current_revision_id,
-        policyRevocationEpoch: current.revocation_epoch,
-      });
-    }
-    let defaultCapabilities: readonly MemoryOperation[];
-    try {
-      const parsed = JSON.parse(current.default_capabilities_json) as unknown;
-      if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === "string")) {
-        throw new TypeError("invalid policy capabilities");
-      }
-      defaultCapabilities = parsed.filter((entry): entry is MemoryOperation =>
-        Object.hasOwn(OPERATION_REQUIREMENTS, entry),
+  }
+  for (const operation of requirements) {
+    const allowed =
+      defaultCapabilities.includes(operation) ||
+      entries.some(
+        (entry) =>
+          entry.effect === "allow" &&
+          entryMatchesScopedPolicy({ entry, principalIds, audiences, operation, nowMs }),
       );
-    } catch {
+    if (!allowed) {
       return Object.freeze({
         allowed: false,
-        reasonCode: "revision-stale",
+        reasonCode: "default-deny",
         policyRevisionId: current.current_revision_id,
         policyRevocationEpoch: current.revocation_epoch,
       });
     }
-    const entries = executeSqliteQuerySync(
-      database,
-      db
-        .selectFrom("memory_policy_entries")
-        .selectAll()
-        .where("policy_revision_id", "=", current.current_revision_id),
-    ).rows;
-    const requirements = OPERATION_REQUIREMENTS[params.operation];
-    for (const operation of requirements) {
-      if (
-        entries.some(
-          (entry) =>
-            entry.effect === "deny" &&
-            entryMatchesScopedPolicy({ entry, principalIds, audiences, operation, nowMs }),
-        )
-      ) {
-        return Object.freeze({
-          allowed: false,
-          reasonCode: "explicit-deny",
-          policyRevisionId: current.current_revision_id,
-          policyRevocationEpoch: current.revocation_epoch,
-        });
-      }
-    }
-    for (const operation of requirements) {
-      const allowed =
-        defaultCapabilities.includes(operation) ||
-        entries.some(
-          (entry) =>
-            entry.effect === "allow" &&
-            entryMatchesScopedPolicy({ entry, principalIds, audiences, operation, nowMs }),
-        );
-      if (!allowed) {
-        return Object.freeze({
-          allowed: false,
-          reasonCode: "default-deny",
-          policyRevisionId: current.current_revision_id,
-          policyRevocationEpoch: current.revocation_epoch,
-        });
-      }
-    }
-    return Object.freeze({
-      allowed: true,
-      reasonCode: "allowed",
-      policyRevisionId: current.current_revision_id,
-      policyRevocationEpoch: current.revocation_epoch,
-    });
+  }
+  return Object.freeze({
+    allowed: true,
+    reasonCode: "allowed",
+    policyRevisionId: current.current_revision_id,
+    policyRevocationEpoch: current.revocation_epoch,
   });
 }
 
