@@ -350,7 +350,7 @@ describe("installScheduledTask", () => {
       expect(launcher).toContain(
         `WScript.Quit CreateObject("WScript.Shell").Run("""${scriptPath}""", 0, True)`,
       );
-      expectTaskRunCall(3);
+      expectTaskRunCall(2);
     });
   });
 
@@ -442,7 +442,7 @@ describe("installScheduledTask", () => {
       expect(launcher).toContain(
         `WScript.Quit CreateObject("WScript.Shell").Run("""${scriptPath}""", 0, True)`,
       );
-      expectTaskRunCall(3, "OpenClaw Custom Gateway");
+      expectTaskRunCall(2, "OpenClaw Custom Gateway");
     });
   });
 
@@ -569,7 +569,7 @@ describe("installScheduledTask", () => {
       );
       expect(upgradeXml).toContain("<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>");
       expect(upgradeXml).toContain("<RestartOnFailure>");
-      expectTaskRunCall(4);
+      expectTaskRunCall(3);
     });
   });
 

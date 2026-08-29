@@ -88,30 +88,6 @@ function postRestartHealthAttempts(): number {
     : POST_RESTART_HEALTH_ATTEMPTS;
 }
 
-function formatRestartFailure(params: {
-  health: GatewayRestartSnapshot;
-  port: number;
-  defaultTimeoutSeconds: number;
-}): { statusLine: string; failMessage: string } {
-  if (params.health.waitOutcome === "stopped-free") {
-    const elapsedSeconds = Math.max(1, Math.round((params.health.elapsedMs ?? 0) / 1000));
-    return {
-      statusLine: `Gateway restart failed after ${elapsedSeconds}s: service stayed stopped and port ${params.port} stayed free.`,
-      failMessage: `Gateway restart failed after ${elapsedSeconds}s: service stayed stopped and health checks never came up.`,
-    };
-  }
-
-  const elapsed = params.health.elapsedMs;
-  const timeoutSeconds = Math.max(
-    1,
-    Math.round(elapsed === undefined ? params.defaultTimeoutSeconds : elapsed / 1000),
-  );
-  return {
-    statusLine: `Timed out after ${timeoutSeconds}s waiting for gateway port ${params.port} to become healthy.`,
-    failMessage: `Gateway restart timed out after ${timeoutSeconds}s waiting for health checks.`,
-  };
-}
-
 async function assertUnmanagedGatewayRestartEnabled(port: number): Promise<void> {
   const cfg = await readBestEffortConfig({ observe: false }).catch(() => undefined);
   const scheme = cfg?.gateway?.tls?.enabled ? "wss" : "ws";

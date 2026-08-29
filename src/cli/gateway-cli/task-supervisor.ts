@@ -10,7 +10,7 @@ function renderGatewayTaskCommand(): string {
   if (childArgs.length === 0) {
     throw new Error("Windows task supervisor could not resolve the Gateway command");
   }
-  return [process.execPath, ...childArgs].map(quoteCmdScriptArg).join(" ");
+  return [process.execPath, ...childArgs].map((argument) => quoteCmdScriptArg(argument)).join(" ");
 }
 
 /**

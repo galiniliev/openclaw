@@ -321,7 +321,9 @@ export function buildTaskScript({
     environment?.OPENCLAW_SERVICE_KIND === "gateway"
       ? [...programArguments, WINDOWS_TASK_SUPERVISOR_FLAG]
       : programArguments;
-  lines.push(`${commandArguments.map(quoteCmdScriptArg).join(" ")} ${STDIN_NUL_REDIRECT}`);
+  lines.push(
+    `${commandArguments.map((argument) => quoteCmdScriptArg(argument)).join(" ")} ${STDIN_NUL_REDIRECT}`,
+  );
   return `${lines.join("\r\n")}\r\n`;
 }
 
