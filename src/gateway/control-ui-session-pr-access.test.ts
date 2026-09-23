@@ -575,6 +575,7 @@ describe("registered session PR check details", () => {
 
   it.each([
     ...readerChanges,
+    "selection",
     "literal-global",
     "literal-global-visibility",
     "store closure",
@@ -587,6 +588,12 @@ describe("registered session PR check details", () => {
           : "agent:main:shared-checks";
         if (change === "literal-global-visibility") {
           await f.seed("global", f.profile.id, { sessionId: "separate-global-row" });
+        }
+        const replacementKey = `${key}:replacement`;
+        const projection = getSessionRowProjection(f.context);
+        if (change === "selection") {
+          await f.seed(replacementKey, f.other.id);
+          await projection?.ensureMaterialized();
         }
         const mutation =
           change === "literal-global"
@@ -642,6 +649,16 @@ describe("registered session PR check details", () => {
             const source = loadGatewaySessionEntryReadOnly(key, { agentId: "main" }).readSource;
             expect(source).toBeDefined();
             await closeOpenClawAgentDatabaseByPathAsync(source!.path);
+          } else if (mutation === "selection") {
+            if (!projection) {
+              throw new Error("Missing session projection for selection replacement");
+            }
+            const capture = projection.capture.bind(projection);
+            const replacement = capture({ agentId: "main", key: replacementKey });
+            expect(replacement).toBeDefined();
+            vi.spyOn(projection, "capture").mockImplementation((query) =>
+              query.key === key ? replacement : capture(query),
+            );
           } else {
             await f.changeReader(mutation, key);
           }

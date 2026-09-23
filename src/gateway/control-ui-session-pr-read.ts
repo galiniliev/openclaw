@@ -173,12 +173,11 @@ export async function prepareControlUiSessionPrRead(params: {
       return undefined;
     }
   };
-  const readPreparedCurrent = (projection: SessionRowProjection, read: SessionRowReadView) => {
+  const readPreparedCurrent = (
+    read: SessionRowReadView,
+    captured: NonNullable<ReturnType<typeof captureCurrent>>,
+  ) => {
     try {
-      const captured = captureCurrent(projection);
-      if (!captured) {
-        return undefined;
-      }
       // Authorize transient private rows before preparing presentation; resident rows reuse it.
       const current = read.describe(captured.query, captured.selected);
       const storePath = current?.storeTarget.storePath;
@@ -217,7 +216,7 @@ export async function prepareControlUiSessionPrRead(params: {
           if (!captured) {
             return undefined;
           }
-          const preparedTarget = readPreparedCurrent(projection, read);
+          const preparedTarget = readPreparedCurrent(read, captured);
           return preparedTarget
             ? { target: preparedTarget, captured: captured.selected }
             : undefined;
@@ -228,7 +227,11 @@ export async function prepareControlUiSessionPrRead(params: {
             ...target.target,
             assertCurrent: () => {
               const current = captureCurrent(projection);
-              if (!current || !projection.isCurrent(target.captured)) {
+              if (
+                !current ||
+                current.selected !== target.captured ||
+                !projection.isCurrent(target.captured)
+              ) {
                 throw new Error("Session pull-request target changed");
               }
             },
