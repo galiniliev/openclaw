@@ -26,6 +26,81 @@ describe("recipient publication lifetimes", () => {
     shared: { ...changed, status: "rate-limited" },
   };
 
+  it.each(["disconnect", "grant", "all"] as const)(
+    "keeps pending shared reads authorized by surviving viewers after %s retirement",
+    async (retirement) => {
+      vi.useFakeTimers();
+      const entered = createDeferred();
+      const held = createDeferred();
+      const connected = new Set(["survivor", "departing"]);
+      const access = { survivor: new AbortController(), departing: new AbortController() };
+      const broadcastToConnIds = vi.fn();
+      let holdLoad = false;
+      let authorized = false;
+      active = createTestControlUiSessionPrSubscriptions({
+        broadcastToConnIds,
+        isConnectionActive: (connId) => connected.has(connId),
+        prepareRead: async (connId) => {
+          const grant = connId === "survivor" ? access.survivor : access.departing;
+          const preparedTarget = {
+            ...target,
+            assertCurrent: () => {
+              if (!connected.has(connId)) {
+                throw new Error("Connection retired");
+              }
+              grant.signal.throwIfAborted();
+            },
+          };
+          return async () =>
+            connected.has(connId) && !grant.signal.aborted ? preparedTarget : undefined;
+        },
+        load: async (_params, _signal, read) => {
+          if (!holdLoad) {
+            return READY;
+          }
+          entered.resolve();
+          await held.promise;
+          read.assertCurrent();
+          authorized = true;
+          return changed;
+        },
+      });
+      await active.replace("survivor", ["shared"]);
+      await active.replace("departing", ["shared"]);
+      broadcastToConnIds.mockClear();
+      holdLoad = true;
+      const poll = active.pollNow();
+      try {
+        await entered.promise;
+        if (retirement === "disconnect") {
+          connected.delete("departing");
+          active.unsubscribe("departing");
+        } else {
+          access.departing.abort(new Error("Grant retired"));
+          if (retirement === "all") {
+            access.survivor.abort(new Error("Grant retired"));
+          }
+        }
+        held.resolve();
+        await poll;
+        expect(authorized).toBe(retirement !== "all");
+        if (retirement === "all") {
+          expect(broadcastToConnIds).not.toHaveBeenCalled();
+        } else {
+          expect(broadcastToConnIds).toHaveBeenCalledExactlyOnceWith(
+            CHANGED_EVENT,
+            { sessions: changedSessions },
+            new Set(["survivor"]),
+            { sessionKeys: ["shared"], agentId: "main" },
+          );
+        }
+      } finally {
+        held.resolve();
+        await poll;
+      }
+    },
+  );
+
   it("checks the recipient's prepared authority when another watcher joins before send", async () => {
     vi.useFakeTimers();
     const recipientEntered = createDeferred();

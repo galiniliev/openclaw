@@ -16,6 +16,7 @@ function placementReadView() {
     },
     describe: () => undefined,
     readSource: () => undefined,
+    readMembership: () => undefined,
     selectEntries: () => [],
     present: () => {
       throw new Error("Placement lifecycle does not present session rows");

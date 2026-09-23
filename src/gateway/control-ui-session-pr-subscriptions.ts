@@ -333,7 +333,6 @@ export function createControlUiSessionPullRequestSubscriptions(
                 sourceIdentity,
                 assertCurrent: () => {
                   assertSourceCurrent();
-                  state.target.assertCurrent?.();
                   if (
                     scope.isClosing ||
                     !Array.from(demands).some((current) => current()) ||
@@ -341,6 +340,25 @@ export function createControlUiSessionPullRequestSubscriptions(
                   ) {
                     throw new Error("Session pull-request watchers changed");
                   }
+                  // Shared work survives a departing viewer while another prepared reader
+                  // still authorizes this exact source. Delivery keeps its per-viewer guard.
+                  for (const connId of state.connIds) {
+                    const watched = subscriptions.get(connId)?.get(sessionKey);
+                    if (
+                      !watched ||
+                      watched.target.identity !== state.target.identity ||
+                      deps.isConnectionActive?.(connId) === false
+                    ) {
+                      continue;
+                    }
+                    try {
+                      watched.target.assertCurrent?.();
+                      return;
+                    } catch {
+                      // A different watcher may still own a current grant.
+                    }
+                  }
+                  throw new Error("Session pull-request watchers changed");
                 },
               },
             )
