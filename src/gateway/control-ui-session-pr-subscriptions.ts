@@ -235,11 +235,14 @@ export function createControlUiSessionPullRequestSubscriptions(
   };
 
   const currentWatcher = async (connId: string, sessionKey: string) => {
-    const subscription = subscriptions.get(connId);
-    const watched = subscription?.get(sessionKey);
+    const watched = subscriptions.get(connId)?.get(sessionKey);
     const target =
       deps.isConnectionActive?.(connId) === false ? undefined : await watched?.readCurrent();
-    if (!watched || !target) {
+    const subscription = subscriptions.get(connId);
+    if (scope.isClosing || subscription?.get(sessionKey) !== watched) {
+      return undefined;
+    }
+    if (!watched || !target || deps.isConnectionActive?.(connId) === false) {
       subscription?.delete(sessionKey);
       const state = keyStates.get(sessionKey);
       state?.connIds.delete(connId);
@@ -254,7 +257,7 @@ export function createControlUiSessionPullRequestSubscriptions(
     }
     watched.target = target;
     stateForTarget(sessionKey, target).connIds.add(connId);
-    return watched;
+    return { watched, target };
   };
 
   const currentKeyState = async (sessionKey: string) => {
@@ -405,14 +408,24 @@ export function createControlUiSessionPullRequestSubscriptions(
             .then(async () => {
               const current = await currentWatcher(connId, sessionKey);
               if (
-                current !== watched ||
+                !current ||
+                scope.isClosing ||
+                current.watched !== watched ||
+                subscriptions.get(connId)?.get(sessionKey) !== watched ||
+                deps.isConnectionActive?.(connId) === false ||
                 keyStates.get(sessionKey) !== state ||
                 watched.delivered === snapshot
               ) {
                 return;
               }
               assertSourceCurrent();
-              state.target.assertCurrent?.();
+              try {
+                // The shared cache can carry another viewer's target after preparation yields.
+                current.target.assertCurrent?.();
+              } catch {
+                // Losing one recipient must not suppress the same snapshot for other viewers.
+                return;
+              }
               // A socket callback can replace the session or retire another viewer synchronously.
               deps.broadcastToConnIds(
                 CONTROL_UI_SESSION_PULL_REQUESTS_CHANGED_EVENT,
