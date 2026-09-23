@@ -436,28 +436,29 @@ export const sessionReadHandlers: GatewayRequestHandlers = {
     if (!projection) {
       throw new Error("Session projection is unavailable before Gateway startup completes");
     }
-    const resolved = await withPreparedSessionResolve(
+    await withPreparedSessionResolve(
       {
         projection,
         client,
         p: params,
         isCurrent: () => getSessionRowProjection(context) === projection,
       },
-      (result) => result,
+      (resolved) => {
+        if (!resolved.ok) {
+          respond(false, undefined, resolved.error);
+          return;
+        }
+        if ("missing" in resolved) {
+          respond(true, { ok: false }, undefined);
+          return;
+        }
+        if ("ambiguous" in resolved) {
+          respond(true, { ok: false, candidates: resolved.candidates }, undefined);
+          return;
+        }
+        respond(true, resolved, undefined);
+      },
     );
-    if (!resolved.ok) {
-      respond(false, undefined, resolved.error);
-      return;
-    }
-    if ("missing" in resolved) {
-      respond(true, { ok: false }, undefined);
-      return;
-    }
-    if ("ambiguous" in resolved) {
-      respond(true, { ok: false, candidates: resolved.candidates }, undefined);
-      return;
-    }
-    respond(true, resolved, undefined);
   },
   ...sessionByKeyReadHandlers,
   ...sessionMaintenanceHandlers,

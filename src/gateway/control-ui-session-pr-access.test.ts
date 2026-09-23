@@ -16,6 +16,7 @@ import {
   captureStateDatabaseCoordinatorRuntime,
   withStateDatabaseCoordinatorRuntimeDirectory,
 } from "../infra/state-database-coordinator.js";
+import { sessionChanges } from "../sessions/session-row-changes.js";
 import { AsyncWorkScope } from "../shared/async-work-scope.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { closeOpenClawAgentDatabaseByPathAsync } from "../state/openclaw-agent-db.js";
@@ -72,7 +73,11 @@ afterAll(async () => {
   await sharedState?.cleanup();
 });
 
-async function createFixture(scope: OperatorScope, useDefaultLoader = false) {
+async function createFixture(
+  scope: OperatorScope,
+  useDefaultLoader = false,
+  initialSessionPatch: Partial<SessionEntry> = {},
+) {
   const fixtureId = ++fixtureSequence;
   const readerEmail = `guest-publication-reader-${fixtureId}@example.test`;
   const profile = ensureProfileForEmail(readerEmail);
@@ -111,7 +116,7 @@ async function createFixture(scope: OperatorScope, useDefaultLoader = false) {
       },
     );
   };
-  await seed(sessionKey);
+  await seed(sessionKey, profile.id, initialSessionPatch);
   const connections = createGatewayConnectionState({
     bootId: "publication-read",
     cfg,
@@ -143,10 +148,10 @@ async function createFixture(scope: OperatorScope, useDefaultLoader = false) {
   const subscriptions = createControlUiSessionPullRequestSubscriptions({
     broadcastToConnIds: connections.broadcastToConnIds,
     isConnectionActive: connections.isConnectionActive,
-    prepareRead: (connId, session) => {
+    prepareRead: async (connId, session) => {
       const client = connections.clients.getByConnectionId(connId);
       return client
-        ? prepareControlUiSessionPrRead({
+        ? await prepareControlUiSessionPrRead({
             client,
             ...session,
             getRuntimeConfig,
@@ -249,10 +254,11 @@ async function withFixture(
   scope: OperatorScope,
   run: (fixture: Awaited<ReturnType<typeof createFixture>>) => Promise<void>,
   isolated = false,
+  initialSessionPatch: Partial<SessionEntry> = {},
 ) {
   if (isolated) {
     return withOpenClawTestState({ scenario: "minimal" }, async () => {
-      const fixture = await createFixture(scope);
+      const fixture = await createFixture(scope, false, initialSessionPatch);
       try {
         await run(fixture);
       } finally {
@@ -270,7 +276,7 @@ async function withFixture(
       let fixture: Awaited<ReturnType<typeof createFixture>> | undefined;
       try {
         await work.track(async () => {
-          fixture = await createFixture(scope);
+          fixture = await createFixture(scope, false, initialSessionPatch);
           try {
             await run(fixture);
           } finally {
@@ -304,6 +310,30 @@ function expectedFrame(key: string, value: ControlUiSessionPullRequests = snapsh
 }
 
 describe("registered session PR subscriptions", () => {
+  it("delivers an archived session that was cold at Gateway startup", async () => {
+    await withFixture(
+      "operator.read",
+      async (f) => {
+        const entered = createDeferredCore();
+        f.load.mockImplementationOnce(async () => {
+          entered.resolve();
+          return snapshot;
+        });
+        await f.subscribe();
+        await entered.promise;
+        await f.subscriptions.pollNow();
+        expect(f.load).toHaveBeenCalledWith(
+          { sessionKey, agentId: "main" },
+          expect.any(AbortSignal),
+          expect.objectContaining({ assertCurrent: expect.any(Function) }),
+        );
+        expect(frames(f.socket)).toContainEqual(expectedFrame(sessionKey));
+      },
+      false,
+      { archivedAt: 1 },
+    );
+  });
+
   it.each(["operator.read", "operator.write", "operator.admin"] as const)(
     "delivers the owned branch through the real broadcaster with %s",
     async (scope) => {
@@ -490,6 +520,59 @@ describe("registered session PR subscriptions", () => {
 });
 
 describe("registered session PR check details", () => {
+  it("reads archived check details after archive cache invalidation", async () => {
+    await withFixture(
+      "operator.read",
+      async (f) => {
+        const projection = getSessionRowProjection(f.context);
+        if (!projection) {
+          throw new Error("Missing session projection for archived PR checks");
+        }
+        expect(projection.snapshot({ agentId: "main", key: sessionKey }).row).toBeDefined();
+        sessionChanges.emit({ all: true, scope: "catalog" });
+        await projection.ensureMaterialized();
+        expect(
+          projection.capture({ agentId: "main", key: sessionKey })?.materialized,
+        ).toBeUndefined();
+
+        const result: ControlUiSessionPullRequestCheckDetails = {
+          owner: "synthetic",
+          repo: "publication",
+          number: 1,
+          headSha: "a".repeat(40),
+          status: "ready",
+          rateLimited: false,
+          checks: [],
+        };
+        const load = vi.fn(async () => result);
+        const respond = vi.fn();
+        await handleGatewayRequest({
+          req: {
+            type: "req",
+            id: "archived-checks",
+            method: "controlUi.sessionPullRequests.checks",
+            params: {
+              sessionKey,
+              owner: result.owner,
+              repo: result.repo,
+              number: result.number,
+              headSha: result.headSha,
+            },
+          },
+          client: f.client,
+          context: f.context,
+          extraHandlers: createControlUiHandlers(undefined, undefined, load),
+          isWebchatConnect: () => false,
+          respond,
+        });
+        expect(load).toHaveBeenCalledOnce();
+        expect(respond).toHaveBeenCalledExactlyOnceWith(true, result, undefined);
+      },
+      false,
+      { archivedAt: 1 },
+    );
+  });
+
   it.each([
     ...readerChanges,
     "literal-global",
