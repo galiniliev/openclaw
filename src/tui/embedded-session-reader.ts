@@ -1,7 +1,20 @@
+import { withReadySessionRows } from "../gateway/session-row-prepared-read.js";
+import type * as records from "../gateway/session-row-projection-record.js";
 import type { SessionRowProjection } from "../gateway/session-row-projection.js";
 import { listProjectedSessions } from "../gateway/session-utils-list.js";
 import { parseAgentSessionKey } from "../routing/session-key.js";
 import type { TuiBackend } from "./tui-backend.js";
+
+export function readEmbeddedProjectedSession(
+  projection: SessionRowProjection,
+  target: records.Lookup,
+) {
+  return withReadySessionRows(
+    projection,
+    () => [target],
+    (read) => read.describe(target),
+  );
+}
 
 export function createEmbeddedSessionReader(lifecycle: {
   ready: () => Promise<void>;
