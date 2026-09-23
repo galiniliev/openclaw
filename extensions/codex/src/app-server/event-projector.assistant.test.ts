@@ -15,12 +15,58 @@ import {
   forCurrentTurn,
   agentMessageDelta,
   turnCompleted,
+  turnWithStatus,
   type EmbeddedRunAttemptParams,
 } from "./event-projector.test-harness.js";
 
 registerCodexEventProjectorTestLifecycle();
 
 describe("CodexAppServerEventProjector assistant projection", () => {
+  it.each(["failed", "interrupted"])(
+    "retains streamed partial evidence after a %s turn",
+    async (status) => {
+      const projector = await createProjector(await createParams());
+      await projector.handleNotification(
+        forCurrentTurn("item/started", {
+          item: { type: "agentMessage", id: "partial", phase: "final_answer", text: "" },
+        }),
+      );
+      await projector.handleNotification(agentMessageDelta("Partial work", "partial"));
+      await projector.handleNotification(turnWithStatus(status));
+      expect(projector.buildResult(buildEmptyToolTelemetry()).assistantTexts).toEqual([
+        "Partial work",
+      ]);
+    },
+  );
+
+  it("keeps distinct completed same-text finals and raw-only completion", async () => {
+    const projector = await createProjector(await createParams());
+    for (const id of ["completed-1", "completed-2"]) {
+      await projector.handleNotification(
+        forCurrentTurn("item/completed", {
+          item: { type: "agentMessage", id, phase: "final_answer", text: "Repeated intentionally" },
+        }),
+      );
+    }
+    await projector.handleNotification(
+      forCurrentTurn("rawResponseItem/completed", {
+        item: {
+          type: "message",
+          id: "raw-only",
+          role: "assistant",
+          phase: "final_answer",
+          content: [{ type: "output_text", text: "Raw completion" }],
+        },
+      }),
+    );
+    await projector.handleNotification(turnCompleted());
+    expect(projector.buildResult(buildEmptyToolTelemetry()).assistantTexts).toEqual([
+      "Repeated intentionally",
+      "Repeated intentionally",
+      "Raw completion",
+    ]);
+  });
+
   it("projects assistant deltas and usage into embedded attempt results", async () => {
     const { onAssistantMessageStart, onPartialReply, projector } =
       await createProjectorWithAssistantHooks();
