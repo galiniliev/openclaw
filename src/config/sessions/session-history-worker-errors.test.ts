@@ -125,6 +125,9 @@ vi.mock("../../state/openclaw-agent-db-readonly-scope.js", () => ({
   closeOpenClawAgentDatabaseReadOnlyCandidates: vi.fn(),
   OpenClawAgentDatabaseReadOnlyScope: class {
     hasRetainedConnection = true;
+    waitForSchemaProbeTurn() {
+      return undefined;
+    }
     run(_database: unknown, operation: () => unknown) {
       return operation();
     }

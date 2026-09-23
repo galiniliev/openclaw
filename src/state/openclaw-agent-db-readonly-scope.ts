@@ -3,6 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { normalizeAgentId } from "@openclaw/normalization-core/agent-id";
 import { enableNodeSqliteKyselyStatementCache } from "../infra/kysely-sync-cache-state.js";
 import { SQLITE_IDLE_HANDLE_TTL_MS } from "../infra/sqlite-handle-lifecycle.js";
+import { waitForSqliteSchemaProbeTurn } from "../infra/sqlite-schema-facts.js";
 import {
   registerSqliteCacheExitClose,
   runInSqliteMaintenanceContext,
@@ -63,6 +64,11 @@ export class OpenClawAgentDatabaseReadOnlyScope {
 
   get hasRetainedConnection(): boolean {
     return this.database !== undefined;
+  }
+
+  /** Async requests must not inherit the preceding request's coalesced freshness probe. */
+  waitForSchemaProbeTurn(): Promise<void> | undefined {
+    return this.database ? waitForSqliteSchemaProbeTurn(this.database.db) : undefined;
   }
 
   invalidateProjection(
