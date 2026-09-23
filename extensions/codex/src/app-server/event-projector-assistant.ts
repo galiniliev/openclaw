@@ -409,6 +409,10 @@ export class CodexAssistantProjection {
         !this.isAsyncAssistantItem(itemId) &&
         (this.isFinalAnswerAssistantItem(itemId) || this.isCommentaryAssistantItem(itemId))
       ) {
+        if (itemId === this.visibleAnswerCandidateItemId) {
+          // Activity needs the preview text to publish its superseded transition.
+          this.supersedeVisibleAnswerCandidate();
+        }
         this.assistantTextByItem.delete(itemId);
       }
     }

@@ -67,6 +67,48 @@ describe("CodexAppServerEventProjector assistant projection", () => {
     ]);
   });
 
+  it("retires the streamed candidate when only the terminal snapshot supplies its replacement", async () => {
+    const onAgentEvent = vi.fn();
+    const projector = await createProjector({ ...(await createParams()), onAgentEvent });
+    await projector.handleNotification(
+      forCurrentTurn("item/started", {
+        item: { type: "agentMessage", id: "preview", phase: "final_answer", text: "" },
+      }),
+    );
+    await projector.handleNotification(agentMessageDelta("Preview answer", "preview"));
+    await projector.handleNotification(
+      turnCompleted([
+        { type: "agentMessage", id: "completed", phase: "final_answer", text: "Final answer" },
+      ]),
+    );
+
+    expect(
+      onAgentEvent.mock.calls
+        .map((call) => call[0])
+        .filter((event) => event.stream === "item" && event.data.kind === "answer_candidate")
+        .map((event) => event.data),
+    ).toEqual([
+      expect.objectContaining({
+        itemId: "preview",
+        status: "candidate",
+        progressText: "Preview answer",
+      }),
+      expect.objectContaining({
+        itemId: "preview",
+        status: "superseded",
+        progressText: "Preview answer",
+      }),
+      expect.objectContaining({
+        itemId: "completed",
+        status: "selected",
+        progressText: "Final answer",
+      }),
+    ]);
+    expect(projector.buildResult(buildEmptyToolTelemetry()).assistantTexts).toEqual([
+      "Final answer",
+    ]);
+  });
+
   it("projects assistant deltas and usage into embedded attempt results", async () => {
     const { onAssistantMessageStart, onPartialReply, projector } =
       await createProjectorWithAssistantHooks();
