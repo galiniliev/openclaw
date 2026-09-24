@@ -6,6 +6,7 @@ import {
   replaceTranscriptEvents,
 } from "../../config/sessions/session-accessor.js";
 import type { ContextEngine } from "../../context-engine/types.js";
+import { racePromiseWithAbortSignal } from "../../infra/abort-signal.js";
 import { resetCommandQueueStateForTest } from "../../process/command-queue.test-support.js";
 import { onSessionTranscriptUpdate } from "../../sessions/transcript-events.js";
 import { createDeferredCore } from "../../shared/deferred.js";
@@ -232,9 +233,9 @@ describe("context-engine maintenance transcript ownership", () => {
     },
   );
 
-  it.each(modes)(
+  it.for(modes)(
     "does not coalesce or wait for foreign durable work with executionMode=%s",
-    async (executionMode) => {
+    async (executionMode, { signal }) => {
       await withTranscriptOwners(async ({ memory, durable, params, target }) => {
         const release = createDeferredCore();
         const foreignStarted = createDeferredCore();
@@ -252,7 +253,7 @@ describe("context-engine maintenance transcript ownership", () => {
         });
         let run: Promise<unknown> | undefined;
         try {
-          await foreignStarted.promise;
+          await racePromiseWithAbortSignal(foreignStarted.promise, signal);
           expect(foreignMaintain).toHaveBeenCalledOnce();
           const tasksBefore = listTasksForOwnerKey(target.sessionKey);
           const maintain = vi.fn(async () => ({
