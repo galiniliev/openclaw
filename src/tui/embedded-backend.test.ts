@@ -933,6 +933,7 @@ describe("EmbeddedTuiBackend", () => {
     loadSessionEntry: loadSessionEntryMock,
     describe: sessionProjection.describe,
     present: sessionProjection.present,
+    withPreparedExactRows: sessionProjection.withPreparedExactRows,
     buildSessionRow: buildGatewaySessionRowMock,
   });
 

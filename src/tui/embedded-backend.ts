@@ -141,7 +141,7 @@ import {
 import { EmbeddedPreparedModelRuntimeHost } from "./embedded-prepared-runtime.js";
 import {
   createEmbeddedSessionReader,
-  readEmbeddedProjectedSession,
+  readEmbeddedHistorySessionInfo,
 } from "./embedded-session-reader.js";
 import type {
   ChatSendOptions,
@@ -581,7 +581,6 @@ export class EmbeddedTuiBackend implements TuiBackend {
       agentId: sessionAgentId,
       storePath: readSource?.path ?? storePath,
     };
-    const current = projection ? await readEmbeddedProjectedSession(projection, target) : undefined;
     const sessionInfo =
       entry && (entry.incognito || isIncognitoSessionKey(canonicalKey))
         ? buildGatewaySessionRow({
@@ -595,11 +594,11 @@ export class EmbeddedTuiBackend implements TuiBackend {
             lightweightListRow: true,
             skipTranscriptUsageFallback: true,
           })
-        : entry &&
-            current &&
-            current.entry.sessionId === sessionId &&
-            current.entry.lifecycleRevision === entry.lifecycleRevision
-          ? projection?.present(current)
+        : entry && projection
+          ? await readEmbeddedHistorySessionInfo(projection, target, {
+              sessionId,
+              lifecycleRevision: entry.lifecycleRevision,
+            })
           : undefined;
     const verboseLevel = entry?.verboseLevel ?? cfg.agents?.defaults?.verboseDefault;
     if (sessionInfo) {

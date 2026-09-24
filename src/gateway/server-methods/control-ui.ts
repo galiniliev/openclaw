@@ -446,11 +446,16 @@ export function createControlUiHandlers(
           throw new gitHubPublicApi.ControlUiGitHubError(404, "Session CI details unavailable");
         }
         const assertCurrent = () => {
-          binding.assertCurrent?.();
-          const identityCurrent = client
-            ? true
-            : resolveCheckDetailsSession(parsed.sessionKey, context, client)?.identity ===
-              binding.identity;
+          let identityCurrent = false;
+          try {
+            binding.assertCurrent?.();
+            identityCurrent = client
+              ? true
+              : resolveCheckDetailsSession(parsed.sessionKey, context, client)?.identity ===
+                binding.identity;
+          } catch {
+            // The read owner reports retired selections and grants as assertion failures.
+          }
           if (signal?.aborted || !identityCurrent) {
             throw new gitHubPublicApi.ControlUiGitHubError(
               409,

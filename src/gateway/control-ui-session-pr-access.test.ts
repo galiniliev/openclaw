@@ -431,6 +431,8 @@ describe("registered session PR subscriptions", () => {
           if (delayed) {
             await f.subscriptions.replace(f.client.connId!, [sessionKey], new Set([sessionKey]));
             await f.subscribe([sessionKey], peer.client);
+            // Admission precedes hydration; join the retained cell before measuring refresh delivery.
+            await f.subscriptions.replace(peer.client.connId!, [sessionKey]);
             f.load.mockClear();
             f.socket.send.mockClear();
             peer.socket.send.mockClear();
@@ -460,6 +462,10 @@ describe("registered session PR subscriptions", () => {
             if (delayed) {
               await vi.advanceTimersByTimeAsync(10_000);
               await entered.promise;
+              expect(
+                frames(peer.socket),
+                "no refresh result before the held loader settles",
+              ).toEqual([]);
             }
             held.resolve(snapshot);
             await Promise.all([f.subscriptions.pollNow(), ...refreshes]);
@@ -667,7 +673,14 @@ describe("registered session PR check details", () => {
           expect(respond).toHaveBeenCalledExactlyOnceWith(
             mutation === "unchanged",
             mutation === "unchanged" ? result : undefined,
-            mutation === "unchanged" ? undefined : expect.objectContaining({ code: "UNAVAILABLE" }),
+            mutation === "unchanged"
+              ? undefined
+              : expect.objectContaining({
+                  code: "UNAVAILABLE",
+                  ...(mutation === "store closure"
+                    ? {}
+                    : { message: "Session changed; reopen CI details" }),
+                }),
           );
         } finally {
           held.resolve(result);
