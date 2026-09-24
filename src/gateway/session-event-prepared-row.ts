@@ -22,7 +22,7 @@ export async function withPreparedSessionEventRow(
     await withReadySessionRows(
       projection,
       () => [{ key: sessionKey, agentId: routingAgentId }],
-      publish,
+      () => publish(),
       { includeAncestors: true },
     );
     return;
