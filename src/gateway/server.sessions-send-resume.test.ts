@@ -10,7 +10,6 @@ import type { AgentCommandGatewayIngressOpts } from "../agents/command/types.js"
 import { subagentRuns } from "../agents/subagents/registry/subagent-registry-memory.js";
 import { markSubagentRunPausedAfterYield } from "../agents/subagents/registry/subagent-registry-run-pause.js";
 import { persistSubagentRunsToDiskOrThrow } from "../agents/subagents/registry/subagent-registry-state.js";
-import { observeRootWork } from "../agents/subagents/registry/subagent-registry.browser-cleanup.test-support.js";
 import {
   markSubagentRunTerminated,
   registerSubagentRun,
@@ -23,7 +22,6 @@ import {
   listSessionPendingInputs,
 } from "../config/sessions/session-accessor.js";
 import { publishSystemEventStoreConfig } from "../config/sessions/session-store-path.js";
-import { racePromiseWithAbortSignal } from "../infra/abort-signal.js";
 import { emitAgentEvent } from "../infra/agent-events.js";
 import { withPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
 import { findTaskByRunId } from "../tasks/task-registry.js";
@@ -37,7 +35,10 @@ import {
   testState,
   writeSessionStore,
 } from "./test-helpers.js";
-import { releaseGatewaySessionStoreFixture } from "./test/server-sessions-resources.test-helpers.js";
+import {
+  releaseGatewaySessionStoreFixture,
+  settleGatewaySessionStoreFixture,
+} from "./test/server-sessions-resources.test-helpers.js";
 
 installGatewayTestHooks({ scope: "suite" });
 const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>
@@ -388,26 +389,21 @@ it("fences a cancelled successor after adoption before queued input consumption"
   }
 });
 
-it.for(["explicit", "automatic"] as const)(
+it.each(["explicit", "automatic"] as const)(
   "resumes a visible child with write-only operator authority (%s)",
-  async (mode, { signal }) => {
+  async (mode) => {
     const root = tempDirs.make("openclaw-parent-resume-gateway-");
     const parent = "agent:main:main";
     const child = `agent:main:dashboard:resume-proof-${mode}`;
     const previousRunId = `resume-gateway-${mode}-paused`;
     const release = createDeferred();
     const started = createDeferred();
-    const announced = createDeferred();
     const announce = vi
       .spyOn(
         await import("../agents/subagents/announce/subagent-announce.js"),
         "runSubagentAnnounceFlow",
       )
-      .mockImplementation(async () => {
-        announced.resolve();
-        return "delivered";
-      });
-    const settleRootWork = observeRootWork();
+      .mockResolvedValue("delivered");
     testState.sessionStorePath = path.join(root, "sessions.json");
     try {
       await writeSessionStore({
@@ -501,13 +497,12 @@ it.for(["explicit", "automatic"] as const)(
         completion: "task",
       });
       expect(result.details).not.toHaveProperty("reply");
-      await racePromiseWithAbortSignal(started.promise, signal);
+      await started.promise;
       expect(announce).not.toHaveBeenCalled();
       expect(findTaskByRunId(previousRunId)?.taskId).toBe(taskId);
       release.resolve();
-      await racePromiseWithAbortSignal(announced.promise, signal);
-      await settleRootWork(true);
-      expect(announce).toHaveBeenCalledTimes(1);
+      await settleGatewaySessionStoreFixture(root);
+      await vi.waitFor(() => expect(announce).toHaveBeenCalledTimes(1));
       expect(announce).toHaveBeenCalledWith(
         expect.objectContaining({
           requesterSessionKey: parent,
@@ -515,12 +510,12 @@ it.for(["explicit", "automatic"] as const)(
           roundOneReply: "Resumed child finished.",
         }),
       );
-      expect(findTaskByRunId(previousRunId)?.status).toBe("succeeded");
+      await vi.waitFor(() => expect(findTaskByRunId(previousRunId)?.status).toBe("succeeded"));
       expect(agentCommandMock).toHaveBeenCalledTimes(1);
     } finally {
       release.resolve();
       try {
-        await settleRootWork();
+        await settleGatewaySessionStoreFixture(root);
       } finally {
         announce.mockRestore();
       }

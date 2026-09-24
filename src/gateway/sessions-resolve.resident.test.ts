@@ -1,4 +1,3 @@
-import { StatementSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import type { SessionsResolveParams } from "../../packages/gateway-protocol/src/index.js";
 import { writeAcpSessionMetaForMigration } from "../acp/runtime/session-meta.js";
@@ -10,6 +9,7 @@ import {
   resolveOpenClawAgentSqlitePath,
   runOpenClawAgentWriteTransaction,
 } from "../state/openclaw-agent-db.js";
+import { observeMainThreadReads } from "../test-utils/main-thread-sql-spies.test-support.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { retainSessionListForegroundWork } from "./session-projection-work.js";
 import { createSessionRowProjection } from "./session-row-projection.js";
@@ -63,9 +63,7 @@ it("resolves free ACP aliases from current resident facts without SQLite or disc
     const releaseForegroundWork = retainSessionListForegroundWork();
     try {
       await projection.ensureMaterialized();
-      const reads = (["all", "get", "iterate"] as const).map((method) =>
-        vi.spyOn(StatementSync.prototype, method),
-      );
+      const reads = observeMainThreadReads();
       const describe = vi.spyOn(projection, "describe");
       const selections = vi.spyOn(projection, "selectEntries");
       try {
@@ -95,15 +93,11 @@ it("resolves free ACP aliases from current resident facts without SQLite or disc
             p: { key: acpKey },
           }),
         ).toMatchObject({ ok: true, key: acpKey, agentId: "harness" });
-        for (const read of reads) {
-          expect(read).not.toHaveBeenCalled();
-        }
+        reads.expectIdle();
       } finally {
         describe.mockRestore();
         selections.mockRestore();
-        for (const read of reads) {
-          read.mockRestore();
-        }
+        reads.restore();
       }
     } finally {
       projection.dispose();
@@ -303,9 +297,7 @@ it("resolves all selectors from one resident projection and sees committed label
       withPreparedSessionResolve({ client: null, projection, p }, (resolved) => resolved);
     try {
       await projection.ensureMaterialized();
-      const reads = (["all", "get", "iterate"] as const).map((method) =>
-        vi.spyOn(StatementSync.prototype, method),
-      );
+      const reads = observeMainThreadReads();
       try {
         for (const p of [
           { key },
@@ -316,13 +308,9 @@ it("resolves all selectors from one resident projection and sees committed label
         ]) {
           expect(await resolve(p)).toMatchObject({ ok: true, key, agentId: "main" });
         }
-        for (const read of reads) {
-          expect(read).not.toHaveBeenCalled();
-        }
+        reads.expectIdle();
       } finally {
-        for (const read of reads) {
-          read.mockRestore();
-        }
+        reads.restore();
       }
       replaceSessionEntrySync(scope, { ...entry, label: "Updated label" });
       expect(await resolve({ label: "Updated label" })).toEqual({
@@ -346,9 +334,7 @@ it("searches stored and selected model identities from retained row facts withou
     const projection = await createSessionRowProjection({ cfg });
     try {
       await projection.ensureMaterialized();
-      const reads = (["all", "get", "iterate"] as const).map((method) =>
-        vi.spyOn(StatementSync.prototype, method),
-      );
+      const reads = observeMainThreadReads();
       try {
         for (const search of ["Original label", "ollama/qwen3", "openai/gpt-5.5", "direct"]) {
           const opts = { search };
@@ -360,13 +346,9 @@ it("searches stored and selected model identities from retained row facts withou
             }).map(([selected]) => selected),
           ).toEqual([key]);
         }
-        for (const read of reads) {
-          expect(read).not.toHaveBeenCalled();
-        }
+        reads.expectIdle();
       } finally {
-        for (const read of reads) {
-          read.mockRestore();
-        }
+        reads.restore();
       }
     } finally {
       projection.dispose();
