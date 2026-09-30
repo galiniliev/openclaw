@@ -23,8 +23,6 @@ vi.mock("../graph-thread.js", async (importOriginal) => ({
   fetchThreadReplies: graph.fetchThreadReplies,
   fetchChatMessageText: graph.fetchChatMessageText,
 }));
-/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */
-
 vi.mock("../team-identity.js", () => ({ resolveTeamGroupId: graph.resolveTeamGroupId }));
 
 let sequence = 0;
@@ -401,6 +399,60 @@ describe("msteams message authorization and supplemental context", () => {
     expect(context().BodyForAgent).toBe("Current message");
   });
 
+  it("observes allowed and mismatched quotes at final agent context", async () => {
+    const dispatchFinalContext = async (quoteSenderId: string) => {
+      dispatch.mockClear();
+      graph.fetchChannelMessage.mockResolvedValue(
+        threadMessage(
+          parentId,
+          { id: "alice-aad", displayName: "Alice" },
+          "Allowlisted thread parent",
+        ),
+      );
+      const { handler } = setup(threadConfig());
+      await handler(
+        threadActivity(
+          [
+            {
+              contentType: "text/html",
+              content:
+                '<blockquote itemtype="http://schema.skype.com/Forward">' +
+                "<p>forwarded body</p></blockquote>",
+            },
+          ],
+          {
+            text: "<at>Bot</at> ask <at>Bob</at>\n\nforwarded body",
+            entities: [
+              { type: "mention", text: "<at>Bot</at>", mentioned: { id: "bot-id", name: "Bot" } },
+              { type: "mention", text: "<at>Bob</at>", mentioned: { id: "bob-id", name: "Bob" } },
+              {
+                type: "quotedReply",
+                quotedReply: {
+                  senderId: quoteSenderId,
+                  senderName: quoteSenderId === "alice-aad" ? "Alice" : "Mallory",
+                  preview: "Sanitized quoted preview",
+                },
+              },
+            ],
+          },
+        ),
+      );
+      return context();
+    };
+
+    const allowed = await dispatchFinalContext("alice-aad");
+    expect(allowed.BodyForAgent).toBe(
+      "ask @Bob\n\n[Forwarded message]\nforwarded body\n[/Forwarded message]",
+    );
+    expect(allowed.ReplyToBody).toBe("Sanitized quoted preview");
+    expect(allowed.ReplyToSender).toBe("Alice");
+
+    const mismatched = await dispatchFinalContext("mallory-aad");
+    expect(mismatched.BodyForAgent).toBe(allowed.BodyForAgent);
+    expect(mismatched.ReplyToBody).toBeUndefined();
+    expect(mismatched.ReplyToSender).toBeUndefined();
+  });
+
   it("does not let an allowed entity authorize a body from another Reply block", async () => {
     graph.fetchChannelMessage.mockResolvedValue(
       threadMessage(parentId, { id: "alice-aad", displayName: "Alice" }, "Allowed parent"),
@@ -530,6 +582,3 @@ describe("msteams message authorization and supplemental context", () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 });
-
-
-

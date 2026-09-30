@@ -43,7 +43,7 @@ function extractTextFromHtmlAttachments(attachments: MSTeamsAttachmentLike[]): s
 export type MSTeamsDebounceEntry = Awaited<ReturnType<typeof prepareMSTeamsDebounceEntry>>;
 
 export function mergeMSTeamsQuoteInfo(
-  entries: readonly Pick<MSTeamsDebounceEntry, "quoteInfo">[],
+  entries: readonly { quoteInfo?: MSTeamsQuoteInfo }[],
 ): MSTeamsQuoteInfo | undefined {
   const quoteInfos = entries.flatMap((entry) => (entry.quoteInfo ? [entry.quoteInfo] : []));
   const first = quoteInfos[0];
