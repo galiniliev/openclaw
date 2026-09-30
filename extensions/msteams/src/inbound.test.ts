@@ -27,6 +27,23 @@ describe("msteams inbound", () => {
       ).toBe("ask @Alice");
     });
 
+    it("matches reordered mention entities to their text spans", () => {
+      expect(
+        buildMSTeamsNormalizedText({
+          text: "<at>Bot</at> ask <at>Alice</at>",
+          botId: "bot-id",
+          entities: [
+            {
+              type: "mention",
+              text: "<at>Alice</at>",
+              mentioned: { id: "alice-id", name: "Alice" },
+            },
+            { type: "mention", text: "<at>Bot</at>", mentioned: { id: "bot-id", name: "Bot" } },
+          ],
+        }),
+      ).toBe("ask @Alice");
+    });
+
     it("removes every inline quote marker", () => {
       expect(
         buildMSTeamsNormalizedText({
@@ -138,14 +155,25 @@ describe("msteams inbound", () => {
       });
     });
 
-    it("keeps entity sender identity when the attachment supplies the quote body", () => {
+    it("keeps entity sender identity when its message id matches the attachment", () => {
       expect(
         extractMSTeamsQuoteInfo(
-          [replyAttachment()],
+          [
+            replyAttachment({
+              content:
+                '<blockquote itemtype="http://schema.skype.com/Reply" itemid="quote-1">' +
+                '<strong itemprop="mri">Mallory</strong>' +
+                '<p itemprop="copy">Hello world</p></blockquote>',
+            }),
+          ],
           [
             {
               type: "quotedReply",
-              quotedReply: { senderId: "blocked-aad", senderName: "Mallory" },
+              quotedReply: {
+                messageId: "quote-1",
+                senderId: "blocked-aad",
+                senderName: "Mallory",
+              },
             },
           ],
         ),
@@ -153,8 +181,34 @@ describe("msteams inbound", () => {
         senderId: "blocked-aad",
         sender: "Mallory",
         body: "Hello world",
+        id: "quote-1",
         fromQuotedReplyEntity: true,
       });
+    });
+
+    it("rejects an attachment body whose message id does not match the entity", () => {
+      expect(
+        extractMSTeamsQuoteInfo(
+          [
+            replyAttachment({
+              content:
+                '<blockquote itemtype="http://schema.skype.com/Reply" itemid="quote-b">' +
+                '<strong itemprop="mri">Mallory</strong>' +
+                '<p itemprop="copy">Blocked attachment body</p></blockquote>',
+            }),
+          ],
+          [
+            {
+              type: "quotedReply",
+              quotedReply: {
+                messageId: "quote-a",
+                senderId: "alice-aad",
+                senderName: "Alice",
+              },
+            },
+          ],
+        ),
+      ).toBeUndefined();
     });
 
     it("returns undefined when no reply blockquote is present", () => {
