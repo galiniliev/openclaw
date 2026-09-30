@@ -23,6 +23,8 @@ vi.mock("../graph-thread.js", async (importOriginal) => ({
   fetchThreadReplies: graph.fetchThreadReplies,
   fetchChatMessageText: graph.fetchChatMessageText,
 }));
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */
+
 vi.mock("../team-identity.js", () => ({ resolveTeamGroupId: graph.resolveTeamGroupId }));
 
 let sequence = 0;
@@ -465,5 +467,6 @@ describe("msteams message authorization and supplemental context", () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 });
+
 
 
