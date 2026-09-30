@@ -211,6 +211,33 @@ describe("msteams inbound", () => {
       ).toBeUndefined();
     });
 
+    it("does not combine one Reply block's id with another block's body", () => {
+      expect(
+        extractMSTeamsQuoteInfo(
+          [
+            replyAttachment({
+              content:
+                '<blockquote itemtype="http://schema.skype.com/Reply" itemid="quote-a">' +
+                '<strong itemprop="mri">Alice</strong></blockquote>' +
+                '<blockquote itemtype="http://schema.skype.com/Reply" itemid="quote-b">' +
+                '<strong itemprop="mri">Mallory</strong>' +
+                '<p itemprop="copy">Blocked attachment body</p></blockquote>',
+            }),
+          ],
+          [
+            {
+              type: "quotedReply",
+              quotedReply: {
+                messageId: "quote-a",
+                senderId: "alice-aad",
+                senderName: "Alice",
+              },
+            },
+          ],
+        ),
+      ).toBeUndefined();
+    });
+
     it("returns undefined when no reply blockquote is present", () => {
       expect(
         extractMSTeamsQuoteInfo([{ contentType: "text/html", content: "<p>just a message</p>" }]),

@@ -83,25 +83,26 @@ export function extractMSTeamsQuoteInfo(
       continue;
     }
 
-    // Extract sender from <strong itemprop="mri">.
-    const senderMatch = /<strong[^>]*itemprop=["']mri["'][^>]*>(.*?)<\/strong>/i.exec(content);
-    const sender = senderMatch?.[1] ? htmlToPlainText(senderMatch[1]) : undefined;
+    for (const replyBlock of content.matchAll(
+      /<blockquote\b(?=[^>]*\bitemtype=["']http:\/\/schema\.skype\.com\/Reply["'])([^>]*)>(.*?)<\/blockquote>/gis,
+    )) {
+      const attributes = replyBlock[1] ?? "";
+      const replyHtml = replyBlock[2] ?? "";
+      const senderMatch = /<strong[^>]*itemprop=["']mri["'][^>]*>(.*?)<\/strong>/i.exec(replyHtml);
+      const sender = senderMatch?.[1] ? htmlToPlainText(senderMatch[1]) : undefined;
 
-    // Extract body from <p itemprop="copy"> (full quoted text) and fall back to
-    // <p itemprop="preview"> — the truncated snippet Teams actually sends for
-    // quote replies. Prefer `copy` when both are present.
-    const copyMatch = /<p[^>]*itemprop=["']copy["'][^>]*>(.*?)<\/p>/is.exec(content);
-    const bodyMatch =
-      copyMatch ?? /<p[^>]*itemprop=["']preview["'][^>]*>(.*?)<\/p>/is.exec(content);
-    const body = bodyMatch?.[1] ? htmlToPlainText(bodyMatch[1]) : undefined;
+      // Keep identity and text scoped to one Reply block. Prefer the full copy
+      // over Teams' truncated preview when both occur in that same block.
+      const copyMatch = /<p[^>]*itemprop=["']copy["'][^>]*>(.*?)<\/p>/is.exec(replyHtml);
+      const bodyMatch =
+        copyMatch ?? /<p[^>]*itemprop=["']preview["'][^>]*>(.*?)<\/p>/is.exec(replyHtml);
+      const body = bodyMatch?.[1] ? htmlToPlainText(bodyMatch[1]) : undefined;
+      const idMatch = /\bitemid=["']([^"']+)["']/i.exec(attributes);
+      const id = idMatch?.[1]?.trim() || undefined;
+      if (!body) {
+        continue;
+      }
 
-    // Capture the blockquote `itemid` (the quoted message's Teams id) so callers
-    // can fetch the complete message text via Graph when only a preview snippet
-    // is available.
-    const idMatch = /<blockquote[^>]*\bitemid=["']([^"']+)["'][^>]*>/is.exec(content);
-    const id = idMatch?.[1]?.trim() || undefined;
-
-    if (body) {
       const quotedReply = quotedEntity?.quotedReply;
       const entitySender =
         typeof quotedReply?.senderName === "string" ? quotedReply.senderName.trim() : "";

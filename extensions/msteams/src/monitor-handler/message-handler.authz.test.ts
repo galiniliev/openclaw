@@ -1029,7 +1029,7 @@ describe("msteams monitor handler authz", () => {
     expect(ctx.BodyForAgent).toBe("Current message");
   });
 
-  it("does not let an allowed entity authorize a mismatched attachment body", async () => {
+  it("does not let an allowed entity authorize a body from another Reply block", async () => {
     mockThreadContext({
       parent: createThreadMessage({
         id: "parent-msg",
@@ -1043,7 +1043,14 @@ describe("msteams monitor handler authz", () => {
     await handler(
       createChannelThreadActivity({
         attachments: [
-          createIdentifiedQuoteAttachment("quote-b", "Mallory", "Blocked attachment body"),
+          {
+            contentType: "text/html",
+            content:
+              '<blockquote itemtype="http://schema.skype.com/Reply" itemid="quote-a">' +
+              '<strong itemprop="mri">Alice</strong></blockquote>' +
+              createIdentifiedQuoteAttachment("quote-b", "Mallory", "Blocked attachment body")
+                .content,
+          },
         ],
         entities: [
           {
