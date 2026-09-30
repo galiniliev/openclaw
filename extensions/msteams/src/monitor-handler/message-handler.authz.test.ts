@@ -227,6 +227,7 @@ describe("msteams monitor handler authz", () => {
   function createChannelThreadActivity(params?: {
     text?: string;
     attachments?: TestAttachment[];
+    entities?: Array<Record<string, unknown>>;
   }): HandlerInput {
     return createMessageActivity({
       id: "current-msg",
@@ -244,7 +245,7 @@ describe("msteams monitor handler authz", () => {
         team: { id: "team123", name: "Team 123", aadGroupId: "graph-team-123" },
         channel: { id: "19:graph-channel@thread.tacv2", name: "General" },
       },
-      extraActivity: { replyToId: currentParentMessageId },
+      extraActivity: { replyToId: currentParentMessageId, entities: params?.entities ?? [] },
       attachments: params?.attachments ?? [],
     });
   }
@@ -257,11 +258,16 @@ describe("msteams monitor handler authz", () => {
     };
   }
 
-  async function dispatchQuoteContextWithParent(parent: GraphThreadMessage) {
+  async function dispatchQuoteContextWithParent(
+    parent: GraphThreadMessage,
+    entities?: Array<Record<string, unknown>>,
+  ) {
     mockThreadContext({ parent });
     const { deps } = createDeps(createThreadAllowlistConfig({ groupAllowFrom: ["alice-aad"] }));
     const handler = createMSTeamsMessageHandler(deps);
-    await handler(createChannelThreadActivity({ attachments: [createQuoteAttachment()] }));
+    await handler(
+      createChannelThreadActivity({ attachments: [createQuoteAttachment()], entities }),
+    );
     return firstSettledDispatch().ctxPayload;
   }
 
@@ -986,13 +992,23 @@ describe("msteams monitor handler authz", () => {
     expect(ctx.ReplyToSender).toBe("Alice");
   });
 
-  it("drops quote context when attachment metadata disagrees with a blocked parent sender", async () => {
+  it("does not let an allowed parent authorize a blocked quotedReply sender", async () => {
     const ctxPayload = await dispatchQuoteContextWithParent(
       createThreadMessage({
         id: "parent-msg",
-        user: { id: "mallory-aad", displayName: "Mallory" },
-        content: "Blocked context",
+        user: { id: "alice-aad", displayName: "Alice" },
+        content: "Allowed parent",
       }),
+      [
+        {
+          type: "quotedReply",
+          quotedReply: {
+            senderId: "mallory-aad",
+            senderName: "Mallory",
+            preview: "Blocked entity preview",
+          },
+        },
+      ],
     );
 
     const ctx = recordFromMockCall(ctxPayload);

@@ -27,6 +27,7 @@ import { prepareMSTeamsInboundContent } from "./inbound-content.js";
 import { dispatchMSTeamsInboundTurn } from "./inbound-dispatch.js";
 import {
   assembleMSTeamsInboundFacts,
+  mergeMSTeamsQuoteInfo,
   prepareMSTeamsDebounceEntry,
   type MSTeamsDebounceEntry,
 } from "./inbound-facts.js";
@@ -388,6 +389,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
                   .join("\n");
                 const wasMentioned = entries.some((entry) => entry.wasMentioned);
                 const implicitMentionKinds = entries.flatMap((entry) => entry.implicitMentionKinds);
+                const quoteInfo = mergeMSTeamsQuoteInfo(entries);
                 await handleTeamsMessageNow({
                   context: last.context,
                   rawText: combinedRawText,
@@ -395,6 +397,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
                   attachments: [],
                   wasMentioned,
                   implicitMentionKinds,
+                  quoteInfo,
                   turnAdoptionLifecycle: admissionLifecycle,
                 });
               }
