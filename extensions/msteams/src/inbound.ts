@@ -108,6 +108,12 @@ export function extractMSTeamsQuoteInfo(
       const entityId =
         typeof quotedReply?.messageId === "string" ? quotedReply.messageId.trim() : "";
       const senderId = typeof quotedReply?.senderId === "string" ? quotedReply.senderId.trim() : "";
+      // Do not authorize attachment HTML with an unrelated entity identity.
+      // When Teams supplies both sources, their message ids must bind them to
+      // the same quote before the authenticated entity sender can be used.
+      if (quotedEntity && (!entityId || !id || entityId !== id)) {
+        continue;
+      }
       return {
         sender: entitySender || sender || "unknown",
         body,
@@ -151,7 +157,7 @@ function normalizeMSTeamsMentionTags(
   botId?: string | null,
   botName?: string | null,
 ): string {
-  const mentions: Array<{ id?: string; name: string }> = [];
+  const mentions: Array<{ id?: string; name: string; text: string }> = [];
   for (const entity of entities) {
     const name = entity.mentioned?.name;
     if (entity.type !== "mention" || typeof entity.text !== "string" || typeof name !== "string") {
@@ -160,18 +166,24 @@ function normalizeMSTeamsMentionTags(
     mentions.push({
       id: typeof entity.mentioned?.id === "string" ? entity.mentioned.id : undefined,
       name,
+      text: entity.text.trim(),
     });
   }
 
   return text.replace(/<at\b[^>]*>.*?<\/at>/gis, (tag) => {
-    const mention = mentions.shift();
+    const displayName = htmlToPlainText(tag);
+    const exactIndex = mentions.findIndex((mention) => mention.text === tag.trim());
+    const displayIndex = mentions.findIndex(
+      (mention) => htmlToPlainText(mention.text) === displayName,
+    );
+    const mentionIndex = exactIndex >= 0 ? exactIndex : displayIndex;
+    const mention = mentionIndex >= 0 ? mentions.splice(mentionIndex, 1)[0] : undefined;
     if (mention?.id && botId && mention.id === botId) {
       return "";
     }
     if (mention) {
       return `@${mention.name}`;
     }
-    const displayName = htmlToPlainText(tag);
     if (!botId) {
       return "";
     }

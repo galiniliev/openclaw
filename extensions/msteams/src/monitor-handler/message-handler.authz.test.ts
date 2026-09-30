@@ -258,6 +258,16 @@ describe("msteams monitor handler authz", () => {
     };
   }
 
+  function createIdentifiedQuoteAttachment(messageId: string, sender: string, body: string) {
+    return {
+      contentType: "text/html",
+      content:
+        `<blockquote itemtype="http://schema.skype.com/Reply" itemid="${messageId}">` +
+        `<strong itemprop="mri">${sender}</strong>` +
+        `<p itemprop="copy">${body}</p></blockquote>`,
+    };
+  }
+
   async function dispatchQuoteContextWithParent(
     parent: GraphThreadMessage,
     entities?: Array<Record<string, unknown>>,
@@ -1012,6 +1022,41 @@ describe("msteams monitor handler authz", () => {
     );
 
     const ctx = recordFromMockCall(ctxPayload);
+    expect(ctx.ReplyToBody).toBeUndefined();
+    expect(ctx.ReplyToSender).toBeUndefined();
+    expect(ctx.BodyForAgent).toBe("Current message");
+  });
+
+  it("does not let an allowed entity authorize a mismatched attachment body", async () => {
+    mockThreadContext({
+      parent: createThreadMessage({
+        id: "parent-msg",
+        user: { id: "alice-aad", displayName: "Alice" },
+        content: "Allowed parent",
+      }),
+    });
+    const { deps } = createDeps(createThreadAllowlistConfig({ groupAllowFrom: ["alice-aad"] }));
+    const handler = createMSTeamsMessageHandler(deps);
+
+    await handler(
+      createChannelThreadActivity({
+        attachments: [
+          createIdentifiedQuoteAttachment("quote-b", "Mallory", "Blocked attachment body"),
+        ],
+        entities: [
+          {
+            type: "quotedReply",
+            quotedReply: {
+              messageId: "quote-a",
+              senderId: "alice-aad",
+              senderName: "Alice",
+            },
+          },
+        ],
+      }),
+    );
+
+    const ctx = recordFromMockCall(firstSettledDispatch().ctxPayload);
     expect(ctx.ReplyToBody).toBeUndefined();
     expect(ctx.ReplyToSender).toBeUndefined();
     expect(ctx.BodyForAgent).toBe("Current message");
