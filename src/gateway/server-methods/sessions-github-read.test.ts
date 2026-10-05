@@ -4,6 +4,7 @@ import type { SessionGitHubStatusResult } from "../../../packages/gateway-protoc
 import { awaitGateBeforeSettlement } from "../../../test/helpers/promise.js";
 import { clearGitHubCredentialVerificationCache } from "../../agents/github-oauth-client.js";
 import { upsertSessionEntryCore } from "../../config/sessions/session-accessor.js";
+import { runWithDiagnosticTraceContext } from "../../infra/diagnostic-trace-context.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import {
   updateUserGitHubConnection,
@@ -50,6 +51,30 @@ afterEach(() => {
 });
 
 describe("publication receipt reads", () => {
+  it("records rejected credential preparation without exposing its private exception", async () => {
+    vi.mocked(publicationAvailability.prepareCurrentGitHubPublicationOptionsIdentity).mockRestore();
+    vi.stubEnv("GH_TOKEN", undefined);
+    vi.stubEnv("GITHUB_TOKEN", undefined);
+    mocks.runCommandBuffered.mockRejectedValueOnce(new Error("synthetic-private-token-header"));
+    await withReadFixture(async (fixture) => {
+      const respond = await fixture.invoke("sessions.github.options", { sessionKey });
+      expect(respond).toHaveBeenCalledOnce();
+      expect(fixture.readDiagnostics).toHaveBeenCalledWith(
+        "sessions.github.read.preparation",
+        expect.objectContaining({
+          requestId: "publication-read",
+          sessionId,
+          sessionKey,
+          subphase: "credential_read",
+          outcome: "rejected",
+        }),
+      );
+      expect(JSON.stringify(fixture.readDiagnostics.mock.calls)).not.toContain(
+        "synthetic-private-token-header",
+      );
+      expect(fixture.requestForSession).not.toHaveBeenCalled();
+    });
+  });
   it("reuses native authentication for consecutive options requests and refreshes after invalidation", async () => {
     vi.mocked(publicationAvailability.prepareCurrentGitHubPublicationOptionsIdentity).mockRestore();
     vi.stubEnv("GH_TOKEN", undefined);
@@ -106,6 +131,7 @@ describe("publication receipt reads", () => {
           workspace_tree: "2".repeat(40),
         };
         const target = {
+          sessionId,
           params: { sessionKey, agentId: "main" },
           identity: "pr-source",
           readSource: { agentId: "main", path: "/fixture" },
@@ -166,7 +192,7 @@ describe("publication receipt reads", () => {
     },
   );
 
-  it.each(["refresh", "personal", "receipt"] as const)(
+  it.each(["refresh", "native", "verification", "personal", "receipt"] as const)(
     "bounds a stalled %s read and prevents late work or a second response",
     async (phase) => {
       await withReadFixture(
@@ -177,11 +203,33 @@ describe("publication receipt reads", () => {
             entered.resolve();
             await pending.promise;
           };
-          if (phase === "refresh") {
+          if (phase === "refresh" || phase === "native" || phase === "verification") {
             vi.mocked(
               publicationAvailability.prepareCurrentGitHubPublicationOptionsIdentity,
             ).mockRestore();
-            vi.mocked(requestCurrentGitHubOAuthRefresh).mockImplementationOnce(hold);
+            if (phase === "refresh") {
+              vi.mocked(requestCurrentGitHubOAuthRefresh).mockImplementationOnce(hold);
+            } else {
+              vi.stubEnv("GH_TOKEN", undefined);
+              vi.stubEnv("GITHUB_TOKEN", undefined);
+              mocks.runCommandBuffered.mockImplementationOnce(async () => {
+                if (phase === "native") {
+                  await hold();
+                }
+                return {
+                  stdout: Buffer.from("synthetic-cold-native"),
+                  stderr: Buffer.alloc(0),
+                  code: 0,
+                  termination: "exit",
+                };
+              });
+              vi.spyOn(globalThis, "fetch").mockImplementationOnce(async () => {
+                if (phase === "verification") {
+                  await hold();
+                }
+                return Response.json({ id: 7, login: "shared-bot", avatar_url: null });
+              });
+            }
             mocks.runCommandBuffered.mockClear();
           } else if (phase === "personal") {
             fixture.personalConnectionStatus.mockImplementationOnce(async (action) => {
@@ -196,7 +244,10 @@ describe("publication receipt reads", () => {
           }
           vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
           const respond = vi.fn();
-          const request = fixture.invoke("sessions.github.options", { sessionKey }, respond);
+          const traceId = "a".repeat(32);
+          const request = runWithDiagnosticTraceContext({ traceId }, () =>
+            fixture.invoke("sessions.github.options", { sessionKey }, respond),
+          );
           try {
             await awaitGateBeforeSettlement(entered.promise, request, "Held read did not start");
             await vi.advanceTimersByTimeAsync(4_999);
@@ -207,14 +258,66 @@ describe("publication receipt reads", () => {
               undefined,
               expect.objectContaining({
                 code: "UNAVAILABLE",
-                message: "GitHub publication options timed out after 5 seconds; retry the request.",
+                message:
+                  phase === "refresh" || phase === "native" || phase === "verification"
+                    ? "GitHub account verification is still preparing; refresh publication options to retry. No publication was requested."
+                    : "GitHub publication options timed out after 5 seconds; retry the request.",
                 retryable: true,
+                details: {
+                  phase:
+                    phase === "refresh" || phase === "native" || phase === "verification"
+                      ? "shared_identity"
+                      : phase === "personal"
+                        ? "personal_status"
+                        : "shared_receipt",
+                  requestId: "publication-read",
+                },
               }),
             );
             await request;
+            if (phase === "refresh" || phase === "native" || phase === "verification") {
+              const subphase =
+                phase === "refresh"
+                  ? "oauth_refresh"
+                  : phase === "native"
+                    ? "credential_read"
+                    : "user_verification";
+              expect(fixture.readDiagnostics).toHaveBeenCalledWith(
+                "sessions.github.read.preparation",
+                expect.objectContaining({
+                  requestId: "publication-read",
+                  traceId,
+                  sessionId,
+                  sessionKey,
+                  subphase,
+                  outcome: "started",
+                }),
+              );
+              expect(fixture.readDiagnostics).toHaveBeenLastCalledWith(
+                "sessions.github.read",
+                expect.objectContaining({
+                  requestId: "publication-read",
+                  traceId,
+                  sessionId,
+                  sessionKey,
+                  identityPreparation: expect.objectContaining({
+                    [subphase]: expect.objectContaining({
+                      outcome: "timeout",
+                      durationMs: expect.any(Number),
+                    }),
+                  }),
+                }),
+              );
+              expect(JSON.stringify(fixture.readDiagnostics.mock.calls)).not.toContain(
+                "synthetic-cold-native",
+              );
+            }
+            const diagnosticCount = fixture.readDiagnostics.mock.calls.length;
             pending.resolve();
             await vi.advanceTimersByTimeAsync(0);
             expect(respond).toHaveBeenCalledOnce();
+            expect(fixture.readDiagnostics).toHaveBeenCalledTimes(diagnosticCount);
+            expect(fixture.requestForSession).not.toHaveBeenCalled();
             if (phase === "refresh") {
               expect(mocks.runCommandBuffered).not.toHaveBeenCalled();
               expect(fixture.personalConnectionStatus).not.toHaveBeenCalled();
