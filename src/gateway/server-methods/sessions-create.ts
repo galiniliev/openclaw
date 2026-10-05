@@ -38,6 +38,7 @@ import { createAgentRuntimeAuthorityGuard } from "./agent-runtime-authority.js";
 import { scheduleCreatedDashboardSessionTitle } from "./chat-send-background.js";
 import { handleDirectExternalChatSend } from "./chat-send-external-entry.js";
 import { normalizeChatSendRequest } from "./chat-send-request.js";
+import { isSyntheticGatewayCaller } from "./gateway-personal-caller.js";
 import { resolveRegisteredCatalogCreateTarget } from "./session-catalog.js";
 import { emitSessionsChanged } from "./session-change-event.js";
 import { registerCommittedSessionCategory } from "./session-create-category.js";
@@ -502,6 +503,8 @@ export const sessionCreateHandlers: GatewayRequestHandlers = {
       spawnDepth: p.spawnDepth,
       ...resolveSessionCreateRootParameters(p, preparedRoot?.value),
       permissionMode: p.permissionMode,
+      applyAgentPermissionDefault:
+        client?.connect.role === "operator" && !isSyntheticGatewayCaller(client),
       ...(p.toolOverrides !== undefined ? { toolOverrides: p.toolOverrides } : {}),
       prepareLifecycle,
       onLifecycleCleanupError: (error) =>

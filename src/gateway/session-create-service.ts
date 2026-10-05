@@ -64,12 +64,9 @@ import {
   runExclusiveSessionLifecycleMutation,
 } from "../sessions/session-lifecycle-admission.js";
 import { normalizeSessionDeliveryState } from "../utils/delivery-context.shared.js";
-import { authorizeGatewaySessionCreation, resolveCreatorSandbox } from "./operator-role-policy.js";
+import { authorizeGatewaySessionCreation } from "./operator-role-policy.js";
 import { ADMIN_SCOPE } from "./operator-scopes.js";
-import {
-  prepareSessionCreateFilesystemRoot,
-  prepareSessionForkFilesystemRoot,
-} from "./server-methods/session-create-root.js";
+import { prepareSessionCreateFilesystemRoot } from "./server-methods/session-create-root.js";
 import {
   prepareSessionPatchRuntimeSelection,
   refreshSessionPatchQueuedSelection,
@@ -123,6 +120,7 @@ export async function createGatewaySession(
   const { personalModelSelection, personalAccountDefaults, onPhase } = params;
   let operatorAuthority: Parameters<typeof createSessionCreateCommitGuard>[0]["operatorAuthority"];
   let assertPreparedTargetCurrent: (() => void) | undefined;
+  let assertPermissionDefaultCurrent: (() => void) | undefined;
   let creationOperation: SessionEntryCreationOperation | undefined;
   let createdTargetCommitted = false;
   let bindPreparedCreation: SessionEntryCreateWithTranscriptOptions["bindCreation"];
@@ -147,6 +145,7 @@ export async function createGatewaySession(
           assertCallerCurrent: () => {
             params.commitGuard?.();
             assertPreparedTargetCurrent?.();
+            assertPermissionDefaultCurrent?.();
           },
           get operatorAuthority() {
             return operatorAuthority;
@@ -587,44 +586,27 @@ export async function createGatewaySession(
     });
     const target = creationTarget;
     const targetRead = readSessionCreateTarget(
-      params,
-      target,
-      initialTargetEntry?.sessionId,
-      targetLifecycleIdentities,
+      { ...params, creation },
+      {
+        target,
+        expectedSessionId: initialTargetEntry?.sessionId,
+        lifecycleIdentities: targetLifecycleIdentities,
+        parent: currentParentSessionEntry,
+        parentAgentId: parentSessionTarget?.agentId,
+        operatorAuthority,
+      },
     );
     if (!targetRead.ok) {
       return targetRead;
     }
-    const currentTargetEntry = targetRead.value;
-    // Delegated isolation survives changes to the creator's current role.
-    const creationSandbox =
-      creation?.sandbox ?? (creation ? resolveCreatorSandbox(params.cfg, creation) : undefined);
-    const sandboxRequired =
-      currentTargetEntry?.sandbox === "required" || creationSandbox === "required";
-    const forkWorkspace =
-      params.fork === true &&
-      currentParentSessionEntry &&
-      !currentTargetEntry &&
-      parentSessionTarget?.agentId === target.agentId &&
-      !projectId &&
-      !params.spawnedCwd &&
-      !params.sessionRoot &&
-      !params.execNode &&
-      !params.prepareLifecycle &&
-      !params.pendingWorktree &&
-      !params.pendingProjectGitUrl
-        ? prepareSessionForkFilesystemRoot({
-            cfg: params.cfg,
-            parent: currentParentSessionEntry,
-            targetAgentId: target.agentId,
-            sessionKey: target.canonicalKey,
-            sandboxRequired,
-          })
-        : undefined;
-    if (forkWorkspace && !forkWorkspace.ok) {
-      return { ok: false, error: forkWorkspace.error };
-    }
-    const inheritedWorkspace = forkWorkspace?.value;
+    const {
+      entry: currentTargetEntry,
+      permissionMode,
+      creationSandbox,
+      sandboxRequired,
+      inheritedWorkspace,
+    } = targetRead.value;
+    assertPermissionDefaultCurrent = targetRead.value.assertPermissionDefaultCurrent;
     const requestedRoot = normalizeOptionalString(params.spawnedCwd ?? params.sessionRoot);
     // The parent lock has resolved inherited policy; validate direct roots before binding
     // a child or allowing transcript/baseline preparation to process the selected checkout.
@@ -806,7 +788,7 @@ export async function createGatewaySession(
             ...(requestedThinkingLevel ? { thinkingLevel: requestedThinkingLevel } : {}),
             ...(requestedFastMode !== undefined ? { fastMode: requestedFastMode } : {}),
             ...(requestedToolOverrides ? { toolOverrides: params.toolOverrides } : {}),
-            ...(params.permissionMode ? { permissionMode: params.permissionMode } : {}),
+            ...(permissionMode ? { permissionMode } : {}),
           },
           loadGatewayModelCatalogSnapshot: loadModelCatalog
             ? async () => {
