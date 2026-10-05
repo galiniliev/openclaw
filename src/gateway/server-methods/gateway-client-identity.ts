@@ -25,11 +25,15 @@ export function isGatewayClientProfilePending(client: GatewayClient | null): boo
 export function authenticatedProfileUnavailableError(
   message = "Authenticated profile verification is unavailable. Retry shortly; if this continues, contact a gateway administrator.",
   retryAfterMs = 1_000,
+  method?: "connect",
 ): ErrorShape {
   return errorShape(ErrorCodes.UNAVAILABLE, message, {
     retryable: true,
     retryAfterMs,
-    details: { code: ConnectErrorDetailCodes.AUTHENTICATED_PROFILE_UNAVAILABLE },
+    details: {
+      code: ConnectErrorDetailCodes.AUTHENTICATED_PROFILE_UNAVAILABLE,
+      ...(method ? { method } : {}),
+    },
   });
 }
 

@@ -33,12 +33,31 @@ export type UserProfileAuthority = {
 
 export type CachedGitHubIdentity = { profileId: string; updatedAt: number };
 
+export type ExistingUserProfileAuthenticationAlias =
+  | { kind: "email"; email: string }
+  | { kind: "provider"; provider: string; subject: string };
+
+export type CachedGitHubIdentitySelector = {
+  accountId: number;
+  alias: { kind: "email"; email: string } | { kind: "github-login"; login: string };
+};
+
 export type StoredGitHubIdentity = { accountId: number; login: string };
 
-export type UserProfileGitHubAttribution = Map<string, StoredGitHubIdentity | null>;
+export type FactoryGitHubIdentity = {
+  host: "microsoft.ghe.com";
+  accountId: number;
+  login: string;
+  verifiedEmail: string;
+};
+export type UserProfileGitHubAttribution = Map<
+  string,
+  StoredGitHubIdentity | FactoryGitHubIdentity | null
+>;
 
 export type UserProfileGitHubAttributionRead = {
   identities: UserProfileGitHubAttribution;
+  eligibleIdentities: UserProfileGitHubAttribution;
   canonicalProfileIds: string[];
 };
 

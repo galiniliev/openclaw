@@ -60,6 +60,7 @@ export type GatewayLockHandle = {
   assertDatabaseAccess(this: void, databasePath: string): void;
   retainProjection: () => GatewayStateProjection;
   releaseInTree: () => Promise<void>;
+  retireWriter?: () => Promise<void>;
   release: () => Promise<void>;
   run<T>(operation: () => T): T;
 };
@@ -678,6 +679,19 @@ export async function acquireGatewayLock(
     stateOwner.release();
     throw new GatewayLockError("failed to acquire gateway state ownership", error);
   }
+  let writerRetirement: Promise<void> | undefined;
+  const retireWriter = () =>
+    (writerRetirement ??= (async () => {
+      assertStateOwnerCurrent();
+      await ownerLease?.release();
+      assertStateOwnerCurrent();
+      const { closeOpenClawStateDatabaseAsync } = await import("../state/openclaw-state-db.js");
+      await closeOpenClawStateDatabaseAsync();
+      assertStateOwnerCurrent();
+    })().catch((error: unknown) => {
+      writerRetirement = undefined;
+      throw error;
+    }));
   let drained: Promise<void> | undefined;
   const releaseInTree = () =>
     (drained ??= Promise.resolve()
@@ -713,6 +727,7 @@ export async function acquireGatewayLock(
       return projection.retain();
     },
     releaseInTree,
+    retireWriter,
     release: () =>
       (released ??= (async () => {
         await ownerLease?.release();

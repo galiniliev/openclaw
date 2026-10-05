@@ -35,6 +35,8 @@ import type {
   UserProfileEmailBinding,
   UserProfileIdentity,
   UserProfileAuthority,
+  ExistingUserProfileAuthenticationAlias,
+  UserProfile,
 } from "./user-profiles.types.js";
 
 export const profileCatalogPath = (options: OpenClawStateDatabaseOptions) =>
@@ -74,13 +76,33 @@ export function readUserProfileEmailBindings(
   }));
 }
 
-/** Alias lookup is observational and never initializes profile storage. */
-export function readUserProfileIdForEmail(db: DatabaseSync, email: string): string | undefined {
-  if (!tableExists(db, "user_profile_emails") || !tableExists(db, "user_profiles")) {
+/** Exact authentication aliases resolve without creating or repairing profile storage. */
+export function readUserProfileForAuthenticationAlias(
+  db: DatabaseSync,
+  alias: ExistingUserProfileAuthenticationAlias,
+): Pick<UserProfile, "id" | "updatedAt"> | undefined {
+  if (!tableExists(db, "user_profiles")) {
     return undefined;
   }
-  const alias = selectUserProfileEmailAlias(db, email);
-  return alias ? selectResolvedUserProfileMetadataById(db, alias.profile_id)?.id : undefined;
+  const binding =
+    alias.kind === "email"
+      ? tableExists(db, "user_profile_emails")
+        ? selectUserProfileEmailAlias(db, alias.email)
+        : undefined
+      : alias.provider !== "github" && tableExists(db, "user_profile_identities")
+        ? executeSqliteQuerySync(
+            db,
+            userProfilesDb(db)
+              .selectFrom("user_profile_identities")
+              .select("profile_id")
+              .where("provider", "=", alias.provider)
+              .where("subject", "=", alias.subject),
+          ).rows[0]
+        : undefined;
+  const profile = binding
+    ? selectResolvedUserProfileMetadataById(db, binding.profile_id)
+    : undefined;
+  return profile ? { id: profile.id, updatedAt: profile.updated_at } : undefined;
 }
 
 export function listUserProfilesSync(options: OpenClawStateDatabaseOptions = {}) {

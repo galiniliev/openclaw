@@ -56,7 +56,7 @@ async function runGatewayShutdownSteps(params: {
 /** Startup failure and public close share the same ordered dependency joins. */
 export function runGatewayCloseSteps(params: {
   owner: {
-    connectionWork: { drain: () => Promise<void> };
+    connectionWork: { drain: () => Promise<void>; drainReceivedWork?: () => Promise<void> };
     stopConnectionDependentSidecars: GatewayShutdownStep["run"];
     stopRegisteredGatewayLifetimeSidecars: GatewayShutdownStep["run"];
     stopRegisteredPostReadySidecars: GatewayShutdownStep["run"];
@@ -67,6 +67,7 @@ export function runGatewayCloseSteps(params: {
   disposeTerminalSessions?: GatewayShutdownStep["run"];
   runStopHooks?: GatewayShutdownStep["run"];
   onError: (message: string) => void;
+  retainReaderTransport?: true;
 }): Promise<void> {
   const { owner } = params;
   return runGatewayShutdownSteps({
@@ -76,7 +77,20 @@ export function runGatewayCloseSteps(params: {
         run: owner.stopConnectionDependentSidecars,
         required: true,
       },
-      { name: "received connection work", run: () => owner.connectionWork.drain(), required: true },
+      {
+        name: "received connection work",
+        run: () => {
+          if (!params.retainReaderTransport) {
+            return owner.connectionWork.drain();
+          }
+          const drainReceivedWork = owner.connectionWork.drainReceivedWork;
+          if (!drainReceivedWork) {
+            throw new Error("Gateway connection owner cannot retain reader transports");
+          }
+          return drainReceivedWork.call(owner.connectionWork);
+        },
+        required: true,
+      },
       ...(params.disposeTerminalSessions
         ? [{ name: "terminal sessions", run: params.disposeTerminalSessions }]
         : []),

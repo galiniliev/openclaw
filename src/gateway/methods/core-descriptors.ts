@@ -655,4 +655,6 @@ export const CORE_GATEWAY_METHOD_SPECS = [
   ["worktrees.retireSnapshot", "worktrees", "operator.admin", "2026.9", CONTROL_PLANE_WRITE],
   ["sessions.processes.list", "session-processes", "operator.read", "2026.9", OBSERVATION],
   ["sessions.processes.stop", "session-processes", "operator.write", "2026.9"],
+  ["sessions.github.pullRequest.read", "sessions-github", "operator.read", "2026.9"],
+  ["gateway.suspend.reader", "suspend", "operator.admin", "2026.9", CONTROL_PLANE_WRITE],
 ] as const satisfies readonly CoreGatewayMethodSpecRow[];

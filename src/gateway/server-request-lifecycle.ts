@@ -24,11 +24,28 @@ const SUSPEND_CONTROL_METHODS = new Set([
   "gateway.suspend.status",
   "gateway.suspend.resume",
   "gateway.suspend.handoff",
+  "gateway.suspend.reader",
 ]);
+
+// Resolution uses the same frozen, access-scoped projection as session listing.
+const SUSPENDED_READER_METHODS = new Set([
+  "chat.history",
+  "chat.startup",
+  "sessions.list",
+  "sessions.resolve",
+]);
+
+export function isGatewaySuspendedReaderMethod(method: string): boolean {
+  return SUSPENDED_READER_METHODS.has(method);
+}
+
+export function isGatewaySuspendControlMethod(method: string): boolean {
+  return SUSPEND_CONTROL_METHODS.has(method);
+}
 
 export function isGatewayRootlessRequestAllowed(method: string): boolean {
   return (
-    SUSPEND_CONTROL_METHODS.has(method) ||
+    isGatewaySuspendControlMethod(method) ||
     (method === "update.runs.get" &&
       getGatewayRestartDrainSignal().aborted &&
       getGatewaySuspendAdmissionPhase() === "accepting")

@@ -1,5 +1,6 @@
 // Gateway WebSocket device authorization issues the session and bootstrap handoff tokens.
 import { ensureDeviceToken } from "../../../infra/device-pairing-tokens.js";
+import { isGatewayReadonlyWork } from "../../../process/gateway-work-admission.js";
 import { resolveBootstrapProfileScopesForRole } from "../../../shared/device-bootstrap-profile.js";
 import type {
   AuthenticatedGatewayConnect,
@@ -12,6 +13,9 @@ export async function issueGatewayConnectDeviceTokens(params: {
   hasApprovedDeviceBaseline: boolean;
   isIssuanceCurrent: () => boolean;
 }): Promise<Pick<DeviceAuthorizedGatewayConnect, "deviceToken" | "bootstrapDeviceTokens">> {
+  if (isGatewayReadonlyWork()) {
+    return { deviceToken: null, bootstrapDeviceTokens: [] };
+  }
   const { state, scopes, hasApprovedDeviceBaseline } = params;
   const {
     role,

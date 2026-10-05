@@ -4,6 +4,7 @@ import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { serialize } from "node:v8";
+import { assertGatewaySqliteWriterAdmission } from "../process/gateway-work-admission.js";
 import { INCOGNITO_AGENT_SQLITE_BASENAME } from "../state/openclaw-agent-db.paths.js";
 import { getOpenClawDatabaseMaintenanceScope } from "../state/openclaw-state-db-async-lifecycle.js";
 import { assertStateDatabaseAccessAllowed } from "./gateway-state-owner.js";
@@ -42,6 +43,7 @@ export function captureSqliteWorkerOpen(
   assertCurrent?: () => void,
   custody: SqliteWorkerOpenCustody = {},
 ): PreparedSqliteWorkerOpen {
+  assertGatewaySqliteWriterAdmission();
   const { createAdmission, preparation, ...native } = custody;
   const inCaller = createAdmission ? AsyncLocalStorage.snapshot() : undefined;
   const ownedAdmission = options.admission;

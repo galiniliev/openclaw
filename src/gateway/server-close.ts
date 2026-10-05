@@ -11,7 +11,7 @@ import { type ChannelId, listChannelPlugins } from "../channels/plugins/index.js
 import { closeSessionTranscriptReconcileWorkerPool } from "../config/sessions/session-transcript-reconcile-pool.js";
 import { drainCronReceiptAuthority } from "../cron/store/receipt-authority-owner.js";
 import { createInternalHookEvent, triggerInternalHook } from "../hooks/internal-hooks.js";
-import { formatErrorMessage, hasErrnoCode } from "../infra/errors.js";
+import { formatErrorMessage } from "../infra/errors.js";
 import type { HeartbeatRunner } from "../infra/heartbeat-runner.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { closePluginStateDatabaseAsync } from "../plugin-state/plugin-state-store.js";
@@ -25,20 +25,15 @@ import { AsyncWorkScope } from "../shared/async-work-scope.js";
 import { drainGlobalSingletonLifecycleState } from "../shared/global-singleton.js";
 import { settlesWithin } from "../shared/settle-within.js";
 import { closeOpenClawAgentDatabasesAsync } from "../state/openclaw-agent-db-lifecycle.js";
-import {
-  collectGatewayProcessMemoryUsageMb,
-  markGatewayRestartTrace,
-  measureGatewayRestartTrace,
-  recordGatewayRestartTrace,
-} from "./restart-trace.js";
+import { collectGatewayProcessMemoryUsageMb, recordGatewayRestartTrace } from "./restart-trace.js";
 import type { ChatRunState } from "./server-chat-state.js";
-import { WEBSOCKET_CLOSE_GRACE_MS } from "./server-constants.js";
+import { createCloseStepTimer, shutdownStep } from "./server-close-step.js";
+import { closeGatewayTransports } from "./server-close-transports.js";
 import type { GatewayMaintenanceHandles } from "./server-maintenance-lifecycle.js";
 import {
   waitForMediaCleanupDrainsToSettle,
   type MediaCleanupStopResult,
 } from "./server-media-cleanup-lifecycle.js";
-import { clearSessionTypingState } from "./server-methods/session-typing-state.js";
 import type { GatewayCloseOptions } from "./server-public.js";
 import { prepareGatewayRunShutdown, type GatewayRunShutdownParams } from "./server-run-shutdown.js";
 import {
@@ -50,9 +45,6 @@ const shutdownLog = createSubsystemLogger("gateway/shutdown");
 const GATEWAY_SHUTDOWN_HOOK_TIMEOUT_MS = 5_000;
 const GATEWAY_PRE_RESTART_HOOK_TIMEOUT_MS = 10_000;
 const ACTIVE_SESSIONS_SHUTDOWN_DRAIN_TIMEOUT_MS = 2_000;
-const WEBSOCKET_CLOSE_FORCE_CONTINUE_MS = 250;
-const HTTP_CLOSE_GRACE_MS = 1_000;
-const HTTP_CLOSE_FORCE_WAIT_MS = 5_000;
 const MCP_RUNTIME_CLOSE_GRACE_MS = 5_000;
 const LSP_RUNTIME_CLOSE_GRACE_MS = 5_000;
 const EMBEDDING_PROVIDER_CLOSE_GRACE_MS = 5_000;
@@ -60,32 +52,8 @@ const AGENT_HARNESS_CLOSE_GRACE_MS = 5_000;
 type ShutdownResult = {
   durationMs: number;
   warnings: string[];
+  processWritersRetired: boolean;
 };
-
-function createCloseStepTimer(reason: string) {
-  return <T>(name: string, run: () => Promise<T> | T) => {
-    markGatewayRestartTrace(`restart.close.${name}.begin`);
-    return measureGatewayRestartTrace(`restart.close.${name}`, run, [["reason", reason]]);
-  };
-}
-
-/** Run one shutdown step and record a warning instead of aborting the whole close. */
-async function shutdownStep(
-  name: string,
-  fn: () => Promise<void> | void,
-  warnings: string[],
-): Promise<void> {
-  try {
-    await fn();
-  } catch (err: unknown) {
-    if (hasRetainedPluginRuntimeCloseError(err)) {
-      throw err;
-    }
-    const detail = err instanceof Error ? err.message : String(err);
-    shutdownLog.warn(`${name}: ${detail}`);
-    recordShutdownWarning(warnings, name);
-  }
-}
 
 async function triggerGatewayLifecycleHookWithTimeout(params: {
   cleanupWork: AsyncWorkScope;
@@ -148,64 +116,6 @@ export async function runGatewayClosePrelude(params: {
   await params.closeMcpServer?.().catch(() => {});
 }
 
-async function waitForHttpClose(params: {
-  closePromise: Promise<void>;
-  timeoutMs: number;
-  label: string;
-  warnings: string[];
-}): Promise<boolean> {
-  return await settlesWithin(params.closePromise, params.timeoutMs).catch((err: unknown) => {
-    const detail = err instanceof Error ? err.message : String(err);
-    shutdownLog.warn(`${params.label}: ${detail}`);
-    recordShutdownWarning(params.warnings, params.label);
-    return true;
-  });
-}
-
-async function closeHttpListener(params: {
-  server: HttpServer;
-  label: string;
-  warnings: string[];
-}): Promise<void> {
-  const { server, label, warnings } = params;
-  server.closeIdleConnections?.();
-  const closePromise = new Promise<void>((resolve, reject) => {
-    server.close((err) => {
-      if (!err || hasErrnoCode(err, "ERR_SERVER_NOT_RUNNING")) {
-        resolve();
-        return;
-      }
-      reject(err);
-    });
-  });
-  void closePromise.catch(() => undefined);
-  const closedWithinGrace = await waitForHttpClose({
-    closePromise,
-    timeoutMs: HTTP_CLOSE_GRACE_MS,
-    label,
-    warnings,
-  });
-  if (closedWithinGrace) {
-    return;
-  }
-  shutdownLog.warn(
-    `${label} close exceeded ${HTTP_CLOSE_GRACE_MS}ms; forcing connection shutdown and waiting for close`,
-  );
-  recordShutdownWarning(warnings, label);
-  server.closeAllConnections?.();
-  const closedAfterForce = await waitForHttpClose({
-    closePromise,
-    timeoutMs: HTTP_CLOSE_FORCE_WAIT_MS,
-    label,
-    warnings,
-  });
-  if (!closedAfterForce) {
-    throw new Error(
-      `${label} close still pending after forced connection shutdown (${HTTP_CLOSE_FORCE_WAIT_MS}ms)`,
-    );
-  }
-}
-
 export type GatewayCloseParams = {
   resolveGatewayContext: GatewayRunShutdownParams["resolveGatewayContext"];
   closePluginRegistry: ReturnType<typeof createPluginRegistryOwner>["close"];
@@ -231,6 +141,7 @@ export type GatewayCloseParams = {
   transcriptUnsub: (() => void) | null;
   lifecycleUnsub: (() => void) | null;
   clients: Set<{
+    connect?: { role?: string };
     connectionKind?: "gateway" | "worker";
     socket: { close: (code: number, reason: string) => void };
   }>;
@@ -259,6 +170,7 @@ export type GatewayClosePreparation = {
   notice: ReturnType<typeof resolveGatewayShutdownNotice>;
   warnings: string[];
   cleanupWork: AsyncWorkScope;
+  retainReaderTransport?: true;
 };
 
 export async function prepareGatewayClose(
@@ -323,7 +235,13 @@ export async function prepareGatewayClose(
         warnings,
       }),
     );
-    return { start, notice, warnings, cleanupWork };
+    return {
+      start,
+      notice,
+      warnings,
+      cleanupWork,
+      ...(opts?.retainReaderTransport ? { retainReaderTransport: true as const } : {}),
+    };
   } catch (error) {
     await cleanupWork.drain();
     throw error;
@@ -362,6 +280,7 @@ async function closeGatewayResources(
     resourceCleanupErrors.push(error);
   };
   let closeFailure: { error: unknown } | undefined;
+  let processWritersRetired = false;
   const measureCloseStep = createCloseStepTimer(reason);
   try {
     if (params.drainActiveSessionsForShutdown) {
@@ -500,86 +419,11 @@ async function closeGatewayResources(
       await shutdownStep("lifecycle-unsub", () => params.lifecycleUnsub!(), warnings);
     }
     params.chatRunState.clear();
-    let clientCloseFailures = 0;
-    for (const c of params.clients) {
-      try {
-        c.socket.close(
-          1012,
-          c.connectionKind === "worker" ? "gateway-shutdown" : "service restart",
-        );
-      } catch {
-        clientCloseFailures++;
-      }
-    }
-    if (clientCloseFailures > 0) {
-      shutdownLog.warn(`failed to close ${clientCloseFailures} WebSocket client(s)`);
-      recordShutdownWarning(warnings, "ws-clients");
-    }
-    params.clients.clear();
-    if (params.wss) {
-      await measureCloseStep("websocket-server", async () => {
-        const wsClients = params.wss?.clients ?? new Set();
-        const closePromise = new Promise<void>((resolve) => {
-          params.wss?.close(() => resolve());
-        });
-        const closedWithinGrace = await settlesWithin(closePromise, WEBSOCKET_CLOSE_GRACE_MS);
-        if (!closedWithinGrace) {
-          shutdownLog.warn(
-            `websocket server close exceeded ${WEBSOCKET_CLOSE_GRACE_MS}ms; forcing shutdown continuation with ${wsClients.size} tracked client(s)`,
-          );
-          recordShutdownWarning(warnings, "websocket-server");
-          for (const client of wsClients) {
-            try {
-              client.terminate();
-            } catch {
-              /* ignore */
-            }
-          }
-          if (!(await settlesWithin(closePromise, WEBSOCKET_CLOSE_FORCE_CONTINUE_MS))) {
-            shutdownLog.warn(
-              `websocket server close still pending after ${WEBSOCKET_CLOSE_FORCE_CONTINUE_MS}ms force window; continuing shutdown`,
-            );
-          }
-        }
-      });
-    }
-    // Node cleanup replies remain admissible until sockets close. Join their
-    // uncancellable preparation before releasing the remaining process state.
-    await params.finishRequestEntries?.();
-    clearSessionTypingState();
-    const transportServers =
-      params.httpServers && params.httpServers.length > 0
-        ? params.httpServers
-        : params.httpServer
-          ? [params.httpServer]
-          : [];
-    try {
-      if (transportServers.length > 0) {
-        await measureCloseStep("http-server", async () => {
-          const results = await Promise.allSettled(
-            transportServers.map((server, index) =>
-              closeHttpListener({
-                server,
-                label: transportServers.length > 1 ? `http-server[${index}]` : "http-server",
-                warnings,
-              }),
-            ),
-          );
-          const failure = results.find(
-            (result): result is PromiseRejectedResult => result.status === "rejected",
-          );
-          if (failure) {
-            throw failure.reason;
-          }
-        });
-      }
-    } finally {
-      // The foreground Tailscale session owns the route, so closing its claim
-      // releases the ephemeral backend before this lifecycle is forgotten.
-      if (params.tailscaleCleanup) {
-        await shutdownStep("tailscale", () => params.tailscaleCleanup!(), warnings);
-      }
-    }
+    await closeGatewayTransports(params, {
+      reason,
+      warnings,
+      retainReaderTransport: preparation.retainReaderTransport,
+    });
     await disposeRuntimeWithShutdownGrace({
       cleanupWork,
       label: "embedding-providers",
@@ -633,6 +477,7 @@ async function closeGatewayResources(
               /* ignore */
             }
           }
+          processWritersRetired = true;
         }, retireRegistry);
       });
       for (const error of registryClose.memoryErrors) {
@@ -678,5 +523,11 @@ async function closeGatewayResources(
   if (closeFailure) {
     throw closeFailure.error;
   }
-  return { durationMs, warnings };
+  if (preparation.retainReaderTransport && warnings.length > 0) {
+    throw new Error(`Native reader writer retirement is incomplete: ${warnings.join(", ")}`);
+  }
+  if (preparation.retainReaderTransport && !processWritersRetired) {
+    throw new Error("Native reader retirement still has another process runtime owner");
+  }
+  return { durationMs, warnings, processWritersRetired };
 }

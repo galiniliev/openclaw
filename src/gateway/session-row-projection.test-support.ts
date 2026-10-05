@@ -171,6 +171,7 @@ export function createSessionRowProjectionFixture(params: {
         },
       };
     },
+    freeze: async () => {},
     readPreparedRowContext: () => rowContext,
     readPreparedSpawnedBy(query) {
       const row = describe(query);

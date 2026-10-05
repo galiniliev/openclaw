@@ -158,9 +158,10 @@ export async function createGatewayMetadataCloseFixture(label: string) {
       await state.writeConfig({
         ...config,
         gateway: {
-          port,
           auth: { mode: "token", token },
           controlUi: { enabled: false },
+          ...config.gateway,
+          port,
           reload: config.gateway?.reload ?? { mode: "off" },
         },
       });

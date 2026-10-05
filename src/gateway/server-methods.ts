@@ -10,6 +10,8 @@ import {
 import {
   tryBeginGatewayPreparedRestartRootWorkAdmission,
   tryBeginGatewayRootWorkAdmission,
+  tryBeginGatewayReaderRootWorkAdmission,
+  isGatewayWriterRetired,
 } from "../process/gateway-work-admission.js";
 import { getAsyncWorkSignal } from "../shared/async-work-scope.js";
 import { AgentDatabaseAdmissionError } from "../state/agent-database-admission.js";
@@ -52,6 +54,8 @@ import type {
 import type { GatewayRequestEntry } from "./server-request-entry.js";
 import {
   isGatewayRootlessRequestAllowed,
+  isGatewaySuspendedReaderMethod,
+  isGatewaySuspendControlMethod,
   runGatewayPendingWorkContinuation,
   runWithGatewayObservationScope,
   workAdmissionUnavailableError,
@@ -159,7 +163,10 @@ export async function runWithGatewayRequestEnvelope<T>(
   const rootWorkAdmission =
     options.admission === "continuation"
       ? null
-      : (tryBeginGatewayRootWorkAdmission(`ws:${method}`) ??
+      : ((isGatewaySuspendedReaderMethod(method)
+          ? tryBeginGatewayReaderRootWorkAdmission(`ws:${method}`)
+          : null) ??
+        tryBeginGatewayRootWorkAdmission(`ws:${method}`) ??
         (method === "gateway.restart.request" &&
         isTargetedNonSafeGatewayRestartRequest(options.requestParams)
           ? tryBeginGatewayPreparedRestartRootWorkAdmission()
@@ -326,6 +333,21 @@ export async function handleGatewayRequest(
     let sessionAccessAuthority: GatewaySessionAccessAuthority | undefined;
     try {
       entry?.assertOpen();
+      if (
+        isGatewayWriterRetired() &&
+        !isGatewaySuspendedReaderMethod(req.method) &&
+        !isGatewaySuspendControlMethod(req.method)
+      ) {
+        respond(
+          false,
+          undefined,
+          errorShape(
+            ErrorCodes.UNAVAILABLE,
+            `${req.method} unavailable on the retired Gateway writer`,
+          ),
+        );
+        return;
+      }
       const requestMutationAuthority = readGatewayRequestMutationAuthority(opts);
       // Post-hello hydration may supply the first profile. Once selected, the same
       // caller must survive every awaited row read and authorization retry.
