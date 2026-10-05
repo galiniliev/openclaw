@@ -52,7 +52,11 @@ import {
 import { gateBoundTool } from "./host-bound-tool.js";
 import type { AgentHarnessHostCapabilities } from "./host-capability-types.js";
 import { captureRequiredWorkspaceToolFloor } from "./host-capability-workspace.js";
-import { normalizeNativeOperationCwd, prepareAgentHarnessEnvironment } from "./host-environment.js";
+import {
+  normalizeNativeOperationCwd,
+  prepareAgentHarnessEnvironment,
+  bindLocalGitHubEnvironment,
+} from "./host-environment.js";
 import { bindHarnessMedia } from "./host-media.js";
 import {
   registerAgentHarnessBeforeToolCallRetention,
@@ -99,6 +103,7 @@ export function createAgentHarnessHostCapabilities(params: {
       })
     : undefined;
   const githubPublicationAvailable = attempt.githubPublicationAvailable;
+  const githubPullRequestReadAvailable = attempt.githubPullRequestReadAvailable;
   const workSignal = getAsyncWorkSignal();
   const attemptSignal = attempt.abortSignal;
   const installationTarget = getInstallationTarget();
@@ -257,6 +262,10 @@ export function createAgentHarnessHostCapabilities(params: {
       attempt.operation !== "settled-tool-finalization" &&
       (!attempt.toolExecutionAllow || isToolExecutionAllowed(attempt.toolExecutionAllow, "read")),
     assertCurrent: assertActive,
+  });
+  const localGitHub = bindLocalGitHubEnvironment(attempt, {
+    assertActive,
+    signal: capabilityAbortController.signal,
   });
   const preparedRunEnvironment = prepareAgentHarnessEnvironment({
     config,
@@ -444,6 +453,7 @@ export function createAgentHarnessHostCapabilities(params: {
       assertActive();
       return preparedRunEnvironment;
     },
+    prepareLocalGitHubEnvironment: localGitHub,
     activeComputerContext: () => {
       assertActive();
       return buildActiveNodeContextText(requesterProfileId);
@@ -459,9 +469,14 @@ export function createAgentHarnessHostCapabilities(params: {
           withInstallationTarget(installationTarget, () =>
             createOpenClawCodingToolsInternal(
               {
-                ...effectiveOptions,
+                ...localGitHub.withExecEnvironment(
+                  effectiveOptions,
+                  preparedRunEnvironment,
+                  !hostSandboxEnabled,
+                ),
                 // Availability belongs to this prepared host, not mutable plugin inputs.
                 githubPublicationAvailable,
+                githubPullRequestReadAvailable,
                 runtimePluginToolGrant,
                 skillsSnapshot: options?.skillsSnapshot ?? skillsSnapshot,
                 installedSkills: getInstalledSkills(

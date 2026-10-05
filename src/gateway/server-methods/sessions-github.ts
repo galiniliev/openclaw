@@ -3,15 +3,22 @@ import {
   type GatewayCoreRequestParams,
   errorShape,
   validateSessionGitHubPublishParams,
+  validateSessionGitHubPullRequestReadParams,
   validateSessionGitHubOptionsParams,
   validateSessionGitHubStatusParams,
   validateSessionGitHubConfirmParams,
 } from "../../../packages/gateway-protocol/src/index.js";
-import { getGatewayToolCallerIdentity } from "../../agents/tools/gateway-caller-context.js";
+import { resolveGitHubHost } from "../../agents/github-host-runtime.js";
+import {
+  captureGatewayToolCallerAssertion,
+  getGatewayToolCallerIdentity,
+} from "../../agents/tools/gateway-caller-context.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
 import { OpenClawStateLeaseAcquisitionError } from "../../state/openclaw-state-lease-error.js";
+import { getSessionRepositoryWorkspaceStore } from "../../state/session-repository-workspaces.js";
 import { prepareControlUiSessionPrRead } from "../control-ui-session-pr-read.js";
 import {
+  factoryPublicationPreflightCredential,
   prepareCurrentGitHubPublicationOptionsIdentity,
   hasSupportedGitHubPublicationTarget,
   type PublicationSessionIdentity,
@@ -19,6 +26,9 @@ import {
 import { GitHubPublicationKnownFailure } from "../github-publication-failure.js";
 import { isGitHubPublicationSuperseded } from "../github-publication-relevance.js";
 import { captureGitHubPublicationRequester } from "../github-publication-requester.js";
+import { readBoundGitHubPullRequest } from "../github-pull-request-read.js";
+import { parseGitHubRemoteUrl } from "../github-remote.js";
+import { prepareGatewayProjectGitHubIdentity } from "../project-github-identity.js";
 import { resolveRequestedSessionAgentId } from "../session-request-agent.js";
 import { getSessionRowProjection } from "../session-row-projection-access.js";
 import { SessionMutationAuthorizationChangedError } from "../session-sharing.js";
@@ -34,6 +44,7 @@ import { defineValidatedGatewayMethod } from "./validation.js";
 type SessionGitHubMethod = Extract<keyof GatewayCoreRequestParams, `sessions.github.${string}`>;
 const sessionGitHubFailureMessages = {
   "sessions.github.publish": "GitHub publication request failed",
+  "sessions.github.pullRequest.read": "GitHub pull request read failed",
   "sessions.github.options": "GitHub publication options are unavailable.",
   "sessions.github.status": "GitHub publication status is unavailable.",
   "sessions.github.confirm": "GitHub publication confirmation failed.",
@@ -135,6 +146,95 @@ async function isSessionPublicationSuperseded(
 }
 
 export const sessionsGitHubHandlers: GatewayRequestHandlers = {
+  "sessions.github.pullRequest.read": defineSessionGitHubMethod(
+    "sessions.github.pullRequest.read",
+    validateSessionGitHubPullRequestReadParams,
+    async (options) => {
+      const caller = getGatewayToolCallerIdentity();
+      if (
+        !caller?.sessionKey ||
+        !caller.agentId ||
+        caller.sessionKey !== options.params.sessionKey ||
+        (options.params.agentId &&
+          normalizeAgentId(options.params.agentId) !== normalizeAgentId(caller.agentId))
+      ) {
+        throw new Error("GitHub pull request reads require the current repository session.");
+      }
+      const assertCallerCurrent = captureGatewayToolCallerAssertion();
+      if (!assertCallerCurrent) {
+        throw new Error("GitHub pull request reads require an admitted Gateway run.");
+      }
+      assertCallerCurrent("sessions.github.pullRequest.read");
+      const admitted = loadGatewaySessionEntryReadOnly(caller.sessionKey, {
+        agentId: caller.agentId,
+      });
+      const admittedWorkspaceId = admitted.entry?.repositoryWorkspaceId;
+      if (!admittedWorkspaceId) {
+        throw new Error("The repository session is no longer bound to this run.");
+      }
+      const preparedWorkspace =
+        await getSessionRepositoryWorkspaceStore().prepare(admittedWorkspaceId);
+      const currentRepository = () => {
+        assertCallerCurrent("sessions.github.pullRequest.read");
+        const loaded = loadGatewaySessionEntryReadOnly(caller.sessionKey, {
+          agentId: caller.agentId,
+        });
+        const workspaceId = loaded.entry?.repositoryWorkspaceId;
+        const workspace =
+          workspaceId === admittedWorkspaceId ? preparedWorkspace.current() : undefined;
+        if (
+          loaded.canonicalKey !== caller.sessionKey ||
+          loaded.agentId !== caller.agentId ||
+          !loaded.entry?.sessionId ||
+          !workspace ||
+          workspace.agentId !== caller.agentId ||
+          workspace.sessionKey !== caller.sessionKey
+        ) {
+          throw new Error("The repository session is no longer bound to this run.");
+        }
+        const target = parseGitHubRemoteUrl(workspace.url, resolveGitHubHost());
+        if (!target) {
+          throw new Error("The repository session is not bound to the configured GitHub host.");
+        }
+        return { workspaceId, workspace, target };
+      };
+      const initial = currentRepository();
+      const assertRepositoryCurrent = () => {
+        const current = currentRepository();
+        if (
+          current.workspaceId !== initial.workspaceId ||
+          current.workspace.url !== initial.workspace.url
+        ) {
+          throw new Error("The repository session changed while reading the pull request.");
+        }
+      };
+      const identity = await prepareGatewayProjectGitHubIdentity({
+        agentId: caller.agentId,
+        assertActive: assertRepositoryCurrent,
+        config: options.context.getRuntimeConfig(),
+        context: options.context,
+      });
+      if (!identity) {
+        throw new Error("Authenticated repository reads are unavailable on this Gateway.");
+      }
+      const result = await identity.start(() =>
+        readBoundGitHubPullRequest({
+          target: { ...initial.target, number: options.params.pullRequest },
+          identity,
+        }),
+      );
+      identity.assertSelected();
+      const current = currentRepository();
+      if (
+        current.workspaceId !== initial.workspaceId ||
+        current.workspace.url !== initial.workspace.url ||
+        current.workspace.sessionKey !== initial.workspace.sessionKey
+      ) {
+        throw new Error("The repository session changed while reading the pull request.");
+      }
+      options.respond(true, result);
+    },
+  ),
   "sessions.github.publish": defineSessionGitHubMethod(
     "sessions.github.publish",
     validateSessionGitHubPublishParams,
@@ -230,12 +330,45 @@ export const sessionsGitHubHandlers: GatewayRequestHandlers = {
       }
       let shared = null;
       try {
-        const identity = await prepareCurrentGitHubPublicationOptionsIdentity(read.session.agentId);
-        shared = {
-          source: identity.source,
-          accountId: identity.account.accountId,
-          login: identity.account.login,
-        };
+        const admitted =
+          process.env.FACTORY_AUTH_MODE === "github"
+            ? await captureGitHubPublicationRequester(options, read.session)
+            : undefined;
+        try {
+          const profileId =
+            admitted?.requester.snapshot.actor.kind === "operator"
+              ? admitted.requester.snapshot.actor.profileId
+              : options.client?.authenticatedUserProfile?.profileId;
+          const identity = await prepareCurrentGitHubPublicationOptionsIdentity(
+            read.session.agentId,
+            profileId
+              ? {
+                  profileId,
+                  sessionKey: read.session.sessionKey,
+                  assertCurrent: () => {
+                    admitted?.requester.assertCurrent();
+                    read.currentSession();
+                  },
+                }
+              : undefined,
+            admitted
+              ? factoryPublicationPreflightCredential({
+                  ...read.session,
+                  assertCurrent: () => {
+                    admitted.requester.assertCurrent();
+                    read.currentSession();
+                  },
+                })
+              : undefined,
+          );
+          shared = {
+            source: identity.source,
+            accountId: identity.account.accountId,
+            login: identity.account.login,
+          };
+        } finally {
+          admitted?.release();
+        }
       } catch {
         /* An unavailable shared account must not hide the caller's personal option. */
       }

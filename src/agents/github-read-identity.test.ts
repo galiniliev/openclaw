@@ -20,6 +20,7 @@ import {
   createGitHubReadIdentity,
   readCachedNativeGitHubToken,
   readNativeGitHubToken,
+  readGitAuthor,
 } from "./github-read-identity.js";
 import {
   prepareGitHubPublicationIdentity,
@@ -228,6 +229,44 @@ describe("native GitHub identity absence", () => {
       ["gh", "auth", "token", "--hostname", "ghe.example.test"],
       expect.any(Object),
     );
+  });
+
+  it("uses an explicit protected executable for GitHub identity probes while preserving Git author lookup", async () => {
+    setRuntimeConfigSnapshot({ gateway: { github: { host: "microsoft.ghe.com" } } });
+    mocks.runCommandBuffered.mockResolvedValue(commandResult("enterprise-token", 0));
+    await expect(
+      readNativeGitHubToken({
+        GH_TOKEN: undefined,
+        GITHUB_TOKEN: undefined,
+        OPENCLAW_GITHUB_IDENTITY_EXECUTABLE: "/opt/teamclaw/bin/gh",
+      }),
+    ).resolves.toBe("enterprise-token");
+    expect(mocks.runCommandBuffered).toHaveBeenCalledWith(
+      ["/opt/teamclaw/bin/gh", "auth", "token", "--hostname", "microsoft.ghe.com"],
+      expect.any(Object),
+    );
+    mocks.runCommandBuffered.mockResolvedValue(
+      commandResult("user.name\nFixture Author\0user.email\nfixture@example.test\0"),
+    );
+    await expect(
+      readGitAuthor(
+        { OPENCLAW_GITHUB_IDENTITY_EXECUTABLE: "/opt/teamclaw/bin/gh" },
+        "/fixture/workspace",
+      ),
+    ).resolves.toEqual({
+      name: "Fixture Author",
+      email: "fixture@example.test",
+    });
+    expect(mocks.runCommandBuffered.mock.calls[1]?.[0][0]).toBe("git");
+  });
+
+  it("rejects a relative native identity executable", async () => {
+    await expect(
+      readNativeGitHubToken({
+        OPENCLAW_GITHUB_IDENTITY_EXECUTABLE: "relative/gh",
+      }),
+    ).rejects.toMatchObject({ reason: "unverified" });
+    expect(mocks.runCommandBuffered).not.toHaveBeenCalled();
   });
 
   it("preserves explicit undefined scrubs over inherited native environment tokens", async () => {

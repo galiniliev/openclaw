@@ -33,10 +33,12 @@ export function buildGitHubExecLaunchArgv(
     const resolverDir = quotePowerShellLiteral(fileURLToPath(new URL(".", workerUrl)));
     const bootstrap = [
       `Push-Location -LiteralPath ${resolverDir} -ErrorAction Stop;`,
-      `try { $env:GH_TOKEN = & ${launcher.map(quotePowerShellLiteral).join(" ")};`,
-      "if (-not $? -or $LASTEXITCODE -ne 0 -or [string]::IsNullOrEmpty($env:GH_TOKEN)) { exit 1 }",
+      `try { $openclawGitToken = & ${launcher.map(quotePowerShellLiteral).join(" ")};`,
+      "if (-not $? -or $LASTEXITCODE -ne 0 -or [string]::IsNullOrEmpty($openclawGitToken)) { exit 1 }",
       "} finally { Pop-Location };",
-      "$env:GITHUB_TOKEN = ''; $LASTEXITCODE = $null;",
+      "$env:GH_TOKEN = ''; $env:GH_ENTERPRISE_TOKEN = ''; $env:GITHUB_TOKEN = ''; $env:GITHUB_ENTERPRISE_TOKEN = '';",
+      "if (-not $env:GH_HOST -or $env:GH_HOST -eq 'github.com') { $env:GH_TOKEN = $openclawGitToken } else { $env:GH_ENTERPRISE_TOKEN = $openclawGitToken };",
+      "Remove-Variable openclawGitToken; $LASTEXITCODE = $null;",
       `& ([scriptblock]::Create(${quotePowerShellLiteral(command)}))`,
     ].join(" ");
     return [...shellArgv.slice(0, -1), bootstrap];
@@ -46,6 +48,6 @@ export function buildGitHubExecLaunchArgv(
   // Resolve source-mode tsx beside application code; only the substitution changes cwd.
   const resolverDir = quoteCliArg(fileURLToPath(new URL(".", workerUrl)));
   const enterResolverDir = `cd ${resolverDir} 2>/dev/null || { printf '%s\\n' 'GitHub Identity launcher is unavailable. Restart OpenClaw, then retry.' >&2; exit 1; }`;
-  const bootstrap = `set +x; GH_TOKEN="$(${enterResolverDir}; exec ${launcher.map(quoteCliArg).join(" ")})" || exit $?; export GH_TOKEN; GITHUB_TOKEN=; export GITHUB_TOKEN; exec "$@"`;
+  const bootstrap = `set +x; openclaw_git_token="$(${enterResolverDir}; exec ${launcher.map(quoteCliArg).join(" ")})" || exit $?; GH_TOKEN=; GH_ENTERPRISE_TOKEN=; GITHUB_TOKEN=; GITHUB_ENTERPRISE_TOKEN=; if [ "\${GH_HOST:-github.com}" = github.com ]; then GH_TOKEN="$openclaw_git_token"; else GH_ENTERPRISE_TOKEN="$openclaw_git_token"; fi; export GH_TOKEN GH_ENTERPRISE_TOKEN GITHUB_TOKEN GITHUB_ENTERPRISE_TOKEN; unset openclaw_git_token; exec "$@"`;
   return ["/bin/sh", "-c", bootstrap, "openclaw-github-exec", ...argv];
 }

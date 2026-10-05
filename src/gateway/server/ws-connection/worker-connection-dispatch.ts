@@ -15,6 +15,7 @@ import {
   validateWorkerLiveEventParams,
   validateWorkerTranscriptCommitParams,
 } from "../../../../packages/gateway-protocol/src/index.js";
+import { WORKER_GITHUB_REFRESH_PROTOCOL_FEATURE } from "../../../../packages/gateway-protocol/src/schema/worker-admission.js";
 import {
   WORKER_GATEWAY_TOOLS_PROTOCOL_FEATURE,
   WORKER_GATEWAY_TOOL_METHODS,
@@ -54,7 +55,11 @@ export type WorkerConnectionService = Pick<
   Partial<
     Pick<
       WorkerTurnRpc,
-      "executeComputer" | "getToolSurface" | "invokeGatewayTool" | "cancelGatewayTool"
+      | "executeComputer"
+      | "getToolSurface"
+      | "invokeGatewayTool"
+      | "cancelGatewayTool"
+      | "refreshGitHubBinding"
     >
   > & {
     admitWorker: (
@@ -242,5 +247,25 @@ export async function dispatchWorkerRequest(params: {
     status: "ok",
     ownerEpoch: params.identity.ownerEpoch,
   };
+  if (
+    params.identity.protocolFeatures.includes(WORKER_GITHUB_REFRESH_PROTOCOL_FEATURE) &&
+    service.refreshGitHubBinding
+  ) {
+    const renewed = await service.refreshGitHubBinding(
+      params.identity,
+      params.request.params.githubGeneration,
+    );
+    if (!renewed.ok) {
+      rejectWorkerRequest({
+        ...params,
+        reason: "closeReason" in renewed ? renewed.closeReason : "placement-mismatch",
+      });
+      return;
+    }
+    renewed.assertCurrent();
+    if (renewed.result) {
+      result.github = renewed.result;
+    }
+  }
   params.respond(true, result);
 }

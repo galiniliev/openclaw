@@ -263,7 +263,11 @@ export async function fetchGitHubApi(
   fetchImpl: typeof fetch,
   token?: string,
   beforeRedirect?: (url: URL) => Promise<void>,
-  identity?: { revalidate: () => Promise<void>; assertSelected: () => void },
+  identity?: {
+    revalidate: () => Promise<void>;
+    assertSelected: () => void;
+    repository?: { owner: string; repo: string };
+  },
   etag?: string,
   callerSignal?: AbortSignal,
   graphql?: { query: string; variables: Record<string, string> },
@@ -288,6 +292,14 @@ export async function fetchGitHubApi(
   const timeout = AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS);
   const signal = callerSignal ? AbortSignal.any([timeout, callerSignal]) : timeout;
   for (let redirects = 0; ; redirects += 1) {
+    if (identity?.repository) {
+      const repositoryPath =
+        `/repos/${encodeURIComponent(identity.repository.owner)}/${encodeURIComponent(identity.repository.repo)}`.toLowerCase();
+      const pathname = githubRestApiPath(url, baseUrl).toLowerCase();
+      if (!token || (pathname !== repositoryPath && !pathname.startsWith(repositoryPath + "/"))) {
+        throw new ControlUiGitHubError(404, "GitHub repository is outside the session");
+      }
+    }
     // Recheck every dispatch, including redirects and auxiliary metadata reads.
     // Selection must still be current after the asynchronous credential read.
     if (identity) {
@@ -560,7 +572,21 @@ export function fetchGitHubJson(
   token?: string,
   maxBytes?: number,
   apiBaseUrl = GITHUB_API_BASE_URL,
+  identity?: Parameters<typeof fetchGitHubApi>[4],
 ): Promise<unknown> {
+  if (identity) {
+    return fetchGitHubApi(
+      rawUrl,
+      fetchImpl,
+      token,
+      undefined,
+      identity,
+      undefined,
+      undefined,
+      undefined,
+      apiBaseUrl,
+    ).then((response) => readGitHubJsonResponse(response, maxBytes));
+  }
   return withOptionalGitHubAuth(token, async (requestToken) =>
     readGitHubJsonResponse(
       await fetchGitHubApi(

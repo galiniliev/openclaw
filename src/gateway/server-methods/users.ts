@@ -13,18 +13,24 @@ import {
   validateUsersSetDisplayNameParams,
   validateUsersSetRoleParams,
 } from "../../../packages/gateway-protocol/src/index.js";
+import { resolveVerifiedSystemNativeGitHubAccount } from "../../agents/github-tool-identity.js";
 import { resolveGatewayPersonalToolParticipant } from "../../agents/tools/gateway-caller-context.js";
 import { formatErrorMessage } from "../../infra/errors.js";
+import { getActiveSecretsRuntimeConfigSnapshot } from "../../secrets/runtime-state.js";
 import {
   getCanonicalUserPreferences,
   setCanonicalUserPreferences,
 } from "../../state/user-preferences.js";
+import { resolveFactoryGitHubCoauthorEligibility } from "../../state/user-profile-github-identity.js";
 import { profileCatalogPath } from "../../state/user-profile-identity.read.js";
 import {
   projectUserProfileDisplay,
   readResidentUserProfileRevision,
 } from "../../state/user-profile-list.js";
-import { readUserProfileSnapshot } from "../../state/user-profile-reads.js";
+import {
+  readCanonicalUserProfileListItem,
+  readUserProfileSnapshot,
+} from "../../state/user-profile-reads.js";
 import {
   linkCanonicalUserProfileEmail,
   mergeCanonicalUserProfiles,
@@ -33,11 +39,7 @@ import {
   setCanonicalUserProfileRole,
 } from "../../state/user-profile-writes.js";
 import { UserProfileMergeError, UserProfileOwnerError } from "../../state/user-profiles-schema.js";
-import {
-  getUserProfileListItem,
-  listProfiles,
-  UserProfileNotFoundError,
-} from "../../state/user-profiles.js";
+import { listProfiles, UserProfileNotFoundError } from "../../state/user-profiles.js";
 import {
   invalidateOperatorRolePolicy,
   resolveOperatorRoleSelection,

@@ -64,7 +64,10 @@ afterEach(() => {
 });
 
 describe("GitHub OAuth client", () => {
-  it("verifies a managed credential at a fixed origin and registers redaction", async () => {
+  it("verifies public OAuth at its fixed issuer despite Enterprise config and registers redaction", async () => {
+    setRuntimeConfigSnapshot({
+      gateway: { github: { apiBaseUrl: "https://api.ghe.example.test" } },
+    });
     const login = "managed-user_org";
     const token = `synthetic-bound-credential-${login}`;
     vi.spyOn(globalThis, "fetch").mockResolvedValue(

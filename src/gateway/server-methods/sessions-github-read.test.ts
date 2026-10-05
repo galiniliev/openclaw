@@ -103,6 +103,7 @@ describe("publication receipt reads", () => {
           workspace_tree: "2".repeat(40),
         };
         const target = {
+          sessionId,
           params: { sessionKey, agentId: "main" },
           identity: "pr-source",
           readSource: { agentId: "main", path: "/fixture" },

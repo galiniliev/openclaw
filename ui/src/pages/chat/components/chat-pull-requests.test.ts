@@ -685,7 +685,6 @@ describe("CI job details", () => {
       connectionRevision: 0,
       eventLog: [],
       eventLogRevision: 0,
-      loadSelfProfile: async () => null,
       connect() {},
       setSessionKey() {},
       start() {},
@@ -696,6 +695,7 @@ describe("CI job details", () => {
           listeners.delete(listener);
         };
       },
+      loadSelfProfile: async () => null,
       subscribeEvents: () => () => {},
       subscribeEventLog: () => () => {},
     };

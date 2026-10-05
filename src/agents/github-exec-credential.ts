@@ -4,6 +4,7 @@ import { inspectPathPermissions } from "@openclaw/fs-safe/permissions";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { parseDocument } from "yaml";
 import { readSecureFile } from "../infra/fs-safe.js";
+import { resolveConfiguredGitHubHost } from "./github-host.js";
 
 export const GITHUB_EXEC_CREDENTIAL_UNAVAILABLE =
   "GitHub Identity credential is unavailable or insecure. Reconnect or change GitHub Identity, then retry.";
@@ -65,7 +66,11 @@ export async function readGitHubExecToken(profileDir: string): Promise<string> {
         throw new Error(GITHUB_EXEC_CREDENTIAL_UNAVAILABLE);
       }
       const parsed: unknown = document.toJS({ maxAliasCount: 0 });
-      const host = isRecord(parsed) ? parsed["github.com"] : undefined;
+      const host = isRecord(parsed)
+        ? parsed[
+            resolveConfiguredGitHubHost({ gateway: { github: { host: process.env.GH_HOST } } })
+          ]
+        : undefined;
       const token =
         isRecord(host) && typeof host.oauth_token === "string" ? host.oauth_token.trim() : "";
       if (!token || /[\r\n\0]/u.test(token)) {

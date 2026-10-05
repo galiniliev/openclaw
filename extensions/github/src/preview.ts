@@ -4,11 +4,12 @@ import {
   isRecord,
   readNonBlankString,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { fetchPullChecks } from "./detail-checks.js";
 import {
   ControlUiGitHubError,
   discardResponse,
   fetchGitHubApi,
-  GITHUB_API_ORIGIN,
+  GITHUB_API_BASE_URL,
   githubRestApiPath,
   readBoundedResponse,
   readGitHubJsonResponse,
@@ -16,7 +17,7 @@ import {
   withOptionalGitHubAuth,
 } from "./github-api.js";
 import type { ControlUiGitHubPreview } from "./preview-contract.js";
-import { parseGitHubItemTarget, type GitHubItemTarget } from "./targets.js";
+import { githubTargetUrl, parseGitHubItemTarget, type GitHubItemTarget } from "./targets.js";
 
 const GITHUB_AVATAR_HOST = "avatars.githubusercontent.com";
 const GITHUB_AVATAR_MAX_BYTES = 256 * 1024;
@@ -42,6 +43,10 @@ export type ControlUiGitHubPreviewTarget = GitHubItemTarget;
 export type ControlUiGitHubPreviewIdentity = {
   token: string | undefined;
   cacheScope: string;
+  /** Supplied only by the host after current session/repository authorization. */
+  repository?: { owner: string; repo: string };
+  host?: string;
+  apiBaseUrl?: string;
   /** Host service/env credentials may retry a stale HTTP 401 anonymously. */
   optionalAuth?: true;
   revalidate: () => Promise<void>;
@@ -57,8 +62,24 @@ const previewCache = new Map<string, CacheEntry<ControlUiGitHubPreview>>();
 
 export const parseControlUiGitHubPreviewTarget = parseGitHubItemTarget;
 
-export function isPublicGitHubRepository(value: unknown): value is Record<string, unknown> {
+function isPublicGitHubRepository(value: unknown): value is Record<string, unknown> {
   return isRecord(value) && value.private === false && value.visibility === "public";
+}
+
+export function isReadableGitHubRepository(
+  value: unknown,
+  identity?: ControlUiGitHubPreviewIdentity,
+): value is Record<string, unknown> {
+  if (!identity?.repository) {
+    return isPublicGitHubRepository(value);
+  }
+  const expected = `${identity.repository.owner}/${identity.repository.repo}`.toLowerCase();
+  return Boolean(
+    identity.token &&
+    isRecord(value) &&
+    typeof value.full_name === "string" &&
+    value.full_name.toLowerCase() === expected,
+  );
 }
 
 export async function assertPublicGitHubRepository(
@@ -79,16 +100,20 @@ export async function assertPublicGitHubRepository(
       undefined,
       signal,
       undefined,
-      GITHUB_API_ORIGIN,
+      identity?.apiBaseUrl ?? GITHUB_API_BASE_URL,
     ),
   );
-  if (!isPublicGitHubRepository(repository)) {
+  if (!isReadableGitHubRepository(repository, identity)) {
     throw new ControlUiGitHubError(404, "GitHub repository is not public");
   }
 }
 
-function redirectedRepositoryApiUrl(target: ControlUiGitHubPreviewTarget, url: URL): string | null {
-  const segments = githubRestApiPath(url, GITHUB_API_ORIGIN).split("/").filter(Boolean);
+function redirectedRepositoryApiUrl(
+  target: ControlUiGitHubPreviewTarget,
+  url: URL,
+  apiBaseUrl: string,
+): string | null {
+  const segments = githubRestApiPath(url, apiBaseUrl).split("/").filter(Boolean);
   const collection = target.kind === "pull" ? "pulls" : "issues";
   // The commits request redirects to the same item path plus one known suffix.
   const itemSegments = segments.at(-1) === "commits" ? segments.slice(0, -1) : segments;
@@ -100,7 +125,7 @@ function redirectedRepositoryApiUrl(target: ControlUiGitHubPreviewTarget, url: U
     itemSegments[3] === collection &&
     /^\d+$/u.test(itemSegments[4] ?? "")
   ) {
-    return `${GITHUB_API_ORIGIN}/repos/${itemSegments[1]}/${itemSegments[2]}`;
+    return `${apiBaseUrl}/repos/${itemSegments[1]}/${itemSegments[2]}`;
   }
   if (
     itemSegments.length === 4 &&
@@ -109,7 +134,7 @@ function redirectedRepositoryApiUrl(target: ControlUiGitHubPreviewTarget, url: U
     itemSegments[2] === collection &&
     /^\d+$/u.test(itemSegments[3] ?? "")
   ) {
-    return `${GITHUB_API_ORIGIN}/repositories/${itemSegments[1]}`;
+    return `${apiBaseUrl}/repositories/${itemSegments[1]}`;
   }
   return null;
 }
@@ -131,9 +156,13 @@ export function parseControlUiGitHubPreviewResponse(
   value: Record<string, unknown>,
 ): { preview: ControlUiGitHubPreview; avatarUrl?: string } {
   const user = isRecord(value.user) ? value.user : {};
+  const head = isRecord(value.head) ? value.head : {};
   return {
     preview: {
       ...target,
+      ...(target.kind === "pull" && readNonBlankString(head.ref)
+        ? { branch: readNonBlankString(head.ref) }
+        : {}),
       additions: asFiniteNumber(value.additions),
       changedFiles: asFiniteNumber(value.changed_files),
       closedAt: readNonBlankString(value.closed_at),
@@ -268,6 +297,13 @@ async function fetchPreview(
   token?: string,
   identity?: ControlUiGitHubPreviewIdentity,
 ): Promise<ControlUiGitHubPreview> {
+  if (
+    identity?.repository &&
+    (identity.repository.owner.toLowerCase() !== target.owner.toLowerCase() ||
+      identity.repository.repo.toLowerCase() !== target.repo.toLowerCase())
+  ) {
+    throw new ControlUiGitHubError(404, "GitHub repository is outside the session");
+  }
   const request = (url: string, beforeRedirect?: (url: URL) => Promise<void>) =>
     fetchGitHubApi(
       url,
@@ -278,11 +314,11 @@ async function fetchPreview(
       undefined,
       signal,
       undefined,
-      GITHUB_API_ORIGIN,
+      identity?.apiBaseUrl ?? GITHUB_API_BASE_URL,
     );
   const assertPublicRepository = (url: string) =>
     assertPublicGitHubRepository(url, fetchImpl, token, identity, signal);
-  const repositoryUrl = `${GITHUB_API_ORIGIN}/repos/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.repo)}`;
+  const repositoryUrl = `${identity?.apiBaseUrl ?? GITHUB_API_BASE_URL}/repos/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.repo)}`;
   const itemUrl = `${repositoryUrl}/${target.kind === "pull" ? "pulls" : "issues"}/${target.number}`;
   if (token) {
     await assertPublicRepository(repositoryUrl);
@@ -291,7 +327,14 @@ async function fetchPreview(
   // redirect into a repository the token can read but the viewer may not see.
   const beforeRedirect = token
     ? async (url: URL) => {
-        const redirectedRepositoryUrl = redirectedRepositoryApiUrl(target, url);
+        if (identity?.repository) {
+          throw new ControlUiGitHubError(409, "GitHub repository changed; reopen the session");
+        }
+        const redirectedRepositoryUrl = redirectedRepositoryApiUrl(
+          target,
+          url,
+          identity?.apiBaseUrl ?? GITHUB_API_BASE_URL,
+        );
         if (!redirectedRepositoryUrl) {
           throw new ControlUiGitHubError(502, "GitHub item returned an unsafe redirect");
         }
@@ -308,6 +351,19 @@ async function fetchPreview(
     await assertPublicRepository(previewRepositoryApiUrl(target, parsed));
   }
   const { preview, avatarUrl } = parseControlUiGitHubPreviewResponse(target, parsed);
+  const head = isRecord(parsed.head) ? parsed.head : {};
+  const checks =
+    target.kind === "pull" && parsed.state === "open"
+      ? await fetchPullChecks(
+          repositoryUrl,
+          head.sha,
+          `${githubTargetUrl(target, identity?.host)}/checks`,
+          async (url) => ({
+            value: await readItem(url),
+            hasNextPage: false,
+          }),
+        )
+      : undefined;
   // Both extra fetches run only after the public-repository assertions above,
   // so neither can widen what this token is allowed to read.
   const [avatarDataUrl, coAuthorFacts] = await Promise.all([
@@ -327,6 +383,9 @@ async function fetchPreview(
   ]);
   return {
     ...preview,
+    ...(checks && checks.state !== "unavailable" && checks.total > 0
+      ? { checksSummary: checks.summary }
+      : {}),
     ...(avatarDataUrl ? { avatarDataUrl } : {}),
     ...(coAuthorFacts.coAuthorCount > 0
       ? { coAuthors: coAuthorFacts.coAuthors, coAuthorCount: coAuthorFacts.coAuthorCount }
@@ -334,8 +393,12 @@ async function fetchPreview(
   };
 }
 
-function cacheKey(target: ControlUiGitHubPreviewTarget, credentialScope: string): string {
-  return `${target.kind}:${target.owner.toLowerCase()}/${target.repo.toLowerCase()}#${target.number}\0${credentialScope}`;
+function cacheKey(
+  target: ControlUiGitHubPreviewTarget,
+  credentialScope: string,
+  apiBaseUrl: string,
+): string {
+  return `${apiBaseUrl}:${target.kind}:${target.owner.toLowerCase()}/${target.repo.toLowerCase()}#${target.number}\0${credentialScope}`;
 }
 
 function cachePreview(key: string, entry: CacheEntry<ControlUiGitHubPreview>): void {
@@ -352,7 +415,7 @@ export async function loadControlUiGitHubPreview(
   await identity?.revalidate();
   identity?.assertSelected();
   const { token, cacheScope } = identity ?? { token: undefined, cacheScope: "anonymous" };
-  const key = cacheKey(target, cacheScope);
+  const key = cacheKey(target, cacheScope, identity?.apiBaseUrl ?? GITHUB_API_BASE_URL);
   const now = Date.now();
   let entry = previewCache.get(key);
   if (entry && (refresh || entry.expiresAt <= now)) {

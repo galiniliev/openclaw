@@ -211,6 +211,10 @@ export type WorkerPlacementDispatchRequest = {
     providerId: string;
     profileSnapshot: WorkerProfile;
   };
+  /** Transient, current-caller native read; never persisted in a placement. */
+  readNativeCredential?: (env: NodeJS.ProcessEnv) => Promise<string | undefined>;
+  /** Original admitted source for automatic recovery/redispatch; never persisted. */
+  operatorAuthority?: import("../../agents/admitted-run-context.js").AdmittedRunOperatorAuthority;
 };
 
 export type WorkerPlacementDispatchAdmission = <T>(
@@ -241,6 +245,8 @@ export type WorkerPlacementReclaimRequest = {
   sessionKey: string;
   agentId: string;
   recoverToGateway?: SessionsReclaimParams["recoverToGateway"];
+  /** Exact live caller proof for bounded source reads, never stored in the move intent. */
+  readNativeCredential?: (env: NodeJS.ProcessEnv) => Promise<string | undefined>;
 };
 
 export type WorkerPlacementMoveRequest = Pick<

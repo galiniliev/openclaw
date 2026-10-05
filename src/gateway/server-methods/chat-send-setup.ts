@@ -73,11 +73,17 @@ export async function prepareAndAdmitChatSend(
     );
     return undefined;
   }
-  const loadedSession = await prepareChatSendSession({
-    request: normalizedRequest.value,
-    context,
-    client,
-  });
+  let loadedSession: Awaited<ReturnType<typeof prepareChatSendSession>>;
+  try {
+    loadedSession = await prepareChatSendSession({
+      request: normalizedRequest.value,
+      context,
+      client,
+    });
+  } catch (error) {
+    respondChatSendAdmissionError(error, respond);
+    return undefined;
+  }
   if (!loadedSession.ok) {
     respond(
       false,

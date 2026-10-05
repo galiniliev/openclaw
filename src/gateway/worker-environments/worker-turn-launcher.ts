@@ -1,4 +1,8 @@
 import { randomUUID } from "node:crypto";
+import {
+  readAdmittedRunOperatorAuthority,
+  readPreparedRunOperatorAuthority,
+} from "../../agents/admitted-run-context.js";
 import { isAgentRunRestartAbortReason } from "../../agents/run-termination.js";
 import type { SandboxContext } from "../../agents/sandbox/types.js";
 import type {
@@ -14,11 +18,7 @@ import { WORKER_ADMISSION_DEADLINE_MS } from "../../worker/worker-connection-con
 import { StaleWorkerBuildError } from "./admission.js";
 import { raceNodeWorkerOperation } from "./node-worker-abort.js";
 import { placementTurnOwner, sameWorkerSessionTurnClaim } from "./placement-record.js";
-import type {
-  WorkerSessionPlacementRecord,
-  WorkerSessionPlacementStore,
-  WorkerSessionTurnClaim,
-} from "./placement-store.js";
+import type { WorkerSessionPlacementRecord, WorkerSessionTurnClaim } from "./placement-store.js";
 import { matchesWorkerPlacementTarget } from "./placement-target.js";
 import { ActiveTurnClaimError } from "./placement-turn-claims.js";
 import { findPendingWorkerWorkspaceResult } from "./placement-workspace-result.js";
@@ -41,52 +41,24 @@ import {
   waitForWorkerRuntimeRefresh,
 } from "./worker-turn-admission.js";
 import {
+  waitForRecoveryWorkerCapacity,
+  type RecoveryWorkerRetryIntent,
+} from "./worker-turn-capacity.js";
+import {
   failHandedOffTurn,
   WorkerTurnExecutionError,
   WorkerWorkspaceReconciliationError,
   type ActiveWorkerPlacement,
-  type WorkerTurnEnvironmentService,
 } from "./worker-turn-failure.js";
+import type { WorkerTurnLauncherOptions } from "./worker-turn-launcher.types.js";
 import { createWorkerTurnRunOwner, type ActiveWorkerTurn } from "./worker-turn-run-owner.js";
+import { resolveWorkerTurnSandbox } from "./worker-turn-sandbox.js";
 import { AcceptedWorkspacePublicationIndeterminateError } from "./workspace-accepted-publication.js";
-import type { WorkerWorkspaceOperationCoordinator } from "./workspace-operation-coordinator.js";
 
 const loadWorkerTurnExecution = createLazyRuntimeModule(() => import("./worker-turn-execution.js"));
 const loadRemoteExecTurn = createLazyRuntimeModule(() => import("./workspace-result-finalize.js"));
-const loadPlacementSandbox = createLazyRuntimeModule(() => import("./placement-sandbox.js"));
 
 class WorkerRuntimeRefreshInFlightError extends Error {}
-
-type RedispatchableWorkerPlacement = Extract<
-  WorkerSessionPlacementRecord,
-  { state: "reclaimed" | "failed" }
->;
-
-type WorkerTurnLauncherOptions = {
-  environments: WorkerTurnEnvironmentService;
-  placements: WorkerSessionPlacementStore;
-  /** Read-only resolution; a cancelled turn may stop waiting for these facts. */
-  resolveWorkspace: (
-    identity: ReturnType<typeof resolvePlacementIdentity>,
-  ) => Promise<WorkerSessionWorkspace>;
-  reconcileActivePlacement: (environmentId: string) => Promise<void>;
-  waitForAdmissionNode: (params: {
-    placement: ActiveWorkerPlacement;
-    signal: AbortSignal;
-    assertCurrent: () => void;
-  }) => Promise<void>;
-  workspaceOperations: WorkerWorkspaceOperationCoordinator;
-  waitForInitialPlacement?: (
-    placement: WorkerSessionPlacementRecord,
-    signal?: AbortSignal,
-  ) => Promise<WorkerSessionPlacementRecord>;
-  redispatchPlacement: (
-    placement: RedispatchableWorkerPlacement,
-    options: { assertCurrent: () => void; signal?: AbortSignal },
-  ) => Promise<ActiveWorkerPlacement>;
-  prepareAcceptedWorkspacePublication?: (claim: WorkerSessionTurnClaim) => Promise<void>;
-  publishAcceptedWorkspace?: (claim: WorkerSessionTurnClaim) => Promise<void>;
-};
 
 export function createWorkerSessionTurnPlacementProvider(options: WorkerTurnLauncherOptions) {
   const activeWorkerTurns = new Map<string, ActiveWorkerTurn>();
@@ -123,56 +95,7 @@ export function createWorkerSessionTurnPlacementProvider(options: WorkerTurnLaun
           })
         : undefined;
     },
-    async resolveSandbox(params) {
-      const placement = options.placements.get(params.sessionId);
-      if (
-        placement?.state !== "active" ||
-        placement.executionMode !== "remote-exec" ||
-        placement.agentId !== params.agentId ||
-        placement.sessionKey !== params.sessionKey
-      ) {
-        return null;
-      }
-      const assertCurrentPlacement = (phase: "managed workspace" | "sandbox") => {
-        const current = options.placements.get(params.sessionId);
-        if (
-          !matchesWorkerPlacementTarget(current, placement) ||
-          current?.executionMode !== "remote-exec" ||
-          current.agentId !== placement.agentId ||
-          current.sessionKey !== placement.sessionKey
-        ) {
-          throw new Error(`Remote-exec placement changed while preparing its ${phase}`);
-        }
-      };
-      const workspace = await options.resolveWorkspace({
-        sessionId: placement.sessionId,
-        agentId: placement.agentId,
-        sessionKey: placement.sessionKey,
-      });
-      assertCurrentPlacement("managed workspace");
-      const { createRemoteExecPlacementSandbox } = await loadPlacementSandbox();
-      assertCurrentPlacement("sandbox");
-      const sandbox = await createRemoteExecPlacementSandbox({
-        config: params.config,
-        environments: options.environments,
-        workspaceDir: workspace.kind === "local" ? workspace.path : placement.remoteWorkspaceDir,
-        placement,
-      });
-      assertCurrentPlacement("sandbox");
-      const currentEnvironment = options.environments.get(placement.environmentId);
-      if (
-        currentEnvironment?.state !== "attached" ||
-        currentEnvironment.environmentId !== placement.environmentId ||
-        currentEnvironment.ownerEpoch !== placement.activeOwnerEpoch ||
-        currentEnvironment.attachedSessionIds.length !== 1 ||
-        currentEnvironment.attachedSessionIds[0] !== placement.sessionId ||
-        (sandbox.backendId === "node" &&
-          currentEnvironment.nodeDeviceId !== sandbox.placementNodeId)
-      ) {
-        throw new Error("Remote-exec environment changed while preparing its sandbox");
-      }
-      return sandbox;
-    },
+    resolveSandbox: (params) => resolveWorkerTurnSandbox(options, params),
     async executeLocalTurn<T>(
       claim: LocalTurnPlacementClaim,
       runLocal: () => Promise<T>,

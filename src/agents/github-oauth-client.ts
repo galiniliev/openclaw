@@ -4,8 +4,9 @@ import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { readResponseWithLimit } from "../infra/http-body.js";
 import { pruneMapToMaxSize } from "../infra/map-size.js";
 import { registerSecretValueForRedaction } from "../logging/secret-redaction-registry.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import { getOrCreatePromise } from "../shared/lazy-promise.js";
-import { resolveConfiguredGitHubApiBaseUrl } from "./github-host.js";
+import { GITHUB_PUBLIC_API_BASE_URL } from "./github-host.js";
 import { clearNativeGitHubTokenCache } from "./github-read-identity.js";
 import type { GitHubToolAccount } from "./github-tool-account.js";
 
@@ -30,6 +31,7 @@ const GITHUB_OAUTH_MAX_INTERVAL_SECONDS = 60 * 60;
 // disconnected or retired profiles provide no token before any cache lookup.
 const GITHUB_CREDENTIAL_VERIFICATION_TTL_MS = 60_000;
 const GITHUB_CREDENTIAL_VERIFICATION_MAX_ENTRIES = 32;
+const identityLog = createSubsystemLogger("agents/github-identity");
 type GitHubCredentialVerificationResult =
   | { status: "available"; account: GitHubToolAccount; scopes: string[] }
   | { status: "unavailable" | "rate_limited" | "unverified" };
@@ -301,18 +303,25 @@ async function readGitHubResponse(response: Response, surface: string, timeoutMs
   return parseJsonObject(bytes, surface);
 }
 
-/** Public credentials use their fixed issuer; other issuers require an explicit endpoint. */
+/** Public OAuth is issued by github.com; other issuers must be selected explicitly. */
 export async function verifyGitHubCredential(
   token: string,
   options: GitHubOAuthRequestOptions = {},
 ): Promise<GitHubCredentialVerificationResult> {
   registerSecretValueForRedaction(token);
+  const progress: { stage: "credential" | "transport" | "response" | "unknown" } = {
+    stage: "credential",
+  };
   try {
     readBoundedString(token, "account");
     if (/\s/u.test(token)) {
+      identityLog.info("github identity verification", {
+        stage: "credential",
+        code: "invalid_credential",
+      });
       return { status: "unavailable" };
     }
-    const apiBaseUrl = options.apiBaseUrl ?? resolveConfiguredGitHubApiBaseUrl();
+    const apiBaseUrl = options.apiBaseUrl ?? GITHUB_PUBLIC_API_BASE_URL;
     const key = createHash("sha256").update(`${apiBaseUrl}\0${token}`).digest("hex");
     const cache = verifiedCredentials;
     const cached = cache.get(key);
@@ -327,6 +336,7 @@ export async function verifyGitHubCredential(
         1,
       );
       const timeout = AbortSignal.timeout(timeoutMs);
+      progress.stage = "transport";
       const response = await fetch(`${apiBaseUrl}/user`, {
         method: "GET",
         redirect: "error",
@@ -340,11 +350,22 @@ export async function verifyGitHubCredential(
           (response.status === 403 &&
             (response.headers.get("x-ratelimit-remaining") === "0" ||
               response.headers.has("retry-after")));
+        identityLog.info("github identity verification", {
+          stage: "api_verification",
+          code:
+            response.status === 401
+              ? "unauthorized"
+              : rateLimited
+                ? "rate_limited"
+                : "http_unverified",
+          httpStatus: response.status,
+        });
         return {
           status:
             response.status === 401 ? "unavailable" : rateLimited ? "rate_limited" : "unverified",
         };
       }
+      progress.stage = "response";
       const body = await readGitHubResponse(response, "account", timeoutMs);
       const accountId = readPositiveInteger(body.id, "account", Number.MAX_SAFE_INTEGER);
       const login = readBoundedString(body.login, "account", 100);
@@ -356,6 +377,10 @@ export async function verifyGitHubCredential(
         account: { accountId, login, avatarUrl },
         scopes,
       };
+      identityLog.info("github identity verification", {
+        stage: "api_verification",
+        code: "accepted",
+      });
       Object.freeze(result.account);
       Object.freeze(result.scopes);
       Object.freeze(result);
@@ -363,11 +388,26 @@ export async function verifyGitHubCredential(
       pruneMapToMaxSize(cache, GITHUB_CREDENTIAL_VERIFICATION_MAX_ENTRIES);
       return result;
     };
+    // Another caller may await an existing probe; it cannot claim that probe's stage.
+    progress.stage = "unknown";
     return await (options.signal || options.timeoutMs !== undefined
       ? create()
       : getOrCreatePromise(pending, key, create, { evictOnSettled: true }));
-  } catch {
+  } catch (error) {
     // Network errors, response bodies, and abort reasons can contain credentials.
+    identityLog.info("github identity verification", {
+      stage: "api_verification",
+      code:
+        error instanceof Error && error.name === "TimeoutError"
+          ? "deadline_exceeded"
+          : progress.stage === "response"
+            ? "response_unreadable"
+            : progress.stage === "credential"
+              ? "invalid_credential"
+              : progress.stage === "transport"
+                ? "transport_unavailable"
+                : "unknown",
+    });
     return { status: "unverified" };
   }
 }

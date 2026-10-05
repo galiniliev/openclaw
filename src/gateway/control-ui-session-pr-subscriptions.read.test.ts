@@ -14,6 +14,7 @@ afterEach(async () => {
 });
 
 const target: ControlUiSessionPrTarget = {
+  sessionId: "original-session",
   params: { sessionKey: "agent:main:change", agentId: "main" },
   identity: "original-session",
   readSource: { agentId: "main", path: "unused" },

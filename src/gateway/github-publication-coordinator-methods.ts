@@ -19,6 +19,7 @@ import {
 } from "./github-personal-publication-store.js";
 import {
   assertExpectedSharedGitHubPublisher,
+  factoryPublicationPreflightCredential,
   prepareCurrentGitHubPublicationIdentity,
   readGitHubPublicationWorktreeOwner,
   resolveGitHubPublicationWorktreeOwner,
@@ -314,7 +315,24 @@ export function createGitHubPublicationCoordinatorMethods(params: {
         }
       }
       assertRequester();
-      const identity = await prepareCurrentGitHubPublicationIdentity(input.agentId);
+      const identity = await prepareCurrentGitHubPublicationIdentity(
+        input.agentId,
+        input.requester.snapshot.actor.kind === "operator"
+          ? {
+              profileId: input.requester.snapshot.actor.profileId,
+              sessionKey: input.sessionKey,
+              assertCurrent: assertRequester,
+            }
+          : undefined,
+        factoryPublicationPreflightCredential({
+          agentId: input.agentId,
+          sessionKey: loaded.canonicalKey,
+          sessionId,
+          lifecycleRevision,
+          requestDigest,
+          assertCurrent: assertCaptureAuthority,
+        }),
+      );
       assertRequester();
       assertExpectedSharedGitHubPublisher(
         expected,

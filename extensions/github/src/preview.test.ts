@@ -238,6 +238,69 @@ describe("loadControlUiGitHubPreview", () => {
     expect(fetchMock).toHaveBeenCalledTimes(6);
   });
 
+  it("reads only a trusted session repository and retires cached private previews with its authority", async () => {
+    const target = { kind: "pull" as const, number: 16225, owner: "bic", repo: "lobster" };
+    let active = true;
+    const identity = {
+      ...managedIdentity("private-session", () => {
+        if (!active) {
+          throw new Error("session retired");
+        }
+      }),
+      repository: { owner: "bic", repo: "lobster" },
+    };
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = requestUrl(input);
+      if (url.endsWith("/commits?per_page=100")) {
+        return githubJson([]);
+      }
+      if (url.includes("/check-runs?")) {
+        return githubJson({
+          total_count: 1,
+          check_runs: [
+            {
+              id: 1,
+              name: "build",
+              head_sha: "a".repeat(40),
+              status: "completed",
+              conclusion: "success",
+            },
+          ],
+        });
+      }
+      if (url.includes("/status?")) {
+        return githubJson({ sha: "a".repeat(40), total_count: 0, statuses: [] });
+      }
+      if (url.endsWith("/pulls/16225")) {
+        return githubJson(
+          previewPayload({
+            base: { repo: { url: "https://api.github.com/repos/bic/lobster" } },
+            head: { ref: "reviewed-branch", sha: "a".repeat(40) },
+            state: "open",
+            merged_at: null,
+            user: { login: "reviewer" },
+          }),
+        );
+      }
+      return githubJson({ full_name: "bic/lobster", private: true, visibility: "private" });
+    });
+    expect(await loadPluginPreview(target, identity, fetchMock)).toMatchObject({
+      number: 16225,
+      login: "reviewer",
+      additions: 101,
+      branch: "reviewed-branch",
+      checksSummary: "1 passed",
+    });
+    const calls = fetchMock.mock.calls.length;
+    await expect(
+      loadPluginPreview({ ...target, repo: "unrelated" }, identity, fetchMock),
+    ).rejects.toThrow("outside the session");
+    expect(fetchMock).toHaveBeenCalledTimes(calls);
+    active = false;
+    await expect(loadPluginPreview(target, identity, fetchMock)).rejects.toThrow("session retired");
+    expect(fetchMock).toHaveBeenCalledTimes(calls);
+  });
+
   it.each([
     ["final visibility check", 3, false],
     ["repository redirect", 1, true],

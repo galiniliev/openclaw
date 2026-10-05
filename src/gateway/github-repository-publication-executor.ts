@@ -346,7 +346,11 @@ export async function executeRepositoryGitHubPublication(params: {
     const preparedAttribution = await prepareGitCoauthorAttribution({
       agentId: row.agent_id,
       config,
-      excludeAccountId: identity.account.accountId,
+      excludeIdentity: {
+        host: identity.host ?? resolveGitHubHost(),
+        accountId: identity.account.accountId,
+      },
+      host: identity.host ?? resolveGitHubHost(),
       sessionKey: row.session_key,
       sessionId: row.session_id,
       storePath: params.storePath,

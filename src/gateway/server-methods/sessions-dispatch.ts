@@ -516,7 +516,7 @@ export const sessionDispatchHandlers: GatewayRequestHandlers = {
       respond,
     );
   },
-  "sessions.move": async ({ params, respond, context, sessionMutationAuthorization }) => {
+  "sessions.move": async ({ params, respond, context, client, sessionMutationAuthorization }) => {
     if (!assertValidParams(params, validateSessionsMoveParams, "sessions.move", respond)) {
       return;
     }
@@ -558,15 +558,14 @@ export const sessionDispatchHandlers: GatewayRequestHandlers = {
       );
       return;
     }
-    if (
-      !(await resolveSessionWorkspace({
-        entry,
-        sessionKey: target.canonicalKey,
-        agentId: target.target.agentId,
-        method: "sessions.move",
-        respond,
-      }))
-    ) {
+    const workspace = await resolveSessionWorkspace({
+      entry,
+      sessionKey: target.canonicalKey,
+      agentId: target.target.agentId,
+      method: "sessions.move",
+      respond,
+    });
+    if (!workspace) {
       return;
     }
     try {
@@ -577,6 +576,14 @@ export const sessionDispatchHandlers: GatewayRequestHandlers = {
           agentId: target.target.agentId,
           source: params.expected,
           target: params.target,
+          readNativeCredential: factoryGitHubDispatchCredentialReader({
+            client,
+            sessionId,
+            sessionKey: target.canonicalKey,
+            agentId: target.target.agentId,
+            repositoryUrl: workspace.kind === "repository" ? workspace.repository.url : undefined,
+            assertCurrent: () => sessionMutationAuthorization?.assertCurrent(),
+          }),
           ...("abandonSource" in params ? { abandonSource: true } : {}),
         },
         () =>
@@ -608,7 +615,13 @@ export const sessionDispatchHandlers: GatewayRequestHandlers = {
       respondWorkerDispatchError(error, respond);
     }
   },
-  "sessions.reclaim": async ({ params, respond, context, sessionMutationAuthorization }) => {
+  "sessions.reclaim": async ({
+    params,
+    respond,
+    context,
+    client,
+    sessionMutationAuthorization,
+  }) => {
     if (!assertValidParams(params, validateSessionsReclaimParams, "sessions.reclaim", respond)) {
       return;
     }
@@ -649,16 +662,17 @@ export const sessionDispatchHandlers: GatewayRequestHandlers = {
         // Reporting cannot replace a committed reclaim outcome.
       }
     };
-    if (
-      existingPlacement?.state !== "failed" &&
-      !(await resolveSessionWorkspace({
-        entry,
-        sessionKey: target.canonicalKey,
-        agentId: target.target.agentId,
-        method: "sessions.reclaim",
-        respond,
-      }))
-    ) {
+    const workspace =
+      existingPlacement?.state !== "failed" || params.recoverToGateway
+        ? await resolveSessionWorkspace({
+            entry,
+            sessionKey: target.canonicalKey,
+            agentId: target.target.agentId,
+            method: "sessions.reclaim",
+            respond,
+          })
+        : undefined;
+    if ((existingPlacement?.state !== "failed" || params.recoverToGateway) && !workspace) {
       return;
     }
     let placement: WorkerSessionPlacementRecord;
@@ -669,6 +683,14 @@ export const sessionDispatchHandlers: GatewayRequestHandlers = {
           sessionKey: target.canonicalKey,
           agentId: target.target.agentId,
           ...(params.recoverToGateway ? { recoverToGateway: params.recoverToGateway } : {}),
+          readNativeCredential: factoryGitHubDispatchCredentialReader({
+            client,
+            sessionId,
+            sessionKey: target.canonicalKey,
+            agentId: target.target.agentId,
+            repositoryUrl: workspace?.kind === "repository" ? workspace.repository.url : undefined,
+            assertCurrent: () => sessionMutationAuthorization?.assertCurrent(),
+          }),
         },
         sessionMutationAuthorization?.assertCurrent,
       );
