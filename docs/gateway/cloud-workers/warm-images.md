@@ -116,17 +116,41 @@ one unassigned worker per project and profile, with a Gateway-wide cap of four.
 The next matching dispatch consumes a ready worker once, then schedules refill;
 if no eligible worker is ready, dispatch uses ordinary provisioning.
 Paired-device dispatch does not use this pool.
-When an authenticated Control UI browser authorized to create sessions is connected,
+For presence-driven pools, when an authenticated Control UI browser authorized to create sessions is connected,
 the configured default repository and its worker profile keep the profile's
 `readyWorkers` target prepared. Read-only connections do not allocate workers.
 After the last eligible browser disconnects or loses authorization, presence-driven
 refill stops and unused reserves retire after 15 minutes. Changing the GitHub host or removing the default repository retires
 stale demand and unused reserves; active sessions keep their own workers.
 Repository admission, refill, and restart binding recheck current source access and visibility. Public and private repositories use separate preparation identities; a visibility change or lost access prevents reuse of earlier prepared capacity. Retention and cleanup use local ownership facts without requiring GitHub access. A slow or failed default-repository admission does not block unrelated reserve cleanup or refill from independently authorized session demand. A changed repository instance or selected account cannot consume capacity prepared for the previous owner.
+
+In a GitHub-authenticated Software Factory, the configured default worker profile
+also supplies standing image-only demand. Startup reconstructs that demand without
+a connected human or a repository checkout and maintains the existing target and
+reserve cap. A compatible restart retains unused reserves; a successful claim
+schedules replenishment through the same pool owner. This policy does not record
+human presence or authorize repository access: a session still needs its current
+caller and repository admission before consuming an image reserve.
+Preparing, held, and unconfirmed cleanup resources still occupy capacity, so the
+target does not promise that every reserve is immediately ready. Disabling the
+worker mode/profile or setting the target or shared cap to zero stops refill and
+drains only eligible unused capacity; active placements and custody holds remain
+with their existing owners. Other Gateways retain demand-based expiry.
+
 A ready-worker hit bypasses provisioning. A foreground miss provisions a worker
 from the compatible image when available. If only the project commit changed,
 it refreshes the checkout and continues to enrollment without waiting for a new
 snapshot; a background reserve or explicit build can publish that refreshed image.
+For a new repository session with an unpinned selected ref, a ready reserve may
+start at an older commit of the same repository. After the one-use session bind,
+the worker fetches that ref through the normal Git authority and records the
+fetched commit as the session base; it does not reset or reseed the consumed
+prepared workspace. A session with an already pinned base uses a matching
+reserve or ordinary provisioning, preserving its accepted source baseline.
+Interrupted startup recovery first observes the exact already-bound workspace
+locally; it does not require another mutable-ref fetch to retain accepted
+prepared setup. A pinned refreshed base can be recovered from local Git objects
+without network access when that commit is already present.
 The first image and incompatible preparation still follow the existing capture
 requirements. Disabling reserves also disables this automatic background refresh.
 
@@ -154,6 +178,10 @@ failed preparation records its original error and ends that preparation. Any
 later eligible refill starts a new allocation. Uncertain cleanup keeps the
 worker counted until the provider confirms release.
 
+When pool maintenance confirms cleanup has freed capacity for active human-presence
+demand, it schedules another pass without waiting for the periodic sweep. A changed
+commit or a consumed reserve still leaves a gap while replacements prepare.
+
 Each reserve expires from the successful activation or explicit build that
 created its demand, using the provider's existing idle timeout. Refill and Gateway restart do not
 extend that window. An already-admitted capture can finish within its provider
@@ -179,13 +207,18 @@ activation. Failed enrollment or dispatch does not renew image demand. A newly
 captured image stays protected by its producing worker until confirmed source
 stop; without successful demand, it is then eligible for ordinary cleanup.
 
-Crabbox reserves require an eligible dedicated Linux warm-image profile, a known
+Crabbox reserves require an eligible dedicated Linux profile, a known
 machine class, and immutable setup inputs without `setupEnv`. A changed cache
 identity may require cold preparation. The project recipe and normal runtime
 installation still complete before readiness, but that cold worker cannot
 replace an unrelated image generation. This can reduce snapshot reuse until an
 eligible generation can publish; it does not permit incomplete setup or extend
 an older image's demand window.
+
+Set `settings.warmImage: false` to provision ready reserves from the normal
+provider image without capturing or forking checkpoints. `readyWorkers` and
+`cloudWorkers.preparedPool.maxTotal` still govern the same prepared pool;
+source admission, enrollment, one-use claims, expiry, and cleanup remain required.
 
 ### Inspect snapshots in the Control UI
 

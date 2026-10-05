@@ -7,6 +7,7 @@ import { resolveGitRepositoryPaths } from "../../agents/worktrees/git.js";
 import { normalizeCapabilityProviderId } from "../../plugins/provider-registry-shared.js";
 import type { WorkerExecutionMode, WorkerProfile, WorkerProvider } from "../../plugins/types.js";
 import { workerEnvironmentServiceError as serviceError } from "./environment-errors.js";
+import { imageReserveProject, readImageReserveProject } from "./image-reserve.js";
 import {
   createWorkerProjectPreparationIdentity,
   readWorkerProjectPreparation,
@@ -48,6 +49,8 @@ type WorkerProviderIntentPreparationOptions = {
   runSetupScript?: boolean;
   signal?: AbortSignal;
   setupAuthorized?: boolean;
+  readNativeCredential?: (env: NodeJS.ProcessEnv) => Promise<string | undefined>;
+  imageReserve?: boolean;
 };
 
 function allocationSnapshot(
@@ -82,7 +85,11 @@ function projectReplayIdentity(project: unknown): unknown {
 export function createWorkerProviderIntent(options: WorkerProviderIntentOptions) {
   const preparedIntents = new WeakMap<
     WorkerProviderPreparedIntent,
-    { profileId: string; assertCurrent: () => void }
+    {
+      profileId: string;
+      assertCurrent: () => void;
+      revalidateRepository?: (signal?: AbortSignal) => Promise<void>;
+    }
   >();
   const assertPreparedIntentCurrent = (profileId: string, intent: WorkerProviderPreparedIntent) => {
     const prepared = preparedIntents.get(intent);
@@ -90,6 +97,15 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
       throw serviceError("invalid_state", "Worker preparation is not owned by this lifecycle");
     }
     prepared.assertCurrent();
+  };
+  const revalidatePreparedIntentRepository = async (
+    profileId: string,
+    intent: WorkerProviderPreparedIntent,
+    signal?: AbortSignal,
+  ) => {
+    assertPreparedIntentCurrent(profileId, intent);
+    await preparedIntents.get(intent)?.revalidateRepository?.(signal);
+    assertPreparedIntentCurrent(profileId, intent);
   };
   const { store, withLock, providerFor, resumeProvision } = options;
   const requireProfileId = (profileId: string, signal?: AbortSignal) => {
@@ -192,6 +208,43 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
         "Worker preparation must have exactly one project source",
       );
     }
+    if (createOptions.imageReserve) {
+      if (
+        projectPath ||
+        createOptions.repository ||
+        createOptions.projectRepository ||
+        process.env.FACTORY_AUTH_MODE !== "github" ||
+        !options.projectNamespace ||
+        !provider.requiresNodeEnrollment ||
+        !options.prepareNodeArtifacts
+      ) {
+        throw serviceError("invalid_profile", "Image-only reserve is unavailable");
+      }
+      const target = provider.resolvePreparationTarget?.(profile, machineClass, os);
+      if (!target) {
+        throw serviceError("invalid_profile", "Image-only reserve has no preparation target");
+      }
+      const artifacts = await options.prepareNodeArtifacts(profileSnapshot, signal);
+      signal?.throwIfAborted();
+      artifacts.assertCurrent();
+      assertArtifactsCurrent = artifacts.assertCurrent;
+      const project = imageReserveProject(options.projectNamespace);
+      profileSnapshot = {
+        ...profileSnapshot,
+        project: {
+          ...project,
+          preparation: createWorkerProjectPreparationIdentity({
+            namespace: options.projectNamespace,
+            providerId,
+            profileId,
+            profileSnapshot,
+            project,
+            target,
+            artifacts: artifacts.artifacts,
+          }),
+        },
+      };
+    }
     if (
       (projectPath || createOptions.repository || createOptions.projectRepository) &&
       provider.supportsProjectPreparation?.(profile, machineClass, os)
@@ -208,6 +261,7 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
           getConfig: options.getConfig,
           assertCurrent: assertProfileCurrent,
           signal,
+          readNativeCredential: createOptions.readNativeCredential,
           knownRecipe: (admittedProject) => {
             for (const record of store.list()) {
               const value = record.profileSnapshot.project;
@@ -300,6 +354,7 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
     const admittedSnapshot = structuredClone(intent);
     preparedIntents.set(intent, {
       profileId,
+      revalidateRepository: repositoryAdmission?.revalidate,
       assertCurrent: () => {
         assertCurrent();
         if (!isDeepStrictEqual(intent, admittedSnapshot)) {
@@ -319,7 +374,17 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
   const prepareRetention = async (record: WorkerEnvironmentRecord, signal?: AbortSignal) => {
     const project = readWorkerProjectSnapshot(record.profileSnapshot.project);
     const preparation = readWorkerProjectPreparation(record.profileSnapshot.project);
-    if (!project || !preparation || !options.prepareNodeArtifacts || !options.projectNamespace) {
+    const imageProject = readImageReserveProject(record.profileSnapshot.project);
+    if (
+      (!project && !imageProject) ||
+      !preparation ||
+      !options.prepareNodeArtifacts ||
+      !options.projectNamespace
+    ) {
+      return undefined;
+    }
+    const retainedProject = project ?? imageProject;
+    if (!retainedProject) {
       return undefined;
     }
     const createOptions: WorkerProviderIntentPreparationOptions = {
@@ -355,7 +420,7 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
       ) {
         return false;
       }
-      if ("source" in project) {
+      if (project && "source" in project) {
         const { agent, identity } = project.source.owner;
         const agentIdentity = resolveConfiguredGitHubToolIdentity({
           config,
@@ -398,7 +463,12 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
       !target ||
       !isDeepStrictEqual(target, preparation.target) ||
       !provider.requiresNodeEnrollment ||
-      !provider.supportsProjectPreparation?.(profile, createOptions.machineClass, createOptions.os)
+      (project !== undefined &&
+        !provider.supportsProjectPreparation?.(
+          profile,
+          createOptions.machineClass,
+          createOptions.os,
+        ))
     ) {
       return undefined;
     }
@@ -419,11 +489,12 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
           target,
         ) &&
         provider.requiresNodeEnrollment &&
-        provider.supportsProjectPreparation?.(
-          profile,
-          createOptions.machineClass,
-          createOptions.os,
-        ),
+        (!project ||
+          provider.supportsProjectPreparation?.(
+            profile,
+            createOptions.machineClass,
+            createOptions.os,
+          )),
       );
     };
     if (!isProfileCurrent()) {
@@ -445,7 +516,7 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
       providerId,
       profileId: record.profileId,
       profileSnapshot,
-      project,
+      project: retainedProject,
       target,
       artifacts: prepared.artifacts,
       setupRecipe: preparation.setupRecipe,
@@ -511,7 +582,7 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
         }
         const requested =
           admittedIntent ??
-          (createOptions.repository || createOptions.projectRepository
+          (createOptions.repository || createOptions.projectRepository || createOptions.imageReserve
             ? await prepareIntent(profileId, createOptions)
             : undefined);
         if (requested) {
@@ -529,13 +600,17 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
             );
           }
         }
+        const existingAdmittedProject = existing.profileSnapshot.project;
+        const retainsProject =
+          existingProject !== undefined ||
+          readImageReserveProject(existingAdmittedProject) !== undefined;
         if (
           existing.profileId !== normalizedProfileId ||
           (inherited !== undefined &&
             (existing.providerId !== inherited.providerId ||
               !isDeepStrictEqual(existing.profileSnapshot, {
                 ...inherited.profileSnapshot,
-                ...(existingProject ? { project: existing.profileSnapshot.project } : {}),
+                ...(retainsProject ? { project: existingAdmittedProject } : {}),
               }))) ||
           (inherited === undefined &&
             (existing.profileSnapshot.machineClass !== machineClass ||
@@ -592,5 +667,11 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
       return resumeProvision(intent, provider, signal);
     });
   };
-  return { prepareIntent, prepareRetention, assertPreparedIntentCurrent, createWithProfile };
+  return {
+    prepareIntent,
+    prepareRetention,
+    assertPreparedIntentCurrent,
+    revalidatePreparedIntentRepository,
+    createWithProfile,
+  };
 }

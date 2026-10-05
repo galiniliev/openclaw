@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { requireGit } from "../../agents/worktrees/git.js";
 import type { WorkerProvider } from "../../plugins/types.js";
 import { createDeferredCore } from "../../shared/deferred.js";
+import { readImageReserveProject } from "./image-reserve.js";
 import { readWorkerProjectPreparation } from "./preparation-identity.js";
 import { createWorkerProviderIntent } from "./provider-intent.js";
 import { deriveEnvironmentIntent } from "./service-contract.js";
@@ -13,6 +14,37 @@ import type { WorkerEnvironmentRecord } from "./store.js";
 
 describe("prepared worker intent admission", () => {
   support.setupWorkerEnvironmentServiceSuite();
+
+  it("prepares a Factory image reserve without admitting a repository or checkout", async () => {
+    const f = await fixture();
+    vi.stubEnv("FACTORY_AUTH_MODE", "github");
+    try {
+      const intent = await f.owner.prepareIntent("development", {
+        imageReserve: true,
+        executionMode: "remote-exec",
+      });
+      expect(readImageReserveProject(intent.profileSnapshot.project)).toEqual({
+        kind: "image",
+        key: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      });
+      expect(readWorkerProjectPreparation(intent.profileSnapshot.project)?.key).toBe(
+        intent.preparationKey,
+      );
+      expect(support.testState.store.list()).toEqual([]);
+      expect(f.prepareNodeArtifacts).toHaveBeenCalledOnce();
+      await f.owner.createWithProfile(
+        "development",
+        "image-only",
+        { executionMode: "remote-exec" },
+        intent,
+      );
+      expect(support.testState.store.list()[0]?.profileSnapshot.project).toEqual(
+        intent.profileSnapshot.project,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 
   async function fixture(setup = false) {
     const projectPath = path.join(support.testState.root, "project");

@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { WORKER_LAUNCH_V2_PROTOCOL_FEATURE } from "../../../packages/gateway-protocol/src/schema/worker-admission.js";
 import { awaitGateBeforeSettlement, createDeferred } from "../../../test/helpers/promise.js";
 import { observeHostDataSql } from "../../../test/helpers/sqlite-statement-execution-counter.js";
 import {
@@ -30,6 +29,7 @@ import { prepareSessionLifecycleDrain } from "../server-methods/sessions-lifecyc
 import type { GatewayRequestContext } from "../server-methods/types.js";
 import { WorkerTunnelOwnerDisconnectedError, type WorkerTunnelHandle } from "./tunnel-contract.js";
 import { success } from "./tunnel.test-support.js";
+import { registerWorkerTurnLauncherRuntimeContractTests } from "./worker-turn-launcher-runtime-contract.suite.js";
 import {
   createWorkerTurnTunnel,
   ENVIRONMENT_ID,
@@ -1053,36 +1053,5 @@ describe("worker turn launcher local placement", () => {
     },
   );
 
-  it("rejects a reused worker bundle without the current launch contract", async () => {
-    await seedActivePlacement();
-    const oldEnvironment = attachedEnvironment();
-    oldEnvironment.bootstrapReceipt = {
-      ...oldEnvironment.bootstrapReceipt!,
-      protocolFeatures: [WORKER_LAUNCH_V2_PROTOCOL_FEATURE],
-    };
-    const environments: WorkerTurnEnvironmentService = {
-      ...unusedEnvironments(),
-      get: vi.fn(() => oldEnvironment),
-    };
-    const provider = createWorkerSessionTurnPlacementProvider({ environments, placements });
-    const runLocal = vi.fn(async () => ({ meta: { durationMs: 1 } }));
-
-    await expect(
-      provider.executeTurn(
-        {
-          sessionId: SESSION_ID,
-          sessionKey: SESSION_KEY,
-          agentId: "main",
-          runId: "run-old-worker",
-        },
-        turn("run-old-worker"),
-        runLocal,
-      ),
-    ).rejects.toThrow("reprovision the worker before launch");
-
-    expect(runLocal).not.toHaveBeenCalled();
-    expect(environments.acquireTurnCredential).not.toHaveBeenCalled();
-    expect(environments.startTunnel).not.toHaveBeenCalled();
-    expect(placements.get(SESSION_ID)).toMatchObject({ state: "active", turnClaim: null });
-  });
+  registerWorkerTurnLauncherRuntimeContractTests();
 });

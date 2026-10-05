@@ -92,6 +92,8 @@ type DeviceWorkerLaunchRequest = {
   credentialExpiresAtMs?: number;
   signal?: AbortSignal;
   onDispatchReady?: () => void;
+  onExecutionAccepted?: () => Promise<void>;
+  beforeLaunch?: () => Promise<void>;
 };
 
 type NodeWorkerLaunchAdapterOptions = {
@@ -314,6 +316,7 @@ export function createNodeWorkerLaunchAdapter(options: NodeWorkerLaunchAdapterOp
     onDispatchReady?: () => void;
     idleRetention?: true;
     prepareLaunch?: (node: NodeWorkerSupervisorNodeProof) => void;
+    beforeLaunch?: () => Promise<void>;
   }): Promise<{ receipt: NodeWorkerSupervisorReceipt | null; statusWait: boolean }> => {
     if (!params.isAuthorized()) {
       throw new NodeWorkerLaunchTransportError(
@@ -363,6 +366,13 @@ export function createNodeWorkerLaunchAdapter(options: NodeWorkerLaunchAdapterOp
       ) {
         throw createNodeRunnerInventoryIssueError(node.nodeId, NODE_RUNNER_UPDATE_REQUIRED_ISSUE);
       }
+      if (params.beforeLaunch) {
+        await params.beforeLaunch();
+      }
+      signal.throwIfAborted();
+      if (!params.isAuthorized()) {
+        throw new Error("node worker launch authority closed before dispatch");
+      }
       // A retained environment already owns its slot. The node arbitrates new physical
       // launches atomically; its advertised free-slot count cannot reject turn reuse.
       const statusWait = node.workerHost.statusWait === NODE_WORKER_STATUS_WAIT_VERSION;
@@ -392,8 +402,17 @@ export function createNodeWorkerLaunchAdapter(options: NodeWorkerLaunchAdapterOp
       const result = await raceNodeWorkerOperation(operation, signal);
       if (!result.ok) {
         const code = result.error?.code ?? "UNAVAILABLE";
-        if (code === NODE_WORKER_CAPACITY_EXHAUSTED_ERROR_CODE) {
-          throw new WorkerRunnerCapacityError();
+        if (
+          code === NODE_WORKER_CAPACITY_EXHAUSTED_ERROR_CODE &&
+          params.command === NODE_WORKER_SUPERVISOR_LAUNCH_COMMAND
+        ) {
+          const input = parseNodeWorkerLaunchInput(JSON.stringify(params.payload));
+          throw new WorkerRunnerCapacityError({
+            ...expectedIdentity(input),
+            nodeDeviceId: node.nodeId,
+            connId: node.connId,
+            pairingGeneration: node.pairingGeneration,
+          });
         }
         const detail = result.error?.message?.trim();
         throw new NodeWorkerLaunchTransportError(
@@ -506,6 +525,7 @@ export function createNodeWorkerLaunchAdapter(options: NodeWorkerLaunchAdapterOp
     };
     let mayHaveLaunched = false;
     let dispatchReady = false;
+    let executionAccepted = false;
     let pollStatus = false;
     let delayMs = pollIntervalMs;
     const markDispatchReady = () => {
@@ -561,6 +581,7 @@ export function createNodeWorkerLaunchAdapter(options: NodeWorkerLaunchAdapterOp
             ...(!pollStatus
               ? {
                   onDispatchReady: markDispatchReady,
+                  beforeLaunch: stableRequest.beforeLaunch,
                 }
               : {}),
           });
@@ -572,6 +593,12 @@ export function createNodeWorkerLaunchAdapter(options: NodeWorkerLaunchAdapterOp
             }
             const validated = validateReceipt(receipt, expected);
             mayHaveLaunched = true;
+            if (!executionAccepted) {
+              executionAccepted = true;
+              if (stableRequest.onExecutionAccepted) {
+                await stableRequest.onExecutionAccepted();
+              }
+            }
             if (isTerminalReceipt(validated)) {
               const admissionFailure =
                 validated.state === "completed"
@@ -659,7 +686,8 @@ export function createNodeWorkerLaunchAdapter(options: NodeWorkerLaunchAdapterOp
       // The node authors this result only after its durable claim stayed absent.
       // Transport dispatch is therefore not launch ambiguity and needs no cancel.
       if (error instanceof WorkerRunnerCapacityError) {
-        throw error;
+        // A later admission re-arm cannot retract an earlier accepted child.
+        throw executionAccepted ? new WorkerRunnerCapacityError() : error;
       }
       if (!mayHaveLaunched) {
         throw error;

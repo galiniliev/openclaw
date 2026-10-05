@@ -30,7 +30,10 @@ export type WorkerEnvironmentCreateRequest = {
 };
 
 export type WorkerEnvironmentServiceOptions = WorkerProviderLifecycleInputOptions &
-  Pick<PreparedPoolPresenceOptions, "resolveHumanPresenceDemand" | "presenceDemandStore"> &
+  Pick<
+    PreparedPoolPresenceOptions,
+    "resolveHumanPresenceDemand" | "resolveStandingImageDemand" | "presenceDemandStore"
+  > &
   WorkerEnvironmentSessionAttachmentOptions & {
     prepareComputer?: (
       claim: import("./placement-store.js").WorkerSessionTurnClaim,

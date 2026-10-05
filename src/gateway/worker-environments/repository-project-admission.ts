@@ -43,12 +43,19 @@ type AdmissionRequest = {
   getConfig: () => OpenClawConfig;
   assertCurrent: () => void;
   signal?: AbortSignal;
+  readNativeCredential?: (env: NodeJS.ProcessEnv) => Promise<string | undefined>;
   knownRecipe?: (
     project: RepositoryWorkerProjectSnapshot,
   ) => { project: RepositoryWorkerProjectSnapshot; setupRecipe?: string } | undefined;
 } & (
   | {
-      repository: { agentId: string; url: string; ref?: string; baseCommit?: string };
+      repository: {
+        agentId: string;
+        url: string;
+        ref?: string;
+        baseCommit?: string;
+        currentBranch?: true;
+      };
       expected?: never;
     }
   | { expected: RepositoryWorkerProjectSnapshot; repository?: never }
