@@ -162,7 +162,11 @@ export class DraftPlaceState {
   }
 
   get worktree(): boolean {
-    return (this.remotePlacement || this.repositoryState.worktree) && !this.remoteRepository;
+    return (
+      this.freshWorkspace ||
+      (this.remotePlacement && !this.remoteRepository) ||
+      this.repositoryState.worktree
+    );
   }
 
   get checkoutVisible(): boolean {
@@ -644,7 +648,7 @@ export class DraftPlaceState {
       where: resolveNewSessionWhere({ cloudProfileId: "", deviceId, autoDevice }),
       projectId: this.browser.projectId,
       folder: this.folderValue,
-      worktree: Boolean(deviceId || autoDevice) || this.worktree,
+      worktree: this.worktree,
       freshWorkspace: this.freshWorkspaceValue,
     });
     this.browser.close();
@@ -658,7 +662,7 @@ export class DraftPlaceState {
     if (
       snapshot.submitting ||
       snapshot.pendingPlacementSessionKey ||
-      !this.isAdmin() ||
+      !this.canWrite() ||
       !profile ||
       Boolean(this.modelControl.cloudRuntimeUnsupportedReason(profile))
     ) {
@@ -673,7 +677,7 @@ export class DraftPlaceState {
     this.persistPreference({
       where: { kind: "cloud", id: profileId },
       projectId: this.browser.projectId,
-      worktree: true,
+      worktree: this.worktree,
       freshWorkspace: this.freshWorkspaceValue,
     });
     this.repositoryState.synchronize();
@@ -714,7 +718,7 @@ export class DraftPlaceState {
       where: resolveNewSessionWhere(this),
       modelControl: this.modelControl,
       repositoryState: this.repositoryState,
-      isAdmin: () => this.isAdmin(),
+      canWrite: () => this.canWrite(),
       persistPreference: (patch) => this.persistPreference(patch),
       requestUpdate: this.callbacks.requestUpdate,
       setDeviceId: (value) => {

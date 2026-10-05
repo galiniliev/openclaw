@@ -197,8 +197,29 @@ export function createRepositoryGitHubPublicationCoordinator(params: {
                 },
               },
             }
-          : {}),
+          : process.env.FACTORY_AUTH_MODE === "github"
+            ? {
+                identity: createFactoryRepositoryPublicationIdentity({
+                  row,
+                  execution: claimedExecution,
+                  assertExecution,
+                  getRequester,
+                }),
+              }
+            : {}),
       });
+      if (result.status === "published" && result.headCommit) {
+        await advanceRepositoryPublishedHead(row, result.headCommit, (publishedOwner) => {
+          assertReceiptOwner(row, publishedOwner);
+          assertCustody();
+          if (row.owner_profile_id === null) {
+            getRequester().assertCurrent();
+          }
+          context.assertCurrent?.();
+          bound?.assertCurrent();
+        });
+      }
+      return result;
     };
     try {
       if (row.owner_profile_id === null) {

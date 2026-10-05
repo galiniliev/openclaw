@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { getRuntimeConfig, type OpenClawConfig } from "../../config/config.js";
+import { getRuntimeConfig } from "../../config/config.js";
 import { resolveStateDir } from "../../config/paths.js";
+import { assertGatewayLocalCheckoutAllowed } from "../../infra/gateway-local-checkout.js";
 import { startGitOperationTiming } from "../../infra/git-operation-timing.js";
 import { runGitReadOperation } from "../../infra/git-read-cache.js";
 import { runGitWorkerOperation } from "../../infra/git-worker.js";
@@ -31,11 +32,7 @@ import { ensureEmptyWorktreeSource, removeUnusedEmptyWorktreeSource } from "./em
 import { collectRetiredWorktreeArtifacts } from "./gc-artifacts.js";
 import { WorktreeGcProgress } from "./gc-progress.js";
 import { autoRemovalProtectionReason, type WorktreeCleanupDeferrals } from "./gc-protection.js";
-import {
-  createWorktreeGcRemoval,
-  removeWorktreeIfLossless,
-  type WorktreeCleanupOwnerPolicy,
-} from "./gc-removal.js";
+import { createWorktreeGcRemoval, removeWorktreeIfLossless } from "./gc-removal.js";
 import {
   createWorktreeGcPrefilter,
   lockState,
@@ -99,6 +96,13 @@ import {
   type WorktreeCreationPublication,
   type WorktreeSourceCustody,
 } from "./service-preparation.js";
+import type {
+  ServiceOptions,
+  ManagedWorktreeGcParams,
+  WorktreeMutationGuard,
+  RemoveWorktreeParams,
+  MaterializedRepositoryWorktree,
+} from "./service.types.js";
 import {
   exactStateRetirementSchema,
   type ExactStateRetirement,
@@ -122,10 +126,8 @@ import type {
   ManagedWorktreeGcResult,
   ManagedWorktreeOwnerKind,
   ManagedWorktreeRecord,
-  ManagedWorktreeRunEndCleanup,
   RemoveManagedWorktreeResult,
   RetireManagedWorktreeSnapshotParams,
-  WorktreeWorkerAuthority,
 } from "./types.js";
 
 export {
@@ -143,43 +145,6 @@ const WORKTREE_GIT_MAINTENANCE_TIMEOUT_MS = 30 * 60 * 1000;
 
 export { WorktreeRepositoryError } from "./errors.js";
 const log = createSubsystemLogger("agents/worktrees");
-
-type ServiceOptions = {
-  env?: NodeJS.ProcessEnv;
-  now?: () => number;
-  getConfig?: () => OpenClawConfig;
-};
-
-type ManagedWorktreeGcParams = WorktreeCleanupOwnerPolicy &
-  WorktreeMutationGuard & {
-    checkpoint?: (progress: ManagedWorktreeGcResult) => Promise<void>;
-  };
-
-type WorktreeMutationGuard = Pick<CreateManagedWorktreeParams, "signal" | "commitGuard"> & {
-  workerAuthority?: WorktreeWorkerAuthority;
-};
-
-type RemoveWorktreeParams = WorktreeMutationGuard & {
-  id: string;
-  reason: string;
-  allowSnapshotLoss?: boolean;
-  /** Explicit owner-fenced detached retirement; never combined with force or clean-only removal. */
-  exactState?: ExactStateRetirement;
-  requireLossless?: boolean;
-  inspectedHead?: string;
-  claimToken?: string;
-  rollbackGuard?: () => void;
-  runEndCleanup?: ManagedWorktreeRunEndCleanup;
-};
-type MaterializedRepositoryWorktree = {
-  name: string;
-  worktreePath: string;
-  branch: string;
-  recordBase: string;
-  provisionedBytes: number;
-  setupBytes: number;
-  runRepositorySetup: boolean;
-};
 
 export class ManagedWorktreeService {
   private readonly env: NodeJS.ProcessEnv;
@@ -222,6 +187,7 @@ export class ManagedWorktreeService {
     params: CreateManagedWorktreeParams,
   ): Promise<ManagedWorktreeCreationOutcome> {
     params.signal?.throwIfAborted();
+    assertGatewayLocalCheckoutAllowed(this.env);
     const repository = await resolveRepository(params.repoRoot);
     return await this.createWithAllocation(
       params,
@@ -247,6 +213,7 @@ export class ManagedWorktreeService {
   private async createEmptyWithOutcomeAccepted(
     params: CreateEmptyManagedWorktreeParams,
   ): Promise<ManagedWorktreeCreationOutcome> {
+    assertGatewayLocalCheckoutAllowed(this.env);
     let sourceRoot: string | undefined;
     try {
       return await this.createWithAllocation(params, async (guard, publication) => {

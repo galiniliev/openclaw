@@ -95,7 +95,9 @@ export function draftPlacePreferenceSelection(params: {
     remoteProject: state.preferredRemoteProjectRestore ?? browser.remoteProject,
     defaultRepositoryOptOut: state.configuredDefaultRepositoryOptOut,
     where,
-    worktree: (where.kind !== "local" || params.preferenceWorktree) && !params.remoteRepository,
+    worktree: params.remoteRepository
+      ? params.preferenceWorktree
+      : where.kind !== "local" || params.preferenceWorktree,
     freshWorkspace: params.freshWorkspace,
     baseRef: params.baseRef,
     worktreeName: params.worktreeName,
@@ -109,7 +111,7 @@ export function restoreDraftPlacePreferences(params: {
   where: NewSessionWhere;
   modelControl: NewSessionModelControl;
   repositoryState: DraftRepositoryController;
-  isAdmin: () => boolean;
+  canWrite: () => boolean;
   persistPreference: (patch: Parameters<DraftGatewayState["persistPreference"]>[2]) => void;
   requestUpdate: () => void;
   setDeviceId: (value: string) => void;
@@ -124,7 +126,7 @@ export function restoreDraftPlacePreferences(params: {
     gateway,
     modelControl,
     repositoryState,
-    isAdmin,
+    canWrite,
     persistPreference,
     requestUpdate,
     setDeviceId,
@@ -171,8 +173,16 @@ export function restoreDraftPlacePreferences(params: {
     configuredRemoteProject &&
     state.preferredRemoteProjectRestore?.cloneUrl === configuredRemoteProject.cloneUrl,
   );
+  const configuredClonePreference = Boolean(
+    !state.configuredDefaultRepositoryOptOut &&
+    configuredRemoteProject &&
+    browser.projects.find((project) => project.id === preferredProject)?.originUrl ===
+      configuredRemoteProject.cloneUrl,
+  );
   const configuredDefaultRequested =
-    state.configuredDefaultRepositoryPending || restoringConfiguredRemoteProject;
+    state.configuredDefaultRepositoryPending ||
+    restoringConfiguredRemoteProject ||
+    configuredClonePreference;
   const configuredDefaultReady =
     configuredDefaultRequested &&
     browser.projectsReady &&
@@ -180,7 +190,7 @@ export function restoreDraftPlacePreferences(params: {
   const configuredDefaultAllowed = Boolean(
     configuredDefaultReady &&
     (!configuredProfileId ||
-      (isAdmin() &&
+      (canWrite() &&
         configuredProfile &&
         !modelControl.cloudRuntimeUnsupportedReason(configuredProfile))),
   );
@@ -207,14 +217,15 @@ export function restoreDraftPlacePreferences(params: {
     const selectingConfiguredRemoteProject =
       configuredDefaultRequested &&
       preferredRemoteProject.cloneUrl === configuredRemoteProject?.cloneUrl;
-    if (
+    const adoptConfiguredPlacement = Boolean(
       configuredProfileId &&
       selectingConfiguredRemoteProject &&
       configuredDefaultAllowed &&
       !state.whereSelectedByUser &&
       !preferredWhere &&
-      params.where.kind === "local"
-    ) {
+      params.where.kind === "local",
+    );
+    if (adoptConfiguredPlacement) {
       setDeviceId("");
       setAutoDevice(false);
       setCloudProfileId(configuredProfileId);
@@ -229,10 +240,22 @@ export function restoreDraftPlacePreferences(params: {
       repositoryState.setBaseRef(preferredRemoteProject.defaultBranch ?? "", false);
     }
     state.preferredRemoteProjectRestore = null;
+    if (configuredClonePreference && selectingConfiguredRemoteProject) {
+      state.preferredProjectRestore = "";
+      persistPreference({
+        projectId: "",
+        remoteProject: preferredRemoteProject,
+        ...(adoptConfiguredPlacement ? { where: { kind: "cloud", id: configuredProfileId } } : {}),
+      });
+    }
     changed = true;
   }
 
-  if (preferredProject && !preferredRemoteProject) {
+  if (
+    preferredProject &&
+    !preferredRemoteProject &&
+    (!configuredClonePreference || configuredDefaultReady)
+  ) {
     const project = browser.projects.find((candidate) => candidate.id === preferredProject);
     if (project) {
       browser.selectProject({ kind: "local", id: project.id });
@@ -259,7 +282,7 @@ export function restoreDraftPlacePreferences(params: {
       (profile) => profile.id === preferredWhere.id,
     );
     if (
-      isAdmin() &&
+      canWrite() &&
       preferredProfile &&
       !modelControl.cloudRuntimeUnsupportedReason(preferredProfile)
     ) {
