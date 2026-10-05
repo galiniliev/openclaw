@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { consumeResponseBytes } from "@openclaw/normalization-core";
 import { GATEWAY_OWNER_PROFILE_ID } from "../../packages/gateway-protocol/src/schema/users.js";
+import { resolveVerifiedSystemNativeGitHubAccount } from "../agents/github-tool-identity.js";
 import { resolveControlUiAllowedOrigins } from "../config/gateway-control-ui-origins.js";
 import { getRuntimeConfig } from "../config/io.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -156,12 +157,14 @@ async function cancelGravatarBody(body: ReadableStream<Uint8Array> | null): Prom
   }
 }
 
-async function fetchGravatar(
-  hash: string,
+async function fetchAvatarImage(
+  url: string,
   fetchImpl: typeof globalThis.fetch,
+  source: "gravatar" | "factory-github",
 ): Promise<GravatarResult> {
   try {
-    const response = await fetchImpl(`${GRAVATAR_BASE_URL}/${hash}?s=256&d=404`, {
+    const response = await fetchImpl(url, {
+      ...(source === "factory-github" ? { redirect: "error" as const } : {}),
       headers: { Accept: "image/webp,image/png,image/jpeg,image/gif" },
       signal: AbortSignal.timeout(GRAVATAR_FETCH_TIMEOUT_MS),
     });
@@ -186,11 +189,41 @@ async function fetchGravatar(
     if (!bytes) {
       return { kind: "error" };
     }
-    const etag = `"gravatar-${createHash("sha256").update(bytes).digest("hex")}"`;
+    const etag = `"${source}-${createHash("sha256").update(bytes).digest("hex")}"`;
     return { kind: "hit", bytes, mime, etag };
   } catch {
     return { kind: "error" };
   }
+}
+
+async function fetchGravatar(
+  hash: string,
+  fetchImpl: typeof globalThis.fetch,
+): Promise<GravatarResult> {
+  return fetchAvatarImage(`${GRAVATAR_BASE_URL}/${hash}?s=256&d=404`, fetchImpl, "gravatar");
+}
+
+async function fetchFactoryGitHubAvatar(
+  value: string,
+  accountId: number,
+  fetchImpl: typeof globalThis.fetch,
+): Promise<GravatarResult> {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return { kind: "error" };
+  }
+  if (
+    url.origin !== "https://microsoft.ghe.com" ||
+    url.pathname !== `/avatars/u/${accountId}` ||
+    url.username ||
+    url.password ||
+    url.hash
+  ) {
+    return { kind: "error" };
+  }
+  return fetchAvatarImage(url.href, fetchImpl, "factory-github");
 }
 
 async function resolveGravatar(
@@ -335,6 +368,56 @@ export async function handleUserProfileAvatarHttpRequest(
         });
         return true;
       }
+      if (
+        factoryAccountId &&
+        profile.id === authResult.authenticatedUserProfile?.profileId &&
+        prepared.emails.includes(`github:microsoft.ghe.com:${factoryAccountId}`)
+      ) {
+        const trusted = resolveTrustedFactoryGitHubMetadata({
+          authResult: {
+            ok: true,
+            method: authResult.authMethod,
+            user: authResult.authenticatedUserId,
+          },
+          authConfig: cfg.gateway?.auth,
+          requestHeaders: req.headers,
+        });
+        const verified =
+          trusted?.accountId === factoryAccountId && trusted.avatarUrl
+            ? trusted
+            : await resolveVerifiedSystemNativeGitHubAccount({
+                config: cfg,
+                sourceConfig: getActiveSecretsRuntimeConfigSnapshot()?.sourceConfig ?? cfg,
+                accountId: factoryAccountId,
+                host: "microsoft.ghe.com",
+              }).catch(() => null);
+        authResult.assertCurrent();
+        if (isGatewayReadonlyWork()) {
+          return await serveStoredAvatar();
+        }
+        if (!prepared.isCurrent()) {
+          continue;
+        }
+        if (verified?.avatarUrl) {
+          const result = await fetchFactoryGitHubAvatar(
+            verified.avatarUrl,
+            factoryAccountId,
+            opts.fetchImpl ?? globalThis.fetch,
+          );
+          authResult.assertCurrent();
+          if (isGatewayReadonlyWork()) {
+            return await serveStoredAvatar();
+          }
+          if (!prepared.isCurrent()) {
+            continue;
+          }
+          if (result.kind === "hit") {
+            sendAvatar(req, res, { ...result, byteLength: result.bytes.byteLength });
+            return true;
+          }
+          transientFailure = result.kind === "error";
+        }
+      }
       emails = prepared.emails;
       break;
     }
@@ -360,17 +443,22 @@ export async function handleUserProfileAvatarHttpRequest(
   // email keeps precedence, and a secondary email's hash is disclosed to
   // Gravatar only once the earlier one is a definite miss. Shared fetches own
   // their upstream timeout; each HTTP waiter owns its deadline and disconnect.
-  const hashes = emails.slice(0, MAX_GRAVATAR_EMAIL_LOOKUPS).map(hashEmail);
+  const hashes = emails
+    .filter((email) => !email.startsWith("github:microsoft.ghe.com:"))
+    .slice(0, MAX_GRAVATAR_EMAIL_LOOKUPS)
+    .map(hashEmail);
   const clientAbort = new AbortController();
   const stopWatchingDisconnect = watchClientDisconnect(req, res, clientAbort);
   const waiterSignal = AbortSignal.any([
     clientAbort.signal,
     AbortSignal.timeout(GRAVATAR_TOTAL_TIMEOUT_MS),
   ]);
-  let transientFailure = false;
   try {
     for (const hash of hashes) {
       waiterSignal.throwIfAborted();
+      if (isGatewayReadonlyWork()) {
+        return await serveStoredAvatar();
+      }
       const result = await racePromiseWithAbortSignal(
         resolveGravatar(hash, {
           fetchImpl: opts.fetchImpl ?? globalThis.fetch,

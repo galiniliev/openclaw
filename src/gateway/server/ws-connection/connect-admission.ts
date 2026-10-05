@@ -32,7 +32,7 @@ import {
 import { isGatewayAuthPolicyCurrent } from "../../auth-policy.js";
 import { gitHubPublicApi } from "../../github-public-api.js";
 import { resolveIdentityOperatorScopes } from "../../operator-identity-scopes.js";
-import type { OperatorScope } from "../../operator-scopes.js";
+import { WRITE_SCOPE, type OperatorScope } from "../../operator-scopes.js";
 import { checkGatewayWsBrowserOrigin, normalizeChromeExtensionOrigin } from "../../origin-check.js";
 import { parseGatewayRole } from "../../role-policy.js";
 import { authenticatedProfileUnavailableError } from "../../server-methods/gateway-client-identity.js";
@@ -104,6 +104,7 @@ export async function rejectUnavailableProfileConnect(
       ? "GitHub is rate limiting profile verification. Retry shortly; if this continues, ask a gateway administrator to check the GitHub API credential."
       : undefined,
     error instanceof gitHubPublicApi.ControlUiGitHubError ? error.retryAfterMs : undefined,
+    "connect",
   );
   context.markHandshakeFailure("authenticated-profile-unavailable");
   context.sendHandshakeErrorResponse(ErrorCodes.UNAVAILABLE, failure.message, failure);
@@ -136,12 +137,16 @@ export function resolveEffectiveConnectionScopes(params: {
   deviceScopes: string[];
   verifiedIdentity?: string;
   identityScopes?: Record<string, OperatorScope[]>;
+  verifiedIdentityWrite?: boolean;
   upgradeReq: IncomingMessage;
 }): { scopes: string[]; addedIdentityScopes: OperatorScope[] } {
   const verifiedIdentity = params.verifiedIdentity;
   let identityScopes: OperatorScope[] = [];
   if (params.role === "operator" && verifiedIdentity) {
-    identityScopes = resolveIdentityOperatorScopes(verifiedIdentity, params.identityScopes);
+    identityScopes = [...resolveIdentityOperatorScopes(verifiedIdentity, params.identityScopes)];
+    if (params.verifiedIdentityWrite && !identityScopes.includes(WRITE_SCOPE)) {
+      identityScopes.push(WRITE_SCOPE);
+    }
   }
   const scopes = applyConnectionScopeCap({
     scopes: [...new Set([...params.deviceScopes, ...identityScopes])],

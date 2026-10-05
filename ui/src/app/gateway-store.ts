@@ -502,7 +502,7 @@ export function createApplicationGateway(
             nextClient.instanceId,
           ),
         });
-        if (isCurrentClient(nextClient) && !snapshot.selfUser) {
+        if (isCurrentClient(nextClient) && selfProfile.needsRefresh()) {
           refreshSelfProfile();
         }
         canvasSurface.start(nextClient, canvasLeaseGeneration, canvasPluginSurfaceUrl ?? undefined);
@@ -709,7 +709,11 @@ export function createApplicationGateway(
         return;
       }
       selfProfile.invalidate();
-      setSnapshot({ selfUser: { ...snapshot.selfUser, ...patch } });
+      const updated = { ...snapshot.selfUser, ...patch };
+      if (snapshot.selfUser.authenticatedGitHubIdentity && "name" in patch) {
+        updated.name = patch.name?.trim() || snapshot.selfUser.authenticatedGitHubIdentity.login;
+      }
+      setSnapshot({ selfUser: updated });
     },
     ...createDeviceCredentialMethods({
       gatewayUrl: () => connection.gatewayUrl,
