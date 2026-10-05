@@ -13,6 +13,7 @@ import {
   retainCodexAppServerLiveThread,
 } from "./client-runtime.js";
 import { CodexAppServerRpcError } from "./client.js";
+import { registerCompactionStartupAuthorityTests } from "./compact.startup-authority.test-support.js";
 import {
   beginCompactionTestCleanup,
   compactStartRequestOptions,
@@ -33,6 +34,11 @@ import {
   writeCompactionTestBinding,
   writeSupervisedTestBinding,
 } from "./compact.test-support.js";
+import {
+  ownCodexInferenceClient,
+  prepareCodexInferenceRoute,
+  bindCodexInferenceThread,
+} from "./inference-routing.js";
 import { CODEX_RESPONSES_OAUTH_PROVIDER } from "./responses-oauth.js";
 import { resolveCodexSessionBinding } from "./session-binding.js";
 import {
@@ -135,124 +141,7 @@ describe("maybeCompactCodexAppServerSession", () => {
     }
   });
 
-  it("rejects a host-only rotation after recovering the predecessor during compaction startup", async () => {
-    const current = {
-      kind: "session" as const,
-      agentId: "main",
-      sessionKey: "agent:main:recovered-compaction",
-      sessionId: "after-compaction",
-    };
-    const previous = { ...current, sessionId: "before-compaction" };
-    const scope = {
-      agentId: current.agentId,
-      sessionKey: current.sessionKey,
-      storePath: path.join(tempDir, "admitted", "sessions.json"),
-    };
-    await upsertSessionEntry({ ...scope, entry: { sessionId: previous.sessionId, updatedAt: 1 } });
-    await patchSessionEntry({ ...scope, update: () => ({ sessionId: current.sessionId }) });
-    const bindingStore = createCodexTestBindingStore();
-    const binding = { threadId: "thread-1", cwd: tempDir };
-    await bindingStore.mutate(previous, { kind: "set", binding });
-    const fake = createFakeCodexClient({ retainedThreadId: null });
-
-    const result = await maybeCompactCodexAppServerSessionImpl(
-      {
-        sessionId: current.sessionId,
-        sessionKey: current.sessionKey,
-        agentId: current.agentId,
-        sessionTarget: { ...scope, sessionId: current.sessionId },
-        sessionFile: path.join(tempDir, "recovered.jsonl"),
-        workspaceDir: tempDir,
-        trigger: "manual",
-      },
-      {
-        bindingStore,
-        clientFactory: async () => {
-          expect(bindingStore.read(current)).toEqual(binding);
-          await patchSessionEntry({ ...scope, update: () => ({ sessionId: "next-compaction" }) });
-          return fake.client;
-        },
-      },
-    );
-
-    expect(
-      fake.request.mock.calls.some(([method]) =>
-        ["thread/resume", "thread/compact/start"].includes(method),
-      ),
-    ).toBe(false);
-    expect(result).toMatchObject({
-      ok: false,
-      compacted: false,
-      reason: expect.stringContaining("Codex session generation is no longer current"),
-    });
-    expect(bindingStore.read(current)).toEqual(binding);
-  });
-
-  it("rejects a queued compaction after admitted authority rotates before client acquisition", async () => {
-    const current = {
-      kind: "session" as const,
-      agentId: "main",
-      sessionKey: "agent:main:queued-authority",
-      sessionId: "session-current",
-    };
-    const successor = { ...current, sessionId: "session-successor" };
-    const scope = {
-      agentId: current.agentId,
-      sessionKey: current.sessionKey,
-      storePath: path.join(tempDir, "admitted", "sessions.json"),
-    };
-    await upsertSessionEntry({
-      ...scope,
-      entry: { sessionId: current.sessionId, updatedAt: 1 },
-    });
-    const bindingStore = createCodexTestBindingStore();
-    const binding = { threadId: "thread-queued", cwd: tempDir };
-    await bindingStore.mutate(current, { kind: "set", binding });
-    const fake = createFakeCodexClient();
-    const clientFactory = vi.fn(async () => fake.client);
-    const queueEntered = createDeferred<void>();
-    const releaseQueue = createDeferred<void>();
-    const held = withCodexAppServerThreadMutation(binding.threadId, async () => {
-      queueEntered.resolve();
-      await releaseQueue.promise;
-    });
-    await queueEntered.promise;
-
-    const pending = maybeCompactCodexAppServerSessionImpl(
-      {
-        sessionId: current.sessionId,
-        sessionKey: current.sessionKey,
-        agentId: current.agentId,
-        sessionTarget: { ...scope, sessionId: current.sessionId },
-        sessionFile: path.join(tempDir, "queued-authority.jsonl"),
-        workspaceDir: tempDir,
-        trigger: "manual",
-      },
-      { bindingStore, clientFactory },
-    );
-    try {
-      await flushAsyncTasks();
-      expect(clientFactory).not.toHaveBeenCalled();
-
-      await patchSessionEntry({ ...scope, update: () => ({ sessionId: successor.sessionId }) });
-    } finally {
-      releaseQueue.resolve();
-      await held;
-    }
-
-    await expect(pending).rejects.toThrow("Codex session generation is no longer current");
-    expect(clientFactory).not.toHaveBeenCalled();
-    expect(fake.request).not.toHaveBeenCalled();
-    expect(bindingStore.read(current)).toEqual(binding);
-
-    const adopted = await resolveCodexSessionBinding({
-      bindingStore,
-      identity: successor,
-      storePath: scope.storePath,
-    });
-    expect(adopted.binding).toEqual(binding);
-    expect(bindingStore.read(successor)).toEqual(binding);
-  });
+  registerCompactionStartupAuthorityTests({ getTempDir: () => tempDir, createFakeCodexClient });
 
   it("explains manual subscription-sharing compaction without starting native inference", async () => {
     const fake = createFakeCodexClient();
@@ -421,45 +310,88 @@ describe("maybeCompactCodexAppServerSession", () => {
     },
   );
 
-  it("uses the exact prepared Platform key for native compaction", async () => {
-    const fake = createFakeCodexClient();
-    const factory = vi.fn<CodexAppServerClientFactory>(async () => fake.client);
-    const sessionFile = await writeCompactionTestBinding(tempDir);
+  it.each(["official", "hosted", "mismatched"] as const)(
+    "uses the exact prepared Platform key for native compaction: %s",
+    async (routeKind) => {
+      const fake = createFakeCodexClient();
+      const factory = vi.fn<CodexAppServerClientFactory>(async () => fake.client);
+      const sessionFile = await writeCompactionTestBinding(tempDir);
+      const baseUrl =
+        routeKind === "official" ? "https://api.openai.com/v1" : "https://hosted.example.com/v1";
+      if (routeKind !== "official") {
+        ownCodexInferenceClient(fake.client);
+        const request = fake.request.getMockImplementation()!;
+        fake.request.mockImplementation(async (method, params, options) => {
+          if (method === "config/read") {
+            return { config: { openai_base_url: baseUrl }, origins: {}, layers: [] };
+          }
+          if (method === "account/read") {
+            return { account: { type: "apiKey" } };
+          }
+          return request(method, params, options);
+        });
+        const route = await prepareCodexInferenceRoute({
+          client: fake.client,
+          cwd: tempDir,
+          assertCurrent: () => {},
+        });
+        bindCodexInferenceThread(fake.client, "thread-1", route);
+      }
 
-    const result = requireCompactResult(
-      await maybeCompactCodexAppServerSession(
-        compactionParams(sessionFile, {
-          provider: "openai",
-          model: "gpt-5.5",
-          resolvedApiKey: "prepared-platform-key",
-          runtimeAuthPlan: {
-            providerForAuth: "openai",
-            authProfileProviderForAuth: "openai",
-            harnessAuthProvider: "openai",
-            selectedAuthMode: "api-key",
-            modelRoute: {
-              provider: "openai",
-              modelId: "gpt-5.5",
-              api: "openai-responses",
-              baseUrl: "https://api.openai.com/v1",
-              authRequirement: "api-key",
-              requestTransportOverrides: "none",
+      const result = requireCompactResult(
+        await maybeCompactCodexAppServerSession(
+          compactionParams(sessionFile, {
+            provider: "openai",
+            model: "gpt-5.5",
+            resolvedApiKey: "prepared-platform-key",
+            runtimeAuthPlan: {
+              providerForAuth: "openai",
+              authProfileProviderForAuth: "openai",
+              harnessAuthProvider: "openai",
+              selectedAuthMode: "api-key",
+              modelRoute: {
+                provider: "openai",
+                modelId: "gpt-5.5",
+                api: "openai-responses",
+                baseUrl: routeKind === "mismatched" ? "https://different.example.com/v1" : baseUrl,
+                ...(routeKind === "official"
+                  ? {}
+                  : {
+                      runtimePolicy: {
+                        compatibleIds: ["openclaw", "codex"],
+                        requiresEndpointBinding: true as const,
+                      },
+                    }),
+                authRequirement: "api-key",
+                requestTransportOverrides: "none",
+              },
             },
-          },
-        }),
-        { clientFactory: factory },
-      ),
-    );
+          }),
+          { clientFactory: factory },
+        ),
+      );
 
-    expect(result.ok).toBe(true);
-    expect(factory).toHaveBeenCalledWith(
-      expect.objectContaining({
-        preparedAuth: { kind: "api-key", apiKey: "prepared-platform-key" },
-        authRequirement: "api-key",
-      }),
-    );
-    expect(factory.mock.calls[0]?.[0]).not.toHaveProperty("authProfileId");
-  });
+      if (routeKind === "mismatched") {
+        expect(result).toMatchObject({
+          ok: false,
+          compacted: false,
+          reason: expect.stringContaining("Codex cannot bind the exact prepared provider endpoint"),
+        });
+        expect(fake.request.mock.calls.some(([method]) => method === "thread/compact/start")).toBe(
+          false,
+        );
+      } else {
+        expect(result).toMatchObject({ ok: true, compacted: true });
+      }
+      expect(factory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          preparedAuth: { kind: "api-key", apiKey: "prepared-platform-key" },
+          authRequirement: "api-key",
+        }),
+      );
+      expect(factory.mock.calls[0]?.[0]).not.toHaveProperty("authProfileId");
+    },
+  );
 
   it("fails closed when prepared Platform compaction has no key", async () => {
     const fake = createFakeCodexClient();

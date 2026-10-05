@@ -23,7 +23,11 @@ import type { AuthProfileStore } from "./auth-profiles/types.js";
 import { listCliRuntimeModelBackendBindings } from "./cli-backends.js";
 import { resolveAgentHarnessAvailabilityDecision } from "./harness/availability.js";
 import { resolveAgentHarnessPolicy } from "./harness/policy.js";
-import { buildAgentHarnessSupportContext, resolveAutoAgentHarnessId } from "./harness/support.js";
+import {
+  buildAgentHarnessSupportContext,
+  probeAgentHarnessSupport,
+  resolveAutoAgentHarnessId,
+} from "./harness/support.js";
 import { resolveLegacyInheritedAuthDir } from "./legacy-inherited-auth-dir.js";
 import {
   createModelAuthAvailabilityResolver,
@@ -494,7 +498,8 @@ export function createModelCatalogDecisions(params: ModelCatalogDecisionParams) 
             unknown ||= params.pluginRegistry === undefined;
             continue;
           }
-          const supported = harness.supports(
+          const supported = probeAgentHarnessSupport(
+            harness,
             buildAgentHarnessSupportContext({
               config: params.cfg,
               agentId: params.agentId,

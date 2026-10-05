@@ -229,6 +229,15 @@ function withRuntimePolicy(
   candidate: ProviderModelRouteCandidate,
   sourceBaseUrl: unknown = candidate.baseUrl,
 ): ProviderModelRouteCandidate {
+  const endpoint = new URL(candidate.baseUrl);
+  const requiresEndpointBinding =
+    candidate.api === OPENAI_RESPONSES_API &&
+    candidate.authRequirement === "api-key" &&
+    candidate.requestTransportOverrides === "none" &&
+    classifyOpenAIBaseUrl(candidate.baseUrl) === "custom" &&
+    endpoint.protocol === "https:" &&
+    !endpoint.search &&
+    !endpoint.hash;
   return {
     ...candidate,
     runtimePolicy: {
@@ -236,7 +245,10 @@ function withRuntimePolicy(
         ? candidate.authRequirement === "api-key"
           ? [...CODEX_RUNTIME_COMPATIBLE_IDS, "agentsapi"]
           : CODEX_RUNTIME_COMPATIBLE_IDS
-        : OPENCLAW_RUNTIME_COMPATIBLE_IDS,
+        : requiresEndpointBinding
+          ? CODEX_RUNTIME_COMPATIBLE_IDS
+          : OPENCLAW_RUNTIME_COMPATIBLE_IDS,
+      ...(requiresEndpointBinding ? { requiresEndpointBinding: true as const } : {}),
     },
   };
 }
@@ -539,6 +551,7 @@ function routeCandidateKey(candidate: ProviderModelRouteCandidate): string {
     candidate.authRequirement,
     candidate.requestTransportOverrides,
     ...(candidate.runtimePolicy?.compatibleIds ?? []),
+    candidate.runtimePolicy?.requiresEndpointBinding === true ? "endpoint-binding" : "",
   ].join("\u0000");
 }
 

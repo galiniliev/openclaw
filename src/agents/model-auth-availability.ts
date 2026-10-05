@@ -1,23 +1,17 @@
 /** Read-only provider/model auth availability with provider-route selection. */
 import {
   findNormalizedProviderValue,
-  normalizeProviderId,
   normalizeProviderIdForAuth,
 } from "@openclaw/model-catalog-core/provider-id";
 import { hasNonEmptyString as hasSecret } from "@openclaw/normalization-core/string-coerce";
 import { resolveAgentModelPrimaryValue } from "../config/model-input.js";
 import { resolveMergedModelProviderConfig } from "../config/model-provider-config.js";
-import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { parseSecretRef } from "../config/types.secrets.js";
 import type {
   ProviderModelRouteAuthRequirement,
   ProviderModelRouteCandidate,
 } from "../plugin-sdk/provider-model-types.js";
-import { normalizePluginsConfig } from "../plugins/config-state.js";
-import { passesManifestOwnerBasePolicy } from "../plugins/manifest-owner-policy.js";
-import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.types.js";
 import { isValidSecretRef } from "../secrets/ref-contract.js";
-import type { PreparedAgentCredentialModes } from "./agent-auth-credential-modes.js";
 import { hasUsableOAuthCredential } from "./auth-profiles/credential-state.js";
 import {
   listExternalCliSyncProviderIds,
@@ -80,10 +74,6 @@ import { resolveManagedSecretRefRuntimeProviderAuth } from "./model-auth-runtime
 import { resolveSelectedModelCredential } from "./model-auth-selected-credential.js";
 import { hasAuthoredProviderRequestParams } from "./model-extra-params.js";
 import { splitTrailingAuthProfile } from "./model-ref-profile.js";
-import {
-  resolveCliRuntimeExecutionProvider,
-  type CliRuntimeAuthDirectories,
-} from "./model-runtime-aliases.js";
 import { resolveDefaultModelForAgent } from "./model-selection-config.js";
 import {
   createOpenAIModelRoutesResolver,
@@ -117,121 +107,6 @@ const EXTERNAL_CLI_REFRESH_PROVIDER_IDS = new Set(
   listExternalCliSyncProviderIds().map(normalizeProviderIdForAuth),
 );
 
-function evaluateCliRuntimeModelAuthAvailability(
-  params: CreateModelAuthAvailabilityResolverParams,
-  provider: string,
-  ref: ModelAuthAvailabilityRef,
-  evaluation: ModelAuthAvailabilityEvaluation,
-  evaluateProviderAuth: ModelAuthAvailabilityResolver["evaluateModelAuth"],
-): ModelAuthAvailabilityEvaluation | undefined {
-  if (ref.runtimeId === "openclaw") {
-    return undefined;
-  }
-  if (evaluation.routeResolution !== null || normalizeProviderId(provider) === "openai") {
-    return undefined;
-  }
-  const selectedProfileId = ref.pinnedProfileId?.trim() || ref.preferredProfileId?.trim();
-  // Direct CLI refs have no alias, but still own plugin and selected-account checks.
-  const runtimeProvider =
-    ref.runtimeId && ref.runtimeId !== "auto"
-      ? ref.runtimeId
-      : (resolveCliRuntimeExecutionProvider({
-          provider,
-          cfg: params.cfg,
-          agentId: params.agentId,
-          modelId: ref.modelId,
-          authProfileId: selectedProfileId,
-          metadataSnapshot: params.metadataSnapshot,
-          preparedAuthDirectories: params.preparedCliRuntimeAuthDirectories,
-        }) ?? normalizeProviderId(provider));
-  const binding = resolveCliRuntimeModelBackendBinding({ provider, runtime: runtimeProvider });
-  const runtimeOwners = params.metadataSnapshot?.owners?.cliBackends.get(
-    normalizeProviderId(runtimeProvider),
-  );
-  // Agent harnesses can use provider auth without registering a CLI backend.
-  if (
-    !binding &&
-    !runtimeOwners?.length &&
-    !resolveCliRuntimeCanonicalProvider({ runtime: runtimeProvider })
-  ) {
-    return undefined;
-  }
-  if (ref.runtimeId && runtimeProvider !== normalizeProviderId(provider) && !binding) {
-    return { availability: false, routeResolution: null, unavailableReason: "missing-auth" };
-  }
-  if (runtimeOwners?.length) {
-    const normalizedPluginConfig = normalizePluginsConfig(params.cfg.plugins);
-    if (
-      !runtimeOwners.some((pluginId) =>
-        passesManifestOwnerBasePolicy({
-          plugin: { id: pluginId },
-          normalizedConfig: normalizedPluginConfig,
-        }),
-      )
-    ) {
-      return {
-        ...evaluation,
-        availability: false,
-        unavailableReason: "missing-auth",
-        unavailableUntil: undefined,
-      };
-    }
-  }
-  const authPolicy = resolveBundledCliBackendAuthPolicy(runtimeProvider);
-  if (
-    selectedProfileId &&
-    authPolicy?.strictSelectedProfile &&
-    !authPolicy.nativeAuthProfileIds?.includes(selectedProfileId)
-  ) {
-    // This CLI forbids account substitution while materializing selected auth.
-    // Neither shared profiles nor its native login can rescue that selection.
-    return ref.pinnedProfileId
-      ? evaluateProviderAuth(provider, {
-          modelId: ref.modelId,
-          requiredProfileId: selectedProfileId,
-        })
-      : evaluation;
-  }
-  if (normalizeProviderId(runtimeProvider) === normalizeProviderId(provider)) {
-    return runtimeOwners?.length ? evaluation : undefined;
-  }
-  const runtimeAuthMode =
-    params.preparedRuntimeAuthModes?.[normalizeProviderIdForAuth(runtimeProvider)];
-  // The prepared native-runtime result is authoritative for this route. Provider
-  // credentials cannot prove that the separately authenticated CLI is usable.
-  return typeof runtimeAuthMode === "string"
-    ? {
-        availability: true,
-        routeResolution: null,
-        selectedAuthMode: runtimeAuthMode,
-        evidence: "runtime",
-      }
-    : params.preparedSyntheticAuthComplete
-      ? { availability: false, routeResolution: null, unavailableReason: "missing-auth" }
-      : { availability: undefined, routeResolution: null };
-}
-type CreateModelAuthAvailabilityResolverParams = {
-  cfg: OpenClawConfig;
-  preparedCliRuntimeAuthDirectories?: CliRuntimeAuthDirectories;
-  agentId?: string;
-  authStore: AuthProfileStore;
-  agentDir?: string;
-  workspaceDir?: string;
-  env?: NodeJS.ProcessEnv;
-  syntheticAuthProviderRefs?: readonly string[];
-  metadataSnapshot?: PluginMetadataSnapshot;
-  externalCliProviderIds?: readonly string[];
-  routeResolverFactory?: typeof createOpenAIModelRoutesResolver;
-  allowPreparedRuntimeAuth?: boolean;
-  preparedRuntimeAuthStore?: AuthProfileStore;
-  preparedRuntimeAuthModes?: PreparedAgentCredentialModes;
-  preparedRuntimeAuthMaterializations?: readonly RuntimeAuthMaterialization[];
-  preparedSyntheticAuthComplete?: boolean;
-};
-
-type AuthTarget = ModelAuthAvailabilityRef & {
-  authRequirement?: ProviderModelRouteAuthRequirement;
-};
 type AuthSourceEvaluation = Pick<
   ModelAuthAvailabilityEvaluation,
   | "availability"
@@ -241,39 +116,6 @@ type AuthSourceEvaluation = Pick<
   | "unavailableReason"
   | "unavailableUntil"
 >;
-
-function modeAllowed(
-  provider: string,
-  target: AuthTarget,
-  mode: string | undefined,
-  authFlow?: string,
-): boolean {
-  const policy = resolveProviderModelAuthPolicy({
-    provider,
-    mode,
-    authFlow,
-    api: target.api ?? undefined,
-    baseUrl: typeof target.baseUrl === "string" ? target.baseUrl : undefined,
-  });
-  return (
-    policy.compatible &&
-    (!target.authRequirement || policy.authRequirement === target.authRequirement)
-  );
-}
-
-function normalizeModelIdForProvider(provider: string, modelId: string): string | undefined {
-  const trimmed = splitTrailingAuthProfile(modelId).model.trim();
-  if (!trimmed) {
-    return undefined;
-  }
-  const slash = trimmed.indexOf("/");
-  if (slash <= 0) {
-    return trimmed;
-  }
-  return normalizeProviderIdForAuth(trimmed.slice(0, slash)) === provider
-    ? trimmed.slice(slash + 1).trim() || undefined
-    : undefined;
-}
 
 /** Builds one snapshot-scoped read-only auth evaluator. */
 export function createModelAuthAvailabilityResolver(
@@ -1069,6 +911,44 @@ export function createModelAuthAvailabilityResolver(
   ): ModelAuthAvailabilityEvaluation => {
     const provider = normalizeProviderIdForAuth(rawProvider);
     if (provider !== OPENAI_PROVIDER_ID) {
+      const configured = resolveMergedModelProviderConfig(params.cfg, provider);
+      const modelId = ref.modelId && normalizeModelIdForProvider(provider, ref.modelId);
+      const model = configured?.models.find((entry) => entry.id === modelId);
+      const api = model?.api ?? configured?.api;
+      const baseUrl = model?.baseUrl ?? configured?.baseUrl;
+      if (
+        configured?.auth === "native-command" &&
+        ref.runtimeId === "codex" &&
+        synthetic.has("codex") &&
+        !ref.requiredProfileId &&
+        !ref.preferredProfileId &&
+        !ref.pinnedProfileId &&
+        model?.agentRuntime?.id === "codex" &&
+        api === "openai-responses" &&
+        typeof baseUrl === "string" &&
+        baseUrl.startsWith("https://") &&
+        (ref.api == null || ref.api === api) &&
+        (ref.baseUrl == null || ref.baseUrl === baseUrl) &&
+        configured.apiKey === undefined &&
+        configured.headers === undefined &&
+        configured.request === undefined &&
+        model.headers === undefined &&
+        !hasAuthoredProviderRequestParams({
+          config: params.cfg,
+          provider,
+          modelId,
+          agentId: params.agentId,
+        })
+      ) {
+        return {
+          availability: true,
+          availabilityAuthoritative: true,
+          routeResolution: null,
+          selectedAuthMode: "native-command",
+          evidence: "runtime",
+          runtimeAuth: { id: "codex", source: "native" },
+        };
+      }
       return {
         ...resolveProviderEvaluation(provider, ref),
         routeResolution: null,
