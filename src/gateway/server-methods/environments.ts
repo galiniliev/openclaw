@@ -34,6 +34,7 @@ import {
 } from "../node-command-policy.js";
 import { collectNodeCatalogRuntimeState } from "../node-registry-private.js";
 import { readNodeSessionWithheldCommands, type NodeSession } from "../node-registry.js";
+import { resolveOperatorRolePolicy } from "../operator-role-policy.js";
 import { summarizeWorkerEnvironment } from "../worker-environments/environment-summary.js";
 import { resolveWorkerPlacementCapabilities } from "../worker-environments/placement-capabilities.js";
 import type { WorkerEnvironmentServiceRecord } from "../worker-environments/service-contract.js";
@@ -247,6 +248,7 @@ async function respondWorkerMutation(
   run: () => Promise<WorkerEnvironmentServiceRecord>,
   invalidCodes: readonly string[],
   unavailableMessage: string,
+  diagnostic?: Pick<GatewayRequestContext, "logGateway"> & { environmentId: string },
 ) {
   try {
     respond(true, summarizeWorkerEnvironment(await run()), undefined);
@@ -254,6 +256,20 @@ async function respondWorkerMutation(
     const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
     const invalid = typeof code === "string" && invalidCodes.includes(code);
     const message = invalid && error instanceof Error ? error.message : unavailableMessage;
+    if (diagnostic) {
+      const errorCode = typeof code === "string" || typeof code === "number" ? code : "unknown";
+      // Project only the diagnostic fields; causes and provider payloads may contain private data.
+      const detail =
+        error instanceof Error
+          ? { name: error.name, message: error.message }
+          : "Unknown worker destruction error";
+      diagnostic.logGateway.warn(
+        `worker environment destroy failed (environmentId=${formatForLog(diagnostic.environmentId)}, code=${formatForLog(errorCode)}): ${formatForLog(detail)}`.replace(
+          /\s+/gu,
+          " ",
+        ),
+      );
+    }
     respond(
       false,
       undefined,
@@ -301,7 +317,24 @@ export const environmentsHandlers: GatewayRequestHandlers = {
           params.includeDesktopSetup,
         );
       }
-      const profiles = await listWorkerProfilesWithMachines(context);
+      const allProfiles = await listWorkerProfilesWithMachines(context);
+      const config = context.getRuntimeConfig();
+      const role = resolveOperatorRolePolicy(client ?? null, config);
+      const currentScopes = Array.isArray(client?.connect.scopes) ? client.connect.scopes : [];
+      const administrator =
+        currentScopes.includes(ADMIN_SCOPE) && (!role || role.scopes.includes(ADMIN_SCOPE));
+      const profiles = allProfiles;
+      const canWrite =
+        authorizeOperatorScopesForRequiredScope(WRITE_SCOPE, currentScopes).allowed &&
+        (!role || authorizeOperatorScopesForRequiredScope(WRITE_SCOPE, role.scopes).allowed);
+      const dispatchableProfileIds = config.gateway?.roles
+        ? allProfiles
+            .filter(
+              (profile) =>
+                canWrite && (administrator || role?.workerProfiles?.includes(profile.id)),
+            )
+            .map((profile) => profile.id)
+        : undefined;
       authority.assertCurrent();
       const includeCurrentPreparedDetails =
         includePreparedDetails &&
@@ -333,6 +366,7 @@ export const environmentsHandlers: GatewayRequestHandlers = {
                   : profiles,
               }
             : {}),
+          ...(dispatchableProfileIds ? { dispatchableProfileIds } : {}),
           ...(includeCurrentPreparedDetails && preparedPool ? { preparedPool } : {}),
         },
         undefined,
@@ -480,6 +514,9 @@ export const environmentsHandlers: GatewayRequestHandlers = {
       },
       ["environment_not_found", "invalid_state"],
       "worker environment destruction failed",
+      params.force
+        ? undefined
+        : { environmentId: params.environmentId, logGateway: context.logGateway },
     );
   },
   "worker.desktop.observe": defineValidatedGatewayHandler(
