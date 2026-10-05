@@ -31,6 +31,8 @@ import {
   createWorkerTurnTunnel,
   reconcileUnchangedLocalWorkspace,
   acknowledgeCompletedWorkerTurn,
+  ENVIRONMENT_ID,
+  OWNER_EPOCH,
   SESSION_ID,
   SESSION_KEY,
   attachedEnvironment,
@@ -88,139 +90,174 @@ describe("worker turn launcher reclaimed placement", () => {
     expect(placements.get(SESSION_ID)).toMatchObject({ state: "reclaimed", turnClaim: null });
   });
 
-  it("redispatches a reclaimed placement before launching the worker turn", async () => {
-    const reclaimed = await seedReclaimedPlacement();
-    const runId = "run-reclaimed-worker";
-    const contextTtlMs = 30 * 60 * 1000;
-    const registeredAt = Date.now();
-    const admissionAt = registeredAt + contextTtlMs + 1;
-    const clock = vi.spyOn(Date, "now").mockReturnValue(registeredAt);
-    const lifecycleGeneration = getAgentEventLifecycleGeneration();
-    registerAgentRunContext(runId, {
-      lifecycleGeneration,
-      registeredAt,
-      sessionKey: SESSION_KEY,
-    });
-    const releaseQueuedContext = retainQueuedAgentRunContext(runId, lifecycleGeneration);
-    const redispatchEntered = createDeferred();
-    const resumeRedispatch = createDeferred();
-    const workerStarted = createDeferred();
-    const resumeWorker = createDeferred();
-    let redispatchCalls = 0;
-    const redispatchPlacement: NonNullable<
-      WorkerTurnLauncherOptions["redispatchPlacement"]
-    > = async (placement) => {
-      redispatchCalls += 1;
-      expect(placement).toEqual(reclaimed);
-      expect(placements.get(SESSION_ID)?.turnClaim).toBeNull();
-      redispatchEntered.resolve();
-      await resumeRedispatch.promise;
-      await seedActivePlacement();
-      const active = placements.get(SESSION_ID);
-      if (active?.state !== "active") {
-        throw new Error("expected active redispatched placement");
+  it.each(["reclaimed", "failed"] as const)(
+    "recovers and redispatches a %s placement before launching the worker turn",
+    async (sourceState) => {
+      let reclaimed = await seedReclaimedPlacement();
+      let failed: Awaited<ReturnType<typeof placements.fail>> | undefined;
+      if (sourceState === "failed") {
+        await seedActivePlacement();
+        const active = placements.get(SESSION_ID)!;
+        const draining = await placements.startDrain({
+          sessionId: SESSION_ID,
+          environmentId: ENVIRONMENT_ID,
+          ownerEpoch: OWNER_EPOCH,
+          expectedGeneration: active.generation,
+        });
+        const reconciling = await placements.startReconcile({
+          sessionId: SESSION_ID,
+          environmentId: ENVIRONMENT_ID,
+          ownerEpoch: OWNER_EPOCH,
+          expectedGeneration: draining.generation,
+        });
+        failed = await placements.fail({
+          sessionId: SESSION_ID,
+          expectedGeneration: reconciling.generation,
+          recoveryError: "worker node lost; VM absent and disk retained",
+        });
       }
-      return active;
-    };
-    const launchTurn = vi.fn<WorkerTurnTunnelHandle["launchTurn"]>(async (request) => {
-      request.onDispatchReady?.();
-      workerStarted.resolve();
-      await resumeWorker.promise;
-      expect(placements.get(SESSION_ID)).toMatchObject({
-        state: "active",
-        turnClaim: { owner: "worker", runId },
+      const recoverFailedPlacement = vi.fn<
+        NonNullable<WorkerTurnLauncherOptions["recoverFailedPlacement"]>
+      >(async (source, authority) => {
+        expect(source).toEqual(failed);
+        authority.assertCurrent();
+        reclaimed = await seedReclaimedPlacement();
+        return reclaimed;
       });
-      const completed = await openSessionManager();
-      const leafId = await completed.appendMessageAsync(
-        makeAgentAssistantMessage({
-          content: [{ type: "text", text: "Redispatched worker reply" }],
-          timestamp: 51,
+      const runId = "run-reclaimed-worker";
+      const contextTtlMs = 30 * 60 * 1000;
+      const registeredAt = Date.now();
+      const admissionAt = registeredAt + contextTtlMs + 1;
+      const clock = vi.spyOn(Date, "now").mockReturnValue(registeredAt);
+      const lifecycleGeneration = getAgentEventLifecycleGeneration();
+      registerAgentRunContext(runId, {
+        lifecycleGeneration,
+        registeredAt,
+        sessionKey: SESSION_KEY,
+      });
+      const releaseQueuedContext = retainQueuedAgentRunContext(runId, lifecycleGeneration);
+      const redispatchEntered = createDeferred();
+      const resumeRedispatch = createDeferred();
+      const workerStarted = createDeferred();
+      const resumeWorker = createDeferred();
+      let redispatchCalls = 0;
+      const redispatchPlacement: NonNullable<
+        WorkerTurnLauncherOptions["redispatchPlacement"]
+      > = async (placement) => {
+        redispatchCalls += 1;
+        expect(placement).toEqual(reclaimed);
+        expect(placements.get(SESSION_ID)?.turnClaim).toBeNull();
+        redispatchEntered.resolve();
+        await resumeRedispatch.promise;
+        await seedActivePlacement();
+        const active = placements.get(SESSION_ID);
+        if (active?.state !== "active") {
+          throw new Error("expected active redispatched placement");
+        }
+        return active;
+      };
+      const launchTurn = vi.fn<WorkerTurnTunnelHandle["launchTurn"]>(async (request) => {
+        request.onDispatchReady?.();
+        workerStarted.resolve();
+        await resumeWorker.promise;
+        expect(placements.get(SESSION_ID)).toMatchObject({
+          state: "active",
+          turnClaim: { owner: "worker", runId },
+        });
+        const completed = await openSessionManager();
+        const leafId = await completed.appendMessageAsync(
+          makeAgentAssistantMessage({
+            content: [{ type: "text", text: "Redispatched worker reply" }],
+            timestamp: 51,
+          }),
+        );
+        return acknowledgeCompletedWorkerTurn(request.turnClaim, leafId);
+      });
+      const environments: WorkerTurnEnvironmentService = {
+        get: vi.fn(() => attachedEnvironment()),
+        acquireTurnCredential: vi.fn(async () => credential()),
+        acknowledgeCredentialDelivery: vi.fn(async () => true),
+        startTunnel: vi.fn(async () =>
+          createWorkerTurnTunnel({
+            launchTurn,
+            reconcileWorkspace: vi.fn(reconcileUnchangedLocalWorkspace),
+          }),
+        ),
+        stopTunnel: vi.fn(async () => {}),
+        destroy: vi.fn(async () => attachedEnvironment()),
+      };
+      const provider = createWorkerSessionTurnPlacementProvider({
+        environments,
+        placements,
+        redispatchPlacement,
+        recoverFailedPlacement,
+      });
+      const runLocal = vi.fn(async () => ({ meta: { durationMs: 1 } }));
+      const onAdmitted = vi.fn(() => {
+        expect(placements.get(SESSION_ID)).toMatchObject({
+          state: "active",
+          turnClaim: { owner: "worker", runId },
+        });
+        releaseQueuedContext?.("admitted");
+      });
+      const events: AgentEventPayload[] = [];
+      const unsubscribe = subscribeAgentEvent((event) => events.push(event));
+      const pending = provider.executeTurn(
+        { sessionId: SESSION_ID, sessionKey: SESSION_KEY, agentId: "main", runId },
+        turn(runId),
+        runLocal,
+        onAdmitted,
+      );
+      const result = await (async () => {
+        try {
+          await redispatchEntered.promise;
+          clock.mockReturnValue(admissionAt);
+          expect(sweepStaleRunContexts()).toBe(0);
+          expect(getAgentRunContext(runId)).toMatchObject({ lifecycleGeneration, registeredAt });
+          expect(onAdmitted).not.toHaveBeenCalled();
+
+          resumeRedispatch.resolve();
+          await workerStarted.promise;
+          expect(onAdmitted).toHaveBeenCalledOnce();
+          expect(getAgentRunContext(runId)?.lastActiveAt).toBe(admissionAt);
+          expect(runLocal).not.toHaveBeenCalled();
+
+          clock.mockReturnValue(admissionAt + contextTtlMs + 1);
+          expect(sweepStaleRunContexts()).toBe(0);
+          expect(getAgentRunContext(runId)).toBeDefined();
+          expect(placements.get(SESSION_ID)?.turnClaim).toMatchObject({ owner: "worker", runId });
+
+          clock.mockReturnValue(admissionAt);
+          resumeWorker.resolve();
+          return await pending;
+        } finally {
+          resumeRedispatch.resolve();
+          resumeWorker.resolve();
+          await pending.catch(() => {});
+          unsubscribe();
+          releaseQueuedContext?.("abandoned");
+          clearAgentRunContext(runId);
+          clock.mockRestore();
+        }
+      })();
+
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          runId,
+          stream: "run_status",
+          sessionKey: SESSION_KEY,
+          agentId: "main",
+          data: { phase: "provisioning_environment" },
         }),
       );
-      return acknowledgeCompletedWorkerTurn(request.turnClaim, leafId);
-    });
-    const environments: WorkerTurnEnvironmentService = {
-      get: vi.fn(() => attachedEnvironment()),
-      acquireTurnCredential: vi.fn(async () => credential()),
-      acknowledgeCredentialDelivery: vi.fn(async () => true),
-      startTunnel: vi.fn(async () =>
-        createWorkerTurnTunnel({
-          launchTurn,
-          reconcileWorkspace: vi.fn(reconcileUnchangedLocalWorkspace),
-        }),
-      ),
-      stopTunnel: vi.fn(async () => {}),
-      destroy: vi.fn(async () => attachedEnvironment()),
-    };
-    const provider = createWorkerSessionTurnPlacementProvider({
-      environments,
-      placements,
-      redispatchPlacement,
-    });
-    const runLocal = vi.fn(async () => ({ meta: { durationMs: 1 } }));
-    const onAdmitted = vi.fn(() => {
-      expect(placements.get(SESSION_ID)).toMatchObject({
-        state: "active",
-        turnClaim: { owner: "worker", runId },
-      });
-      releaseQueuedContext?.("admitted");
-    });
-    const events: AgentEventPayload[] = [];
-    const unsubscribe = subscribeAgentEvent((event) => events.push(event));
-    const pending = provider.executeTurn(
-      { sessionId: SESSION_ID, sessionKey: SESSION_KEY, agentId: "main", runId },
-      turn(runId),
-      runLocal,
-      onAdmitted,
-    );
-    const result = await (async () => {
-      try {
-        await redispatchEntered.promise;
-        clock.mockReturnValue(admissionAt);
-        expect(sweepStaleRunContexts()).toBe(0);
-        expect(getAgentRunContext(runId)).toMatchObject({ lifecycleGeneration, registeredAt });
-        expect(onAdmitted).not.toHaveBeenCalled();
-
-        resumeRedispatch.resolve();
-        await workerStarted.promise;
-        expect(onAdmitted).toHaveBeenCalledOnce();
-        expect(getAgentRunContext(runId)?.lastActiveAt).toBe(admissionAt);
-        expect(runLocal).not.toHaveBeenCalled();
-
-        clock.mockReturnValue(admissionAt + contextTtlMs + 1);
-        expect(sweepStaleRunContexts()).toBe(0);
-        expect(getAgentRunContext(runId)).toBeDefined();
-        expect(placements.get(SESSION_ID)?.turnClaim).toMatchObject({ owner: "worker", runId });
-
-        clock.mockReturnValue(admissionAt);
-        resumeWorker.resolve();
-        return await pending;
-      } finally {
-        resumeRedispatch.resolve();
-        resumeWorker.resolve();
-        await pending.catch(() => {});
-        unsubscribe();
-        releaseQueuedContext?.("abandoned");
-        clearAgentRunContext(runId);
-        clock.mockRestore();
-      }
-    })();
-
-    expect(events).toContainEqual(
-      expect.objectContaining({
-        runId,
-        stream: "run_status",
-        sessionKey: SESSION_KEY,
-        agentId: "main",
-        data: { phase: "provisioning_environment" },
-      }),
-    );
-    expect(result.payloads).toEqual([{ text: "Redispatched worker reply" }]);
-    expect(redispatchCalls).toBe(1);
-    expect(launchTurn).toHaveBeenCalledOnce();
-    expect(runLocal).not.toHaveBeenCalled();
-    expect(placements.get(SESSION_ID)).toMatchObject({ state: "active", turnClaim: null });
-  });
+      expect(result.payloads).toEqual([{ text: "Redispatched worker reply" }]);
+      expect(recoverFailedPlacement).toHaveBeenCalledTimes(sourceState === "failed" ? 1 : 0);
+      expect(redispatchCalls).toBe(1);
+      expect(launchTurn).toHaveBeenCalledOnce();
+      expect(runLocal).not.toHaveBeenCalled();
+      expect(placements.get(SESSION_ID)).toMatchObject({ state: "active", turnClaim: null });
+    },
+  );
 
   it("releases a claimed worker turn when its admission callback fails", async () => {
     await seedActivePlacement();

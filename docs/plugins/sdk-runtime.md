@@ -344,6 +344,10 @@ reports that outcome as `uncertain`; it must not be treated as proof of cancella
 or permission to retry with a new request ID. Pre-dispatch authority checks and
 the adapter's final page-session and URL checks remain required.
 
+## Worker provider failed-lease holds
+
+A worker provider may implement `holdFailedLease(lease, { assertCurrent, signal })` and `supportsFailedLeaseHold(profile)`. The hold must durably exclude the exact lease from reuse and destructive cleanup before returning a receipt. Report independently verified absent or retained resource identities, including immutable identities for retained resources, and keep unaccepted edits `unknown`. Recheck `assertCurrent()` after awaits and immediately before provider state changes. OpenClaw reserves the retained source through its existing worker lifecycle before invoking the provider; a lost reply remains pending for an idempotent retry. Providers that cannot attest this contract leave recovery blocked.
+
 ## Worker provider allocation authority
 
 The Gateway supplies `assertCurrent()` in the options passed to worker providers'

@@ -488,6 +488,17 @@ export function createNodeWorkerWorkspaceActions(params: {
       } finally {
         await params.workspaceTransfer.revoke(params.environmentId, token);
       }
+      if (source.recoveryHeadCommit) {
+        await repository.alignRecoveryHead(identity, baseCommit, source.recoveryHeadCommit);
+        const afterAlignment = await repository.captureManifest(
+          remoteWorkspaceDir,
+          baseCommit,
+          manifestRef,
+        );
+        if (afterAlignment !== manifestRef) {
+          throw new Error("Recovery history alignment changed accepted workspace bytes");
+        }
+      }
     } else if (source.runSetupScript) {
       const setup = await exec({
         argv: [

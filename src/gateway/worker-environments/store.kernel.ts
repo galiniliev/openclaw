@@ -14,6 +14,12 @@ import {
   createPreparedEnvironmentStoreOps,
   workerEnvironmentPreparationColumns,
 } from "./prepared-environment-store.js";
+import {
+  retainFailedWorkerEnvironment,
+  retainPreparedWorkerEnvironment,
+  acceptRetainedWorkerRecovery,
+  requestRetainedWorkerDisposal,
+} from "./recovery-hold-store.js";
 import { createWorkerEnvironmentSessionAttachmentStore } from "./session-attachment-store.js";
 import type { WorkerEnvironmentAttachmentRecord } from "./session-attachment.js";
 import { isTerminalWorkerEnvironmentState } from "./state.js";
@@ -96,6 +102,9 @@ export function createWorkerEnvironmentStoreKernel(
     return getRequiredWorkerEnvironment(intentDb, environmentId);
   };
   return {
+    retainPreparedEnvironment: (hold) => retainPreparedWorkerEnvironment(db, hold),
+    retainFailedEnvironment: (hold) => retainFailedWorkerEnvironment(db, hold),
+    acceptRetainedRecovery: (input) => acceptRetainedWorkerRecovery(db, input, now()),
     ...createPreparedEnvironmentStoreOps({ db, now, createIntent, get: findWorkerEnvironment }),
     ...createWorkerEnvironmentSessionAttachmentStore({
       db,
@@ -196,6 +205,12 @@ export function createWorkerEnvironmentStoreKernel(
       const current = getRequiredWorkerEnvironment(db, environmentId);
       if (current.state !== input.state) {
         throw new Error(`Worker environment ${environmentId} changed before destroy request`);
+      }
+      if (current.recoveryHold) {
+        return requestRetainedWorkerDisposal(db, environmentId, now(), input.providerRelease);
+      }
+      if (input.providerRelease) {
+        throw new Error("Provider release receipt requires admitted held-worker disposal");
       }
       if (current.destroyRequestedAtMs !== null) {
         return current;

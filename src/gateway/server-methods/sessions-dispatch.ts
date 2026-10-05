@@ -286,6 +286,8 @@ export const sessionDispatchHandlers: GatewayRequestHandlers = {
     const existingPlacement = placementReader.getMany([sessionId]).get(sessionId);
     if (
       existingPlacement?.state === "failed" &&
+      context.workerPlacementDispatchService?.canRecoverFailedPlacement?.(existingPlacement) !==
+        true &&
       !isFailedWorkerPlacementEnvironmentGone({
         environmentService: context.workerEnvironmentService,
         placement: existingPlacement,

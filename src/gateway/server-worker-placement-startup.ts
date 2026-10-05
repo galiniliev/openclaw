@@ -7,6 +7,7 @@ import { formatErrorMessage } from "../infra/errors.js";
 import type { GatewayScheduler } from "../infra/gateway-scheduler.js";
 import { getGatewayRestartDrainSignal } from "../process/gateway-work-admission.js";
 import { onSessionIdentityMutation } from "../sessions/session-lifecycle-events.js";
+import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
 import { createGitHubPublicationRuntime } from "./github-publication-runtime.js";
 import type { NodeWorkerSupervisorTransport } from "./node-registry-private.js";
 import { emitSessionsChanged } from "./server-methods/session-change-event.js";
@@ -60,6 +61,9 @@ import { createWorkerSessionTurnPlacementProvider } from "./worker-environments/
 import { createWorkerWorkspaceOperationCoordinator } from "./worker-environments/workspace-operation-coordinator.js";
 
 const WORKER_PLACEMENT_RECONCILE_INTERVAL_MS = 60_000;
+const loadRetainedRepositoryRecovery = createLazyRuntimeModule(
+  () => import("./worker-environments/repository-recovery-checkpoint.js"),
+);
 
 type WorkerPlacementSidecar = { stop: () => Promise<void> };
 
@@ -279,6 +283,10 @@ export function createGatewayWorkerPlacementRuntime(
         loadSessionRuntime: loadWorkerPlacementSessionRuntimeModule,
       }),
       resolveWorkspace,
+      prepareRetainedRecoveryCheckpoint: async (...args) =>
+        (await loadRetainedRepositoryRecovery()).prepareRetainedRepositoryCheckpoint(...args),
+      prepareFailedDisposalCheckpoint: async (...args) =>
+        (await loadRetainedRepositoryRecovery()).prepareAcceptedRepositoryDisposal(...args),
       prepareGatewayMove: (identity) =>
         params.placements.withWorkspaceExclusion(
           identity.sessionId,
@@ -347,6 +355,7 @@ export function createGatewayWorkerPlacementRuntime(
       dispatch: dispatchService.dispatch,
       resolveDevicePlacementRequirement,
     }),
+    recoverFailedPlacement: dispatchService.recoverFailedPlacement,
     workspaceOperations,
     prepareAcceptedWorkspacePublication,
     publishAcceptedWorkspace,

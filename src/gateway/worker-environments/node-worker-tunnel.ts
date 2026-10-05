@@ -268,6 +268,7 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
         await sleepWithAbort(Math.min(RETRY_DELAY_MS, Math.max(1, deadline - Date.now())), signal);
         continue;
       }
+      assertCurrent();
       if (!result.ok) {
         const code = result.error?.code ?? "UNAVAILABLE";
         if (code === NODE_WORKSPACE_TRANSFER_ERROR_CODE) {

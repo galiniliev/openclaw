@@ -2003,6 +2003,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_environments_provider_lease
 CREATE INDEX IF NOT EXISTS idx_worker_environments_terminal_changed
   ON worker_environments(state_changed_at_ms, environment_id);
 
+-- Session sources stay unique; unattached preparation custody has no session identity.
+CREATE TABLE IF NOT EXISTS worker_environment_recovery_holds (
+  environment_id TEXT NOT NULL PRIMARY KEY,
+  session_id TEXT UNIQUE,
+  hold_json TEXT NOT NULL CHECK (json_valid(hold_json)),
+  FOREIGN KEY (environment_id) REFERENCES worker_environments(environment_id) ON DELETE RESTRICT
+) STRICT;
+
 -- A dedicated node registers its fixed build paths before ready, then binds
 -- them once. The environment belongs to the Gateway's separate database.
 CREATE TABLE IF NOT EXISTS node_worker_prepared_workspaces (

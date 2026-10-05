@@ -203,6 +203,18 @@ export type WorkerLeaseStatus =
   | { status: "destroyed" }
   | { status: "unknown" };
 
+export type WorkerLeaseRecoveryHold = {
+  status: "held";
+  leaseId: string;
+  unacceptedChanges: "unknown";
+  resources: Array<{
+    kind: string;
+    id: string;
+    immutableId?: string;
+    state: "absent" | "retained";
+  }>;
+};
+
 /** Provision failed after allocation and the provider could not prove cleanup completed. */
 class WorkerProvisionCleanupError extends AggregateError {
   readonly code = "cleanup_indeterminate";
@@ -436,6 +448,12 @@ export type WorkerProvider = {
   }) => Promise<void>;
   /** Idempotent; resolves only after the provider can prove teardown. */
   destroy: (lease: { leaseId: string; profile: WorkerProfile }) => Promise<void>;
+  /** Retain a failed machine's resources without releasing or reusing its lease. */
+  holdFailedLease?: (
+    lease: { leaseId: string; profile: WorkerProfile },
+    authority: { assertCurrent: () => void; signal?: AbortSignal },
+  ) => Promise<WorkerLeaseRecoveryHold>;
+  supportsFailedLeaseHold?: (profile: WorkerProfile) => boolean;
   /** Maximum core wait for teardown, including provider-owned checkpointing and cleanup. */
   resolveDestroyTimeoutMs?: (profile: WorkerProfile) => number;
 };

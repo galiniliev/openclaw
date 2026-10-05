@@ -86,6 +86,7 @@ export type WorkerDispatchPlacementStore = Pick<
   | "startWorkspaceResultDrain"
   | "startReconcile"
   | "transition"
+  | "withWorkspaceExclusion"
   | "updateWorkspaceBaseManifest"
 >;
 
@@ -107,7 +108,8 @@ export type WorkerDispatchEnvironmentService = Pick<
   | "startTunnel"
   | "stopTunnel"
   | "supportsProviderExecutionMode"
->;
+> &
+  Partial<Pick<WorkerEnvironmentService, "readRecoveryHold">>;
 
 export type WorkerActivationBarrier = (params: {
   sessionId: string;
@@ -207,6 +209,7 @@ export function isCurrentActiveWorkerEnvironment(
 export function createPlacementFailureActions(deps: {
   placements: WorkerDispatchPlacementStore;
   environments: WorkerDispatchEnvironmentService;
+  disposeFailedPlacement?: (placement: WorkerFailedDispatchPlacement) => Promise<boolean>;
 }) {
   const { environments, placements } = deps;
 
@@ -308,6 +311,18 @@ export function createPlacementFailureActions(deps: {
   ): Promise<string | undefined> => {
     if (!placement.environmentId) {
       return undefined;
+    }
+    if (deps.disposeFailedPlacement) {
+      try {
+        authorize?.();
+        if (await deps.disposeFailedPlacement(placement)) {
+          return undefined;
+        }
+      } catch (error) {
+        // Checkpoint custody and uncertain provider outcomes remain retryable;
+        // neither grants a generic teardown fallback or logical continuation.
+        return boundedError(error);
+      }
     }
     const environment = environments.get(placement.environmentId);
     if (!environment || isTerminalWorkerEnvironmentState(environment.state)) {

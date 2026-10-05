@@ -472,5 +472,29 @@ export function createNodeWorkerRepositoryPreparation(
       }
       return outcome;
     },
+    async alignRecoveryHead(
+      identity: RepositoryIdentity,
+      expectedHead: string,
+      recoveryHead: string,
+    ) {
+      if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(recoveryHead)) {
+        throw new Error("Invalid repository recovery head");
+      }
+      const current = await git(identity, ["rev-parse", "--verify", "HEAD^{commit}"]);
+      if (succeeded(current) && current.stdout.trim() === recoveryHead) {
+        return;
+      }
+      if (!succeeded(current) || current.stdout.trim() !== expectedHead) {
+        throw new Error("Recovery checkout history changed before alignment");
+      }
+      const fetched = await fetchRevision({ ...identity, commit: recoveryHead });
+      if (fetched.kind === "failed") {
+        throw new Error("Verified recovery history is unavailable on the replacement worker");
+      }
+      const aligned = await git(identity, ["reset", "--mixed", "--no-refresh", recoveryHead]);
+      if (!succeeded(aligned)) {
+        throw new Error("Replacement worker could not align verified recovery history");
+      }
+    },
   };
 }

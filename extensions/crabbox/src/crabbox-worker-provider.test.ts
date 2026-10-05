@@ -1,30 +1,37 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
-import {
-  type WorkerProfile,
-  type WorkerProvider,
-  WorkerProviderError,
-} from "openclaw/plugin-sdk/plugin-entry";
-import { resetPluginStateStoreForTests } from "openclaw/plugin-sdk/plugin-state-test-runtime";
-import * as processRuntime from "openclaw/plugin-sdk/process-runtime";
+import { type WorkerProfile, WorkerProviderError } from "openclaw/plugin-sdk/plugin-entry";
 import type { SpawnResult } from "openclaw/plugin-sdk/process-runtime";
-import { closeOpenClawStateDatabaseAsync } from "openclaw/plugin-sdk/sqlite-runtime-testing";
-import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as processRuntime from "openclaw/plugin-sdk/process-runtime";
+import { describe, expect, it, vi } from "vitest";
 import { ensureManagedCrabboxBinary, type CrabboxBinary } from "./crabbox-managed-binary.js";
 import { crabboxState } from "./crabbox-state.test-support.js";
 import type { CrabboxCommandRunner } from "./crabbox-worker-command.js";
 import { createNodeBootstrapFixture } from "./crabbox-worker-node-enrollment.test-support.js";
+import {
+  OPERATION_ID,
+  LEASE_ID,
+  SIBLING_BINARY,
+  INSPECT_FAILURE_PREFIX,
+  CLASSLESS_PROFILE,
+  PROFILE,
+  NON_RUNNABLE_STATES,
+  tempDirs,
+  inspectJson,
+  lifecycleLease,
+  providerWithRawRunner,
+  providerWithRunner,
+  failedNodeEnrollment,
+  heartbeatFixture,
+} from "./crabbox-worker-provider-fixture.test-support.js";
 import { createCrabboxWorkerProvider } from "./crabbox-worker-provider.js";
 import {
   active,
   catalogJson,
   classProfile,
   commandResult,
-  createProviderFixtures,
   nodeEnrollmentFixture,
-  OPENCLAW_ROOT,
   WORKER_WALLPAPER_PATH,
   inspectCases,
   mappedCatalog,
@@ -41,138 +48,57 @@ vi.mock("./crabbox-managed-binary.js", () => ({
   ensureManagedCrabboxBinary: vi.fn(),
 }));
 
-const OPERATION_ID = `provision:v2:${"0".repeat(64)}`;
-const LEASE_ID = "cbx_6071fc2062a6";
-const SIBLING_BINARY = path.resolve(OPENCLAW_ROOT, "../crabbox/bin/crabbox");
-
-const INSPECT_FAILURE_PREFIX = "Crabbox inspect failed with exit code 2: ";
-const CLASSLESS_PROFILE = { provider: "aws", ttl: "24h", idleTimeout: "60m" };
-const PROFILE = { ...CLASSLESS_PROFILE, class: "standard", warmImage: false };
-const NON_RUNNABLE_STATES = [
-  "archived",
-  "deleted",
-  "deleting",
-  "destroyed",
-  "expired",
-  "failed",
-  "missing",
-  "released",
-  "stopped",
-  "stopped_with_code",
-  "terminated",
-];
-const { providers, createProvider } = createProviderFixtures({
-  isExecutable: (candidate) => candidate === SIBLING_BINARY,
-});
-const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>
-  afterEach(async () => {
-    try {
-      await Promise.all([...providers].map((provider) => provider.dispose()));
-    } finally {
-      providers.clear();
-      await closeOpenClawStateDatabaseAsync();
-      resetPluginStateStoreForTests();
-      vi.unstubAllEnvs();
-      cleanup();
-    }
-  }),
-);
-beforeEach(() => {
-  vi.mocked(ensureManagedCrabboxBinary)
-    .mockReset()
-    .mockImplementation(async (params) => ({
-      binary: params?.binary ?? "crabbox",
-      version: "999.0.0",
-    }));
-  // Provider instances share durable state within a replay test, never across test cases.
-  vi.stubEnv("OPENCLAW_STATE_DIR", tempDirs.make("openclaw-crabbox-provider-"));
-});
-
-function inspectJson(overrides: Record<string, unknown> = {}): string {
-  return JSON.stringify({
-    id: LEASE_ID,
-    providerMetadata: { instanceProfileAttached: false },
-    state: "running",
-    sshUser: "openclaw",
-    ready: true,
-    ...overrides,
-  });
-}
-
-function lifecycleLease(leaseId = LEASE_ID, profile: WorkerProfile = PROFILE) {
-  return { leaseId, profile };
-}
-
-function providerWithRawRunner(
-  runCommand: CrabboxCommandRunner,
-  warn?: (message: string) => void,
-  sleep: (milliseconds: number) => Promise<void> = async () => {},
-): WorkerProvider {
-  const provider = createProvider({
-    runCommand,
-    sleep,
-    ...(warn ? { warn } : {}),
-  });
-  return {
-    ...provider,
-    provision: (profile, operationId, options) =>
-      provider.provision(profile, operationId, {
+describe("failed lease recovery hold", () => {
+  it.each(["exact", "wrong-lease", "live-vm"] as const)(
+    "accepts only an exact durable absent-VM receipt: %s",
+    async (variant) => {
+      const profile = { ...PROFILE, provider: "azure" };
+      const resources = ["vm", "nic", "public-ip", "disk", "nsg"].map((kind) => ({
+        kind,
+        id: `/subscriptions/synthetic-fixture/resources/${kind}`,
+        immutableId: `${kind}-original`,
+        state: kind === "vm" && variant !== "live-vm" ? "absent" : "retained",
+      }));
+      const runCommand = vi.fn<CrabboxCommandRunner>(async () =>
+        commandResult({
+          stdout: JSON.stringify({
+            schema: "crabbox.lease-hold.v1",
+            provider: "azure",
+            status: "held",
+            leaseId: variant === "wrong-lease" ? "cbx_other" : LEASE_ID,
+            unacceptedChanges: "unknown",
+            resources,
+          }),
+        }),
+      );
+      const provider = providerWithRawRunner(runCommand);
+      const result = provider.holdFailedLease!(lifecycleLease(LEASE_ID, profile), {
         assertCurrent: () => {},
-        nodeRuntimeIdentity: {
-          nodeBootstrapSha256: createNodeBootstrapFixture().sha256,
-          executionMode: options?.executionMode ?? "worker-turn",
-        },
-        ...options,
-        beginNodeEnrollment:
-          options?.beginNodeEnrollment ??
-          (async () => nodeEnrollmentFixture("secret-setup-value", "Cloud worker test")),
-      }),
-  };
-}
-
-function providerWithRunner(
-  runCommand: CrabboxCommandRunner,
-  warn?: (message: string) => void,
-  sleep?: (milliseconds: number) => Promise<void>,
-) {
-  return providerWithRawRunner(
-    async (argv, options) => {
-      if (argv[1] === "config" && argv[2] === "show") {
-        return commandResult({ stdout: JSON.stringify({ aws: { instanceProfile: "" } }) });
+      });
+      if (variant === "exact") {
+        await expect(result).resolves.toMatchObject({
+          status: "held",
+          leaseId: LEASE_ID,
+          resources,
+        });
+      } else {
+        await expect(result).rejects.toThrow(
+          /exact failed-lease hold receipt|retained-resource identity/u,
+        );
       }
-      return runCommand(argv, options);
+      expect(runCommand).toHaveBeenCalledOnce();
+      expect(runCommand.mock.calls[0]?.[0]).toEqual([
+        SIBLING_BINARY,
+        "hold",
+        "--provider",
+        "azure",
+        "--id",
+        LEASE_ID,
+        "--json",
+      ]);
     },
-    warn,
-    sleep,
   );
-}
-
-function failedNodeEnrollment(
-  error: Error,
-): NonNullable<Parameters<WorkerProvider["provision"]>[2]> {
-  return {
-    beginNodeEnrollment: async () =>
-      nodeEnrollmentFixture("secret-setup-value", "Cloud worker test", async () => {
-        throw error;
-      }),
-  };
-}
-
-function heartbeatFixture(run: CrabboxCommandRunner) {
-  vi.useFakeTimers();
-  const heartbeat = vi.fn(run);
-  const warnings: string[] = [];
-  const provider = providerWithRunner(
-    async (argv, options) => {
-      if (argv[1] === "heartbeat") {
-        return heartbeat(argv, options);
-      }
-      return commandResult({ stdout: argv[1] === "inspect" ? inspectJson() : "" });
-    },
-    (message) => warnings.push(message),
-  );
-  return { provider, heartbeat, warnings };
-}
+});
 
 describe("Crabbox worker provider", () => {
   it("uses the managed binary for discovery and the complete worker lifecycle", async () => {

@@ -41,6 +41,10 @@ import type {
 } from "../cron/store/run-recovery-read.types.js";
 import type { CronQuarantinedJob } from "../cron/types-shared.js";
 import type { FleetCellRecord } from "../fleet/registry.types.js";
+import type {
+  RepositoryGitHubPublicationBranchInput,
+  readRepositoryGitHubPublicationBranchInDatabase,
+} from "../gateway/github-repository-publication-store.js";
 import type { CronStandingGrantListing } from "../gateway/operator-approval-standing-grants.types.js";
 import type {
   ListTerminalOperatorApprovalsInput,
@@ -239,6 +243,7 @@ export type OpenClawStateReadCommand =
   | { type: "githubPublication.sharedObservation"; input: SharedGitHubPublicationReadInput }
   | { type: "githubPublication.request"; requestId: string }
   | { type: "githubRepository.request"; requestId: string }
+  | { type: "githubRepository.branch"; input: RepositoryGitHubPublicationBranchInput }
   | { type: "githubPublication.knownPullRequestUrls"; input: GitHubPublicationReceiptTarget }
   | {
       type: "githubRepository.knownPullRequestUrls";
@@ -394,6 +399,10 @@ export type OpenClawStateReadResult =
   | {
       type: "githubRepository.request";
       row: RepositoryGitHubPublicationRow | undefined;
+    }
+  | {
+      type: "githubRepository.branch";
+      branch: ReturnType<typeof readRepositoryGitHubPublicationBranchInDatabase>;
     }
   | {
       type: "githubPublication.knownPullRequestUrls";

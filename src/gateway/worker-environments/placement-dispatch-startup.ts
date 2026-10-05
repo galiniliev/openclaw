@@ -351,8 +351,15 @@ export function createWorkerPlacementDispatchStartup(options: {
               agentId: request.agentId,
               generation: placement.generation,
               gitAuthor,
+              signal: params.signal,
+              operatorAuthority: request.operatorAuthority,
+              readNativeCredential: request.readNativeCredential,
               runSetupScript: request.runSetupScript,
               recovery: params.recovery,
+              recoveryHeadCommit:
+                retainedSource?.checkpointRef === params.workspace.repository.checkpointRef
+                  ? retainedSource?.remoteHeadCommit
+                  : undefined,
               assertCurrent: assertSyncOwner,
             })
           : await tunnel.syncWorkspace({

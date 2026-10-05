@@ -21,14 +21,19 @@ import {
   workerEnvironmentServiceError as serviceError,
 } from "./environment-errors.js";
 import {
+  findActiveWorkerRecoveryHold,
+  isWorkerRecoveryDisposalCandidate,
+  type WorkerEnvironmentRecord,
+} from "./environment-record.js";
+import {
   joinInferenceOperations,
   registerWorkerInferenceSessionControl,
 } from "./inference-control-internal.js";
 import { createWorkerInferenceManager } from "./inference.js";
 import type { WorkerEnvironmentPlacementFacts } from "./placement-read-projection.types.js";
 import type { WorkerSessionTurnClaim } from "./placement-record.js";
-import type { WorkerProviderPreparedIntent } from "./preparation-identity.js";
 import { createPreparedWorkerPool } from "./prepared-pool.js";
+import { completeRetainedWorkerRecovery } from "./provider-lease-destroy.js";
 import { createWorkerProviderLifecycle } from "./provider-lifecycle.js";
 import type { WorkerEnvironmentAbandonment } from "./provider-lifecycle.types.js";
 import type { WorkerEnvironmentServiceContract } from "./service-contract.js";
@@ -39,10 +44,7 @@ import type {
 } from "./service.types.js";
 import { createWorkerEnvironmentSessionAttachments } from "./session-attachment-service.js";
 import type { WorkerEnvironmentState } from "./state.js";
-import type {
-  WorkerEnvironmentRecord,
-  WorkerEnvironmentTransitionPatch as TransitionPatch,
-} from "./store.js";
+import type { WorkerEnvironmentTransitionPatch as TransitionPatch } from "./store.js";
 import { joinWorkerTunnelStops } from "./tunnel-contract.js";
 import { createWorkerTurnRpc } from "./worker-turn-rpc.js";
 
@@ -269,7 +271,15 @@ export function createWorkerEnvironmentService(options: WorkerEnvironmentService
     await withLock(environmentId, async () => {
       await store.ready();
       const current = store.get(environmentId);
-      if (!current || ["destroyed", "failed", "orphaned"].includes(current.state)) {
+      if (
+        !current ||
+        (["destroyed", "failed", "orphaned"].includes(current.state) &&
+          !(
+            (current.recoveryHold?.kind === "prepared" &&
+              current.recoveryHold.phase === "requested") ||
+            isWorkerRecoveryDisposalCandidate(current)
+          ))
+      ) {
         return;
       }
       // Conversation cleanup has one retry owner, including its backoff and parked budget.
@@ -647,6 +657,13 @@ export function createWorkerEnvironmentService(options: WorkerEnvironmentService
       environmentAccess.project(
         await providerLifecycle.destroy(environmentId, { abandonment, forceAbandon }),
       ),
+    holdFailedEnvironment: async (
+      ...args: Parameters<typeof providerLifecycle.holdFailedEnvironment>
+    ) => environmentAccess.project(await providerLifecycle.holdFailedEnvironment(...args)),
+    acceptRetainedRecovery: (input: Parameters<typeof store.acceptRetainedRecovery>[0]) =>
+      completeRetainedWorkerRecovery(store, providerLifecycle.destroy, input),
+    readRecoveryHold: (sessionId: string) => findActiveWorkerRecoveryHold(store.list(), sessionId),
+    supportsFailedLeaseHold: providerLifecycle.supportsFailedLeaseHold,
     requestDestroy: async (environmentId: string) =>
       environmentAccess.project(
         await providerLifecycle.destroy(environmentId, { retryRequested: false }),

@@ -1,23 +1,19 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { coerceErrorMessage, toErrorObject } from "openclaw/plugin-sdk/error-runtime";
 import {
   WorkerProviderError,
-  type WorkerLeaseStatus,
   type WorkerProfile,
   type WorkerProvider,
 } from "openclaw/plugin-sdk/plugin-entry";
 import { runCommandWithTimeout } from "openclaw/plugin-sdk/process-runtime";
-import { racePromiseWithAbortSignal } from "openclaw/plugin-sdk/time-runtime";
-import { resolveCrabboxBinary } from "./crabbox-binary.js";
-import { ensureManagedCrabboxBinary } from "./crabbox-managed-binary.js";
+import { createCrabboxBinaryAcquisition } from "./crabbox-worker-binary-acquisition.js";
 import {
-  type CrabboxCommandRunner,
   type LeaseCommandContext,
   runCrabboxCommandWithCoordinatorRetry,
   stopCrabboxLease,
 } from "./crabbox-worker-command.js";
 import { createCrabboxHeartbeatManager } from "./crabbox-worker-heartbeat.js";
 import type { ParsedInspect } from "./crabbox-worker-inspect.js";
+import { createCrabboxWorkerLeaseLifecycle } from "./crabbox-worker-lease-lifecycle.js";
 import { createCrabboxMachineOptionsResolver } from "./crabbox-worker-machine-options.js";
 import { collectCrabboxNodeEnrollmentEvidence } from "./crabbox-worker-node-enrollment-diagnostics.js";
 import {
@@ -610,6 +606,7 @@ export function createCrabboxWorkerProvider(
   return {
     id: CRABBOX_WORKER_PROVIDER_ID,
     resolveDisplayId: (profile) => parseCrabboxProfile(profile).provider,
+    supportsFailedLeaseHold: (profile) => parseCrabboxProfile(profile).provider === "azure",
     // Disposable worker desktops may resize only when the RFB server negotiates support.
     allowsDesktopResize: true,
     async dispose() {
@@ -715,49 +712,15 @@ export function createCrabboxWorkerProvider(
         await prepareProvision(...args)
       )();
     },
-    async inspect(lease): Promise<WorkerLeaseStatus> {
-      const { context } = await resolveLeaseContext(lease);
-      const inspected = await inspectWithContext({
-        ...context,
-        runCommand,
-        sleep,
-      });
-      if (!inspected || isNonRunnableState(inspected.state)) {
-        await heartbeats.stop(context.id);
-        return { status: "unknown" };
-      }
-      // `ready` is an SSH probe; every recognized nonterminal lease remains active.
-      heartbeats.start(context);
-      return { status: "active", sharedHost: false };
-    },
-    async destroy(lease): Promise<void> {
-      assertCrabboxLeaseId(lease.leaseId);
-      // Stop renewal before binary acquisition can delay or fail teardown.
-      await heartbeats.stop(lease.leaseId);
-      const { context, profile } = await resolveLeaseContext(lease);
-      // Lifecycle profiles omit placement overrides. Successful enrollment records
-      // the class and OS that own the warm policy and reusable image after restart.
-      let captureError: unknown;
-      try {
-        const allocation = await warmImages.lookupLease(context.id);
-        const captureProfile = resolveCrabboxWarmImageProfile(
-          profile,
-          allocation?.machineClass ?? profile.class,
-          allocation ? (allocation.os ?? "linux") : profile.target,
-        );
-        if (captureProfile.warmImage) {
-          await warmImages.capture({ ...context, profile: captureProfile });
-        }
-      } catch (error) {
-        captureError = error;
-      }
-      await stopLease(context);
-      if (captureError) {
-        // Capture recovery remains recorded separately from confirmed source cleanup.
-        warn(
-          `Crabbox warm image capture failed during teardown: ${coerceErrorMessage(captureError)}`,
-        );
-      }
-    },
+    ...createCrabboxWorkerLeaseLifecycle({
+      runCommand,
+      sleep,
+      signal: providerAbort.signal,
+      heartbeats,
+      resolveLeaseContext,
+      warmImages,
+      stopLease,
+      warn,
+    }),
   };
 }

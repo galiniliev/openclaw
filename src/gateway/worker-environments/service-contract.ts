@@ -177,6 +177,28 @@ export type WorkerEnvironmentServiceContract = {
     runSetupScript?: boolean,
   ): Promise<WorkerEnvironmentServiceRecord>;
   destroy(environmentId: string): Promise<WorkerEnvironmentServiceRecord>;
+  holdFailedEnvironment?: (
+    identity: Omit<
+      import("./environment-record.js").WorkerEnvironmentRecoveryHold,
+      "receipt" | "createdAtMs" | "leaseId" | "phase"
+    >,
+    assertCurrent: () => void,
+    signal?: AbortSignal,
+  ) => Promise<WorkerEnvironmentServiceRecord>;
+  acceptRetainedRecovery?: (
+    input: import("./recovery-hold-store.js").RetainedWorkerRecoveryAcceptance & {
+      assertCurrent: () => void;
+    },
+  ) => Promise<
+    Extract<
+      import("./placement-record.js").WorkerSessionPlacementRecord,
+      { state: "failed" | "reclaimed" }
+    >
+  >;
+  readRecoveryHold?: (
+    sessionId: string,
+  ) => import("./environment-record.js").WorkerEnvironmentRecoveryHold | undefined;
+  supportsFailedLeaseHold?: (environmentId: string) => boolean;
   destroyUnattached(environmentId: string): Promise<WorkerEnvironmentServiceRecord>;
   observeDesktop(request: {
     environmentId: string;
@@ -257,6 +279,7 @@ export type WorkerPlacementMoveRequest = Pick<
   source: WorkerPlacementMoveSource;
   target: WorkerPlacementMoveTarget;
   abandonSource?: true;
+  readNativeCredential?: (env: NodeJS.ProcessEnv) => Promise<string | undefined>;
 };
 
 /** Closure-bound request authority; in-process only and never part of durable placement intent. */
@@ -273,6 +296,9 @@ export type WorkerPlacementReclaimSourceCheck = ((
 // Leaf dispatch contract: GatewayRequestContext must not import the dispatch
 // runtime (it reaches agents/plugins and closes an import cycle through core).
 export type WorkerPlacementDispatchContract = {
+  canRecoverFailedPlacement?: (
+    placement: import("./placement-record.js").WorkerSessionPlacementRecord,
+  ) => boolean;
   getPendingDeviceDispatchCount?(deviceId: string, excludeSessionId?: string): number;
   getAdmittedDeviceSessionCounts?(excludeSessionId?: string): ReadonlyMap<string, number>;
   dispatch(

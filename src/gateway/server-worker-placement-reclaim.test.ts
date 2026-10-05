@@ -9,7 +9,10 @@ import { createDeferred } from "../../test/helpers/promise.js";
 import { loadTranscriptEvents, replaceSessionEntry } from "../config/sessions/session-accessor.js";
 import { clearAgentRunContext } from "../infra/agent-run-registry.js";
 import { runCommandWithTimeout } from "../process/exec.js";
-import { runExclusiveSessionLifecycleMutation } from "../sessions/session-lifecycle-admission.js";
+import {
+  beginSessionWorkAdmission,
+  runExclusiveSessionLifecycleMutation,
+} from "../sessions/session-lifecycle-admission.js";
 import { closeOpenClawAgentDatabasesForTest } from "../state/openclaw-agent-db.js";
 import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import { closeStateDatabaseForTest } from "../test-utils/database-cleanup.js";
@@ -577,6 +580,67 @@ it("an idempotent failed-cleanup result does not cancel work already on the loca
   } as never);
   expect(reclaimed).toBe(local);
   expect(cancel).not.toHaveBeenCalled();
+});
+
+it("retained recovery preserves the incoming admission without Stop cancellation", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "retained-recovery-admission-"));
+  roots.push(root);
+  const storePath = path.join(root, "sessions.sqlite");
+  const entry = { sessionId: REQUEST.sessionId, updatedAt: Date.now() };
+  const target = {
+    storePath,
+    canonicalKey: REQUEST.sessionKey,
+    storeKeys: [REQUEST.sessionKey],
+    agentId: REQUEST.agentId,
+    store: { [REQUEST.sessionKey]: entry },
+  };
+  const database = openOpenClawStateDatabase({ env: { OPENCLAW_STATE_DIR: root } });
+  const placements = createWorkerSessionPlacementStore({ database });
+  await placements.startDispatch(REQUEST);
+  await placements.fail({ sessionId: REQUEST.sessionId, recoveryError: "lost worker" });
+  const cancel = vi.fn();
+  const interrupted = vi.fn();
+  const admission = await beginSessionWorkAdmission({
+    scope: storePath,
+    identities: [REQUEST.sessionKey, REQUEST.sessionId],
+    assertAllowed: () => {},
+    onInterrupt: interrupted,
+  });
+  const barriers = createGatewayWorkerPlacementReclaimBarriers({
+    placements,
+    loadSessionRuntime: async () => ({
+      managedWorktrees: { findLiveByOwner: () => undefined },
+      resolveGatewaySessionStoreTargetWithStore: () => target,
+      resolveCanonicalSessionEntryFromStoreKeys: () => entry,
+    }),
+    cancelSessionWork: cancel,
+    revokeSessionAuthority: vi.fn(),
+  });
+  try {
+    await admission.run(async () =>
+      barriers.runFailedReclaimBarrier({
+        ...REQUEST,
+        preserveCurrentAdmission: true,
+        reclaim: async () => {
+          expect(interrupted).not.toHaveBeenCalled();
+          const placement = await placements.transition({
+            sessionId: REQUEST.sessionId,
+            from: "failed",
+            to: "local",
+            expectedGeneration: placements.get(REQUEST.sessionId)!.generation,
+          });
+          if (placement.state !== "local") {
+            throw new Error("Expected retained recovery to restore local placement");
+          }
+          return placement;
+        },
+      }),
+    );
+    expect(cancel).not.toHaveBeenCalled();
+    expect(interrupted).not.toHaveBeenCalled();
+  } finally {
+    admission.release();
+  }
 });
 
 it("Stop preserves RPC cancellation and buffered output while Move waits behind same-session recovery", async () => {

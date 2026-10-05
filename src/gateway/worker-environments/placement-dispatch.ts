@@ -45,6 +45,12 @@ export function createWorkerPlacementDispatchService(options: WorkerPlacementDis
     ...options,
     failure,
   });
+  const retainedRecovery = createRetainedWorkerRecovery({
+    ...options,
+    environments,
+    prepareCheckpoint: options.prepareRetainedRecoveryCheckpoint,
+    prepareDisposalCheckpoint: options.prepareFailedDisposalCheckpoint,
+  });
 
   // Background recovery observes previously requested cleanup; explicit Stop and
   // Move retain their retry contract. Pending-result recovery must inherit this too.
@@ -52,24 +58,61 @@ export function createWorkerPlacementDispatchService(options: WorkerPlacementDis
   const recovery = createPlacementRecoveryActions({
     ...options,
     environments: recoveryEnvironments,
-    failure: createPlacementFailureActions({ environments: recoveryEnvironments, placements }),
+    failure: createPlacementFailureActions({
+      environments: recoveryEnvironments,
+      placements,
+      disposeFailedPlacement: async (placement) => {
+        if (!placement.environmentId) {
+          return false;
+        }
+        const disposed = await options.workspaceOperations.run(placement.environmentId, () =>
+          retainedRecovery.dispose(placement),
+        );
+        if (disposed) {
+          environments.schedulePreparedRefill();
+        }
+        return disposed;
+      },
+    }),
     recoverPlacementMoves: (projection, environmentId) =>
       moveService.recoverSession(projection, environmentId),
   });
 
-  const dispatch = async (
+  const dispatchOnce = async (
     request: WorkerPlacementDispatchRequest,
     onTransition?: (placement: WorkerDispatchPlacement) => void,
     authorize?: WorkerPlacementAuthorization,
     signal?: AbortSignal,
+    coldSource?: Extract<WorkerDispatchPlacement, { state: "failed" }>,
   ): Promise<WorkerActiveDispatchPlacement> => {
     const assertCurrent = () => {
       signal?.throwIfAborted();
       authorize?.();
     };
+    const selectPrepared = coldSource === undefined;
     let placement: WorkerDispatchPlacement | undefined;
+    let selectedEnvironment:
+      | Awaited<ReturnType<WorkerEnvironmentService["createWithRequest"]>>
+      | undefined;
     try {
       signal?.throwIfAborted();
+      const failed = placements.get(request.sessionId);
+      if (
+        failed?.state === "failed" &&
+        !isFailedWorkerPlacementEnvironmentGone({
+          environmentService: environments,
+          placement: failed,
+        })
+      ) {
+        await retainedRecovery.recover(failed, {
+          assertCurrent,
+          signal,
+          operatorAuthority: request.operatorAuthority,
+          readNativeCredential: request.readNativeCredential,
+        });
+        assertCurrent();
+      }
+      recordWorkerPlacementStage(request.sessionId, "local_barrier_started");
       placement = await options.runLocalBarrier({
         sessionId: request.sessionId,
         sessionKey: request.sessionKey,
@@ -612,6 +655,8 @@ export function createWorkerPlacementDispatchService(options: WorkerPlacementDis
   });
 
   return {
+    canRecoverFailedPlacement: retainedRecovery.canRecover,
+    recoverFailedPlacement: retainedRecovery.recover,
     dispatch,
     forceDestroyEnvironment: abandonment.forceDestroyEnvironment,
     getEnvironmentAttachedSessionIds: (environmentId: string): readonly string[] =>

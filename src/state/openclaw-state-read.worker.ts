@@ -35,6 +35,7 @@ import {
 import {
   readKnownRepositoryGitHubPublicationPullRequestUrlsInDatabase,
   readRepositoryGitHubPublicationInDatabase,
+  readRepositoryGitHubPublicationBranchInDatabase,
 } from "../gateway/github-repository-publication-store.js";
 import { listCronStandingGrantsInDatabase } from "../gateway/operator-approval-standing-grants.js";
 import { listTerminalOperatorApprovalsInDatabase } from "../gateway/operator-approval-store.kernel.js";
@@ -512,6 +513,12 @@ serveOwnedWorkerTasks(
               return {
                 type: command.type,
                 row: readGitHubPublicationRequest(db, { requestId: command.requestId }),
+              };
+            }
+            if (command.type === "githubRepository.branch") {
+              return {
+                type: command.type,
+                branch: readRepositoryGitHubPublicationBranchInDatabase(db, command.input),
               };
             }
             if (command.type === "githubRepository.request") {

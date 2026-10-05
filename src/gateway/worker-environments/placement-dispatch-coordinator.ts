@@ -247,6 +247,11 @@ export function coordinateWorkerPlacementDispatch(
         await claimWait.settled;
       }
     },
+    canRecoverFailedPlacement: service.canRecoverFailedPlacement,
+    recoverFailedPlacement: (placement, authority) =>
+      runSessionOperation(placement.sessionId, authority.signal, () =>
+        service.recoverFailedPlacement(placement, authority),
+      ),
     isPlacementOperationInFlight: (sessionId) => operationsInFlight.has(sessionId),
     hasPendingPlacementLifecycleOperation: (sessionId) =>
       pendingOperations(sessionId).some((operation) => operation.kind !== "recovery"),

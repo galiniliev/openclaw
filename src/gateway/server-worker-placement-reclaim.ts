@@ -291,7 +291,7 @@ export function createGatewayWorkerPlacementReclaimBarriers(
   };
 
   const runFailedReclaimBarrier: WorkerPlacementReclaimBarriers["runFailedReclaimBarrier"] =
-    async ({ sessionId, sessionKey, agentId, authorize, reclaim }) => {
+    async ({ sessionId, sessionKey, agentId, authorize, reclaim, preserveCurrentAdmission }) => {
       const { sessionRuntime, target, resolveTarget, lifecycleIdentities, cancelAndDrain } =
         await resolveLifecycleContext({
           sessionId,
@@ -325,7 +325,7 @@ export function createGatewayWorkerPlacementReclaimBarriers(
           assertCurrent();
           // A preceding failed cleanup may already have returned this placement to local.
           // Its idempotent result must not cancel work admitted after that completed Stop.
-          if (params.placements.get(sessionId)?.state === "failed") {
+          if (params.placements.get(sessionId)?.state === "failed" && !preserveCurrentAdmission) {
             await cancelAndDrain(lifecycle.closeWorkAdmissions, assertCurrent);
           }
         },
