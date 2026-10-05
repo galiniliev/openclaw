@@ -299,6 +299,63 @@ describe("Codex node exec-server", () => {
     );
   });
 
+  it("dispatches the worker app-server through its exact Full placement owner", async () => {
+    const policy = createCodexNodeAppServerInvokePolicy();
+    const { placement } = createManagedWorkspaceInvocation(process.cwd());
+    const github = {
+      token: "synthetic-node-installation-token",
+      login: "worker-bot",
+      branch: "openclaw/session-worker",
+      host: "microsoft.ghe.com",
+      remoteUrl: "https://microsoft.ghe.com/bic/lobster.git",
+    };
+    const dispatched = { ok: true as const, payload: { started: true } };
+    const invokeNode = vi.fn(async () => dispatched);
+    const invokeNodeWithSessionFull: NonNullable<
+      OpenClawPluginNodeInvokePolicyContext["invokeNodeWithSessionFull"]
+    > = vi.fn(async ({ workspace, createParams }) => {
+      expect(workspace).toEqual({
+        workspaceDir: placement.cwd,
+        environmentId: placement.environmentId,
+        sessionId: placement.sessionId,
+        ownerEpoch: placement.ownerEpoch,
+        sessionKey: placement.sessionKey,
+      });
+      expect(createParams()).toEqual({ placement, authorization: "session-full", github });
+      return dispatched;
+    });
+    const context = {
+      nodeId: "cloud-worker-node",
+      command: policy.commands[0]!,
+      params: { placement, authorization: "session-full", github },
+      config: {},
+      risk: { level: "high", family: "codex.app-server" },
+      invokeNode,
+      invokeNodeWithSessionFull,
+    } satisfies OpenClawPluginNodeInvokePolicyContext;
+
+    await expect(policy.handle(context)).resolves.toEqual(dispatched);
+    expect(invokeNodeWithSessionFull).toHaveBeenCalledOnce();
+    expect(invokeNode).not.toHaveBeenCalled();
+
+    await expect(
+      policy.handle({ ...context, invokeNodeWithSessionFull: undefined }),
+    ).resolves.toMatchObject({ ok: false, code: "CODEX_NODE_APP_SERVER_APPROVAL_REQUIRED" });
+    await expect(
+      policy.handle({
+        ...context,
+        params: { placement: { cwd: placement.cwd }, authorization: "session-full" },
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "CODEX_NODE_APP_SERVER_WORKSPACE_INVALID" });
+    await expect(
+      policy.handle({
+        ...context,
+        params: { placement, authorization: "session-full", github: {} },
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "CODEX_NODE_APP_SERVER_GITHUB_BINDING_INVALID" });
+    expect(invokeNodeWithSessionFull).toHaveBeenCalledOnce();
+  });
+
   it("rejects unmanaged placement identities before launch and malformed or oversized frames", async () => {
     const command = createCodexNodeExecServerCommand();
     const frames = createNodeFrames();

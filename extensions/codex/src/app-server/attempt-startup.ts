@@ -92,6 +92,7 @@ export async function startCodexAttemptThread(params: {
   assertCurrent?: () => void;
   authority?: CodexBindingAuthority;
   attemptClientFactory: CodexAppServerClientFactory;
+  callerOwnedAttemptClient?: boolean;
   bindingStore: CodexAppServerBindingStore;
   runtime?: PluginRuntime;
   appServer: CodexAppServerRuntimeOptions;
@@ -260,7 +261,10 @@ export async function startCodexAttemptThread(params: {
                 return;
               }
               startupClientLeaseReleased = true;
-              if (params.attemptClientFactory === createIsolatedCodexAppServerClient) {
+              if (
+                params.callerOwnedAttemptClient ||
+                params.attemptClientFactory === createIsolatedCodexAppServerClient
+              ) {
                 activeStartupClient.close();
               } else {
                 releaseLeasedSharedCodexAppServerClient(activeStartupClient);
@@ -376,11 +380,8 @@ export async function startCodexAttemptThread(params: {
             releaseStartupResourcesOnTimeout = releaseStartupSandboxEnvironment;
             try {
               params.assertCurrent?.();
-              const sandboxEnvironmentRequired = shouldRequireCodexSandboxExecServerEnvironment({
-                sandbox: params.sandbox,
-                nativeToolSurfaceEnabled: params.nativeToolSurfaceEnabled,
-                sandboxExecServerEnabled: params.sandboxExecServerEnabled,
-              });
+              const sandboxEnvironmentRequired =
+                shouldRequireCodexSandboxExecServerEnvironment(params);
               startupSandboxEnvironment = sandboxEnvironmentRequired
                 ? await ensureCodexSandboxExecServerEnvironment({
                     client: activeStartupClient,
