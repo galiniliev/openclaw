@@ -82,7 +82,7 @@ async function runMode(mode: Mode): Promise<ModeResult> {
     },
   });
   const transport = Object.assign(new EventEmitter(), { stdin, stdout, stderr, exitCode: 0 });
-  const client = CodexAppServerClient.fromTransportForTests(transport);
+  const client = CodexAppServerClient.fromTransport(transport);
   const walks: WalkResult[] = [];
   try {
     for (let walk = 0; walk <= WARM_WALKS; walk++) {

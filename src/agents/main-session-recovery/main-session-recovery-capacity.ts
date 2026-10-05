@@ -1,7 +1,10 @@
 import { sleepWithAbort } from "../../infra/backoff.js";
 
 export type MainSessionRecoveryCapacity = {
-  acquire: (shouldContinue: () => boolean) => Promise<(() => void) | undefined>;
+  acquire: (
+    shouldContinue: () => boolean,
+    onWaiting?: () => Promise<void>,
+  ) => Promise<(() => void) | undefined>;
 };
 
 export function createMainSessionRecoveryCapacity(options: {
@@ -9,7 +12,10 @@ export function createMainSessionRecoveryCapacity(options: {
 }): MainSessionRecoveryCapacity {
   let active = 0;
   return {
-    async acquire(shouldContinue) {
+    async acquire(shouldContinue, onWaiting) {
+      if (active >= options.limit && shouldContinue()) {
+        await onWaiting?.();
+      }
       while (active >= options.limit && shouldContinue()) {
         await sleepWithAbort(50, undefined, { ref: false });
       }

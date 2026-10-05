@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { DatabaseSync } from "node:sqlite";
+import { isDeepStrictEqual } from "node:util";
 import { classifyAgentRunTerminalOutcome } from "@openclaw/normalization-core/agent-run-terminal-outcome";
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import type { Selectable } from "kysely";
@@ -20,8 +21,14 @@ import type { SessionPendingInputs } from "../../state/openclaw-agent-db.generat
 import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
 import { hasSessionPendingInputsSchema } from "../../state/openclaw-agent-pending-inputs-schema.js";
 import type { OpenClawConfig } from "../types.openclaw.js";
+import type { TurnRecoveryIntent } from "./main-session-recovery.types.js";
 import { getSessionKysely, type ResolvedTranscriptScope } from "./session-accessor.sqlite-scope.js";
 import { SessionPendingInputCustodyError } from "./session-pending-input-custody-error.js";
+
+export {
+  readPendingInputRecoveryIntent,
+  readOriginalPendingInputIntent,
+} from "./session-pending-input-recovery-intent.js";
 
 export type SessionPendingInputState = "queued" | "interrupted" | "cancelled";
 export type SessionPendingInput = {
@@ -37,7 +44,23 @@ export type SessionPendingInputPage = {
   nextBefore?: number;
 };
 export type SessionPendingInputRow = Selectable<SessionPendingInputs>;
+
 type PendingInputDatabase = Pick<OpenClawAgentDatabase, "db" | "path">;
+
+export function isOriginalInputRecovery(
+  original: TurnRecoveryIntent | undefined,
+  admitted: TurnRecoveryIntent | undefined,
+  input: Pick<SessionPendingInputRow, "input_id" | "run_id" | "idempotency_key">,
+): boolean {
+  return Boolean(
+    original &&
+    admitted &&
+    original.inputId === input.input_id &&
+    original.runId === input.run_id &&
+    original.idempotencyKey === input.idempotency_key &&
+    isDeepStrictEqual(original, admitted),
+  );
+}
 
 export type SessionPendingInputOwner = {
   inputId: string;

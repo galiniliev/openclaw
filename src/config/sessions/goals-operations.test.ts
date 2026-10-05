@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { awaitGateBeforeSettlement, createDeferred } from "../../../test/helpers/promise.js";
 import { trackSqliteStatementExecutions } from "../../../test/helpers/sqlite-statement-execution-counter.js";
 import { onSessionIdentityMutation } from "../../sessions/session-lifecycle-events.js";
 import {
@@ -20,9 +21,9 @@ import {
   loadTranscriptEvents,
   persistSessionTranscriptTurn,
   replaceSessionEntry,
-  replaceSessionEntrySync,
   upsertSessionEntryCore,
 } from "./session-accessor.js";
+import * as sqliteScope from "./session-accessor.sqlite-scope.js";
 import {
   resolveSqliteScope,
   runExclusiveSqliteSessionWrite,
@@ -201,11 +202,9 @@ describe("typed Goal operation persistence", () => {
         expectedSessionId: sessionId,
         operation: editOperation,
       });
-      expect.soft(editReads.counts.sessionNodeSelects).toBeLessThanOrEqual(3);
-      expect.soft(editReads.rowCounts.sessionNodeSelects).toBeGreaterThan(0);
-      expect
-        .soft(editReads.textBytes.sessionNodeSelects)
-        .toBeLessThan(3.5 * Buffer.byteLength(skillsSnapshot.prompt));
+      expect.soft(editReads.counts.sessionNodeSelects).toBe(0);
+      expect.soft(editReads.rowCounts.sessionNodeSelects).toBe(0);
+      expect.soft(editReads.textBytes.sessionNodeSelects).toBe(0);
     } finally {
       editReads.restore();
     }
@@ -254,28 +253,60 @@ describe("typed Goal operation persistence", () => {
     }
   });
 
-  it("rejects a session replacement made by the commit authority check", async () => {
+  it("rejects a session replacement after asynchronous scope preparation", async () => {
     const goal = await createSessionGoal({ ...scope(), objective: "original objective" });
     const before = loadSessionEntry(scope());
-    await expect(
-      mutateSessionGoal({
-        ...scope(),
-        expectedSessionId: sessionId,
-        operation: {
-          ...identity("edit-rebound"),
-          action: "edit",
-          goalId: goal.id,
-          objective: "must not commit",
-        },
-        assertCurrent: () => {
-          replaceSessionEntrySync(scope(), {
-            ...before!,
-            sessionId: "replacement-session",
-          });
-        },
-      }),
-    ).rejects.toMatchObject({ code: "session-rebound" });
-    expect(loadSessionEntry(scope())).toEqual(before);
+    const transcriptBefore = await loadTranscriptEvents(scope());
+    const entered = createDeferred();
+    const release = createDeferred();
+    const prepare = sqliteScope.prepareSqliteScope;
+    const preparation = vi
+      .spyOn(sqliteScope, "prepareSqliteScope")
+      .mockImplementationOnce(async (...args) => {
+        const result = await prepare(...args);
+        entered.resolve();
+        await release.promise;
+        return result;
+      });
+    const operation = {
+      ...identity("edit-rebound"),
+      action: "edit" as const,
+      goalId: goal.id,
+      objective: "must not commit",
+    };
+    const assertCurrent = vi.fn();
+    const mutation = mutateSessionGoal({
+      ...scope(),
+      expectedSessionId: sessionId,
+      operation,
+      assertCurrent,
+    });
+    void mutation.catch(() => {});
+    try {
+      await awaitGateBeforeSettlement(
+        entered.promise,
+        mutation,
+        "Goal mutation skipped scope preparation",
+      );
+      const replacement = { ...before!, sessionId: "replacement-session" };
+      await replaceSessionEntry(scope(), replacement);
+      release.resolve();
+      await expect(mutation).rejects.toMatchObject({ code: "session-rebound" });
+      expect(assertCurrent).toHaveBeenCalled();
+      expect(loadSessionEntry(scope())).toEqual(replacement);
+      expect(await loadTranscriptEvents(scope())).toEqual(transcriptBefore);
+      await expect(
+        lookupSessionGoalOperation({
+          ...scope(),
+          expectedSessionId: replacement.sessionId,
+          operation,
+        }),
+      ).resolves.toBeUndefined();
+    } finally {
+      release.resolve();
+      await mutation.catch(() => {});
+      preparation.mockRestore();
+    }
   });
 
   it("replays the original success after clear and reopening without recreating Goal or turn", async () => {

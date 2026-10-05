@@ -452,10 +452,11 @@ export async function persistGatewaySessionLifecycleEvent(params: {
         return null;
       }
       const patch: Partial<PersistedLifecycleSessionShape> &
-        Pick<SessionEntry, "providerReview" | "goal"> = derivePersistedSessionLifecyclePatch({
-        entry,
-        event: params.event,
-      });
+        Pick<SessionEntry, "providerReview" | "goal" | "goalPauseOrigin"> =
+        derivePersistedSessionLifecyclePatch({
+          entry,
+          event: params.event,
+        });
       if (providerReview && Object.keys(patch).length > 0) {
         patch.providerReview = providerReview.review;
       }
@@ -476,6 +477,9 @@ export async function persistGatewaySessionLifecycleEvent(params: {
           },
           endedAt,
         );
+      }
+      if (patch.goal?.status === "paused") {
+        patch.goalPauseOrigin = "terminal-error";
       }
       if (
         (phase === "error" || phase === "end") &&

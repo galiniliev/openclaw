@@ -1,4 +1,5 @@
 import type { InternalSessionEntry as SessionEntry } from "../../config/sessions.js";
+import { hasMainRestartRecoveryEpisode } from "../../config/sessions/main-session-recovery.types.js";
 import { mergeRestartRecoveryTerminalRunIds } from "../../config/sessions/restart-recovery-state.js";
 import { retryAsync } from "../../infra/retry.js";
 import { buildAgentRunTerminalOutcomeFromLifecycleEvent } from "../agent-run-terminal-outcome.js";
@@ -130,7 +131,7 @@ export function projectMainSessionRecoveryLifecycle(params: {
     | (Partial<MainRecoveryStateFields> &
         Pick<
           Partial<SessionEntry>,
-          "restartRecoveryDeliveryRunId" | "restartRecoveryTerminalRunIds"
+          "restartRecoveryDeliveryRunId" | "restartRecoveryTerminalRunIds" | "restartRecoveryGoal"
         >)
     | null;
   event: MainRecoveryLifecycleEvent;
@@ -142,7 +143,7 @@ export function projectMainSessionRecoveryLifecycle(params: {
   if (suppressed) {
     return { action: "suppress" };
   }
-  if (params.entry?.mainRestartRecovery?.tombstone) {
+  if (params.entry?.mainRestartRecovery?.tombstone || params.entry?.mainRestartRecovery?.pause) {
     // Keep the operator boundary while allowing unrelated lifecycle status to settle.
     return apply({
       ...params.snapshotPatch,
@@ -166,7 +167,7 @@ export function projectMainSessionRecoveryLifecycle(params: {
   if (terminal && !(terminal.reason === "cancelled" && terminal.stopReason === "restart")) {
     if (!matchesFence || !runId || !lifecycleGeneration) {
       // No terminal snapshot may settle a recovery row it cannot identify.
-      return params.entry?.mainRestartRecovery || runs?.length
+      return hasMainRestartRecoveryEpisode(params.entry) || runs?.length
         ? { action: "suppress" }
         : apply(patch);
     }
@@ -187,6 +188,17 @@ export function projectMainSessionRecoveryLifecycle(params: {
       lifecycleGeneration,
       params.currentLifecycleGeneration,
     );
+    if (
+      !params.entry?.restartRecoveryGoal &&
+      params.entry?.mainRestartRecovery?.turnIntent?.runId === runId &&
+      lifecycleGeneration === params.currentLifecycleGeneration &&
+      !foreground.hasCurrentOwner &&
+      (terminal.reason === "completed" || terminal.reason === "cancelled")
+    ) {
+      // A known terminal original turn during drain owns no unfinished no-goal intent.
+      // Restart cancellation was excluded above; older epochs cannot settle this owner.
+      return apply({ ...patch, ...buildMainSessionRecoveryClearPatch(params.entry) });
+    }
     if (
       params.entry?.abortedLastRun === true &&
       !foreground.claimId &&

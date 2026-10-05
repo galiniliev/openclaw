@@ -324,11 +324,13 @@ export function readExactSessionEntriesWithLifecycle(
     };
   }
   if (request.statusSelection) {
-    const { statuses, presenceOnly } = request.statusSelection;
+    const { statuses, presenceOnly, includeRestartRecovery } = request.statusSelection;
     const read = withOpenClawAgentDatabaseReadOnly(
       (database) => ({
         entries: presenceOnly ? [] : readSessionEntriesByStatus(database, statuses),
-        statusFound: presenceOnly ? hasSessionEntriesByStatus(database, statuses) : false,
+        statusFound: presenceOnly
+          ? hasSessionEntriesByStatus(database, statuses, { includeRestartRecovery })
+          : false,
       }),
       { ...request.database, env: request.env },
     );

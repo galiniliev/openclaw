@@ -27,6 +27,7 @@ import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import type { SkillWorkshopProposalRevisionConstraint } from "../../skills/workshop/types.js";
 import { isOperatorUiClient } from "../../utils/message-channel.js";
 import { resolveChatAbortDiagnosticReason } from "../chat-abort-diagnostics.js";
+import { captureGatewayTurnIssuerAdmission } from "../operator-run-authority.js";
 import type { ChatRunTiming } from "../server-chat-state.js";
 import {
   resolveSessionMutationAuthorization,
@@ -328,6 +329,14 @@ async function handleChatSendWithOptions(
       };
       const staged = await userTurnRecorder.stageApproved?.({
         runId: clientRunId,
+        turnIssuerAdmission: captureGatewayTurnIssuerAdmission({
+          authority: admission.operatorAuthority,
+          sessionKey: session.sessionTarget.storeKey,
+          sessionId: admittedSessionId,
+          lifecycleRevision: (admission.initialSessionEntry ?? entry)?.lifecycleRevision,
+          runId: clientRunId,
+          assertCurrent: assertCustodyCurrent,
+        }),
         assertCurrent: () => {
           admission.assertClientUploadAllowed?.();
           sessionMutationCommitGuard?.();
@@ -592,6 +601,9 @@ async function handleChatSendWithOptions(
     // post-ACK cleanupAdmittedRun must not race that persist with a discard.
     assertInputAdmissionCurrent();
     admission.setDiscardAbandonedPreparedMedia(undefined);
+    if (activeRunAbort.entry) {
+      activeRunAbort.entry.accepted = true;
+    }
     respond(true, ackPayload, undefined, { runId: clientRunId });
     context.recordClientActivity?.(client);
     const chatSendAckedAtMs = chatSendTiming?.ackedAtMs ?? performance.now();

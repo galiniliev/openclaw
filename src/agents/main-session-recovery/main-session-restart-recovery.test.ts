@@ -116,6 +116,7 @@ import {
 } from "./main-session-recovery-store.js";
 import { dispatchRestartRecoveryUntilStarted } from "./main-session-restart-dispatch-start.js";
 import { readStartupRecoveryWarning } from "./main-session-restart-recovery-diagnostics.js";
+import { registerUnresolvedEffectRecoveryCases } from "./main-session-restart-recovery-effect.test-harness.js";
 import { createRestartRecoveryTranscriptFixture } from "./main-session-restart-recovery-fixture.test-support.js";
 import { discoverRestartRecoveryStoreTargets } from "./main-session-restart-recovery-shared.js";
 import { recoverStore } from "./main-session-restart-recovery-store.js";
@@ -402,7 +403,7 @@ async function writeCompletedToolTranscript(sessionsDir: string, human = false):
   await writeTranscript(sessionsDir, "main-session", [
     makeUserMessage("run the tool", human ? { provenance: { kind: "external_user" } } : {}),
     { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "exec" }] },
-    makeToolResultMessage(),
+    makeToolResultMessage("done", { toolCallId: "call-1", toolName: "exec", isError: false }),
   ]);
 }
 
@@ -1544,12 +1545,14 @@ describe("main-session-restart-recovery", () => {
       [sessionKey]: { ...current, abortedLastRun: true },
     });
     expect(notice?.isCurrent?.({})).toBe(false);
+    await writeStore(sessionsDir, { [sessionKey]: current });
+    expect(notice?.isCurrent?.({})).toBe(true);
     await writeStore(sessionsDir, {
       [sessionKey]: { ...current, sessionId: "replacement-session" },
     });
     expect(notice?.isCurrent?.({})).toBe(false);
     await writeStore(sessionsDir, { [sessionKey]: current });
-    expect(notice?.isCurrent?.({})).toBe(true);
+    expect(notice?.isCurrent?.({})).toBe(false);
     dispatchSettlement.resolve();
     await waitForFast(() => expect(notice?.isCurrent?.({})).toBe(false));
   });
@@ -2225,6 +2228,8 @@ describe("main-session-restart-recovery", () => {
       { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "exec" }] },
       {
         role: "toolResult",
+        toolCallId: "call-1",
+        toolName: "exec",
         content: "Approval required (id stale, full stale-approval-id).",
         details: {
           status: "approval-pending",
@@ -2272,7 +2277,7 @@ describe("main-session-restart-recovery", () => {
     await writeTranscript(sessionsDir, "main-session", [
       { role: "user", content: "calculate the answer" },
       { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "calc" }] },
-      { role: "toolResult", content: "42" },
+      { role: "toolResult", toolCallId: "call-1", toolName: "calc", isError: false, content: "42" },
     ]);
 
     await expectRecovery({ started: 1, settled: 0, failed: 0, skipped: 0 }, {});
@@ -2544,7 +2549,7 @@ describe("main-session-restart-recovery", () => {
     await writeTranscript(sessionsDir, "main-session", [
       { role: "user", content: "calculate the answer" },
       { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "calc" }] },
-      { role: "toolResult", content: "42" },
+      { role: "toolResult", toolCallId: "call-1", toolName: "calc", isError: false, content: "42" },
     ]);
 
     await expectRecovery({ started: 1, settled: 0, failed: 0, skipped: 0 });
@@ -2790,9 +2795,10 @@ describe("main-session-restart-recovery", () => {
     await fs.mkdir(path.dirname(databasePath), { recursive: true });
     await fs.writeFile(databasePath, "not a sqlite database");
 
-    await expect(
-      markStartupOrphanedMainSessionsForRecovery({ stateDir: tmpDir }),
-    ).rejects.toThrow();
+    await expect(markStartupOrphanedMainSessionsForRecovery({ stateDir: tmpDir })).rejects.toThrow(
+      "file is not a database",
+    );
+    expect(await fs.readFile(databasePath, "utf8")).toBe("not a sqlite database");
   });
 
   it("keeps a live session running after delayed stale registration", async () => {
@@ -4090,12 +4096,14 @@ describe("main-session-restart-recovery", () => {
               "abort",
               () => {
                 // A start callback that loses the deadline race cannot reclaim ownership.
-                options?.onExecutionStarted?.();
                 const abortError =
                   signal.reason instanceof Error
                     ? signal.reason
                     : new Error("execution-start wait aborted");
-                void Promise.resolve(options?.onSignalAbort?.()).then(
+                (async () => {
+                  await options?.onExecutionStarted?.();
+                  await options?.onSignalAbort?.();
+                })().then(
                   () => reject(abortError),
                   () => reject(abortError),
                 );
@@ -4326,7 +4334,7 @@ describe("main-session-restart-recovery", () => {
     expect(completed?.pendingFinalDelivery).toBeUndefined();
   });
 
-  it("resumes with restart-safe tools while a terminal provider outcome remains unknown", async () => {
+  it("pauses the whole session while a terminal provider outcome remains unknown", async () => {
     const { sessionsDir, storePath, sessionKey } = await makeMainSessionFixture({
       sessionKey: "agent:main:discord:direct:123",
       restartRecoveryDeliveryReceiptState: "terminal-pending",
@@ -4339,16 +4347,11 @@ describe("main-session-restart-recovery", () => {
       { role: "user", content: "do the thing", idempotencyKey: "discord-message-1" },
     ]);
 
-    await expectRecovery({ started: 1, settled: 0, failed: 0, skipped: 0 });
-
-    expect(callGateway).toHaveBeenCalledOnce();
-    expect(gatewayParams()).toMatchObject({ forceRestartSafeTools: true });
-    expect(sendRecoveryNotice).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({
-        idempotencyKey: expect.stringMatching(/:resumed-notice$/),
-      }),
-    );
-    expect(loadSessionEntry({ sessionKey, storePath })?.status).toBe("running");
+    await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1 });
+    expect(callGateway).not.toHaveBeenCalled();
+    expect(loadSessionEntry({ sessionKey, storePath })?.mainRestartRecovery?.pause).toMatchObject({
+      reason: "unverifiable-external-effect",
+    });
   });
 
   it("reconciles a receipt delivered during a restart-recovery continuation", async () => {
@@ -4441,13 +4444,21 @@ describe("main-session-restart-recovery", () => {
     },
   ])(
     "resumes safely when terminal completion cannot reconcile $label",
-    async ({ sourceTurnId, messages }) => {
+    async ({ label, sourceTurnId, messages }) => {
       const { sessionsDir, storePath, sessionKey } = await makeDeliveredReceiptFixture(
         "message-call-1",
         sourceTurnId,
       );
       await writeTranscript(sessionsDir, "main-session", messages);
 
+      if (label === "unfinished sibling tool work") {
+        await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1 });
+        expect(callGateway).not.toHaveBeenCalled();
+        expect(
+          loadSessionEntry({ sessionKey, storePath })?.mainRestartRecovery?.pause?.reason,
+        ).toBe("unverifiable-external-effect");
+        return;
+      }
       await expectRecovery({ started: 1, settled: 0, failed: 0, skipped: 0 });
 
       expect(callGateway).toHaveBeenCalledOnce();
@@ -4854,46 +4865,13 @@ describe("main-session-restart-recovery", () => {
     expect(gatewayParams()).not.toMatchObject({ forceRestartSafeTools: true });
   });
 
-  it.each([
-    { label: "inherited full access", mode: "full", permissionMode: undefined, restricted: false },
-    { label: "explicit guarded access", mode: "full", permissionMode: "guarded", restricted: true },
-  ] as const)(
-    "continues interrupted work with $label",
-    async ({ mode, permissionMode, restricted }) => {
-      const sessionsDir = await writePreparedMainSessionTranscript(
-        [
-          { role: "user", content: "do the thing" },
-          createAssistantToolCallMessage([
-            { type: "text", text: "Running the check now." },
-            {
-              type: "toolCall",
-              id: "call-exec-1",
-              name: "exec",
-              arguments: { code: "await shell({command: 'true'})" },
-            },
-          ]),
-        ],
-        { permissionMode, restartRecoveryForceSafeTools: true },
-      );
+  registerUnresolvedEffectRecoveryCases({
+    writePreparedMainSessionTranscript,
+    expectRecovery,
+    loadTestTranscript,
+  });
 
-      await expectRecovery(
-        { started: 1, settled: 0, failed: 0, skipped: 0 },
-        { tools: { exec: { mode } } },
-      );
-      expect(callGateway).toHaveBeenCalledTimes(1);
-      expect(gatewayParams().forceRestartSafeTools === true).toBe(restricted);
-      expect(gatewayParams()).not.toHaveProperty("forceCodeModeTools");
-      expect(gatewayParams().message).toContain("unknown outcome");
-      expect(
-        loadSessionEntry({
-          storePath: path.join(sessionsDir, "sessions.json"),
-          sessionKey: "agent:main:main",
-        })?.restartRecoveryForceSafeTools === true,
-      ).toBe(restricted);
-    },
-  );
-
-  it("reports an interrupted native tool outcome as unknown", async () => {
+  it("pauses a native tool whose result was synthesized as missing", async () => {
     await writePreparedMainSessionTranscript([
       { role: "user", content: "run the command" },
       createAssistantToolCallMessage([
@@ -4908,14 +4886,11 @@ describe("main-session-restart-recovery", () => {
         isError: true,
       },
     ]);
-
-    await expectRecovery({ started: 1, settled: 0, failed: 0, skipped: 0 });
-    expect(gatewayParams().message).toContain("unknown outcome");
-    expect(gatewayParams().message).toContain("never claim completion or success");
-    expect(gatewayParams()).toMatchObject({ forceRestartSafeTools: true });
+    await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1 });
+    expect(callGateway).not.toHaveBeenCalled();
   });
 
-  it("keeps a dangling side-effecting call in an aborted tail restricted", async () => {
+  it("pauses a dangling side-effecting call in an aborted tail", async () => {
     await writePreparedMainSessionTranscript([
       { role: "user", content: "do the thing" },
       {
@@ -4929,9 +4904,8 @@ describe("main-session-restart-recovery", () => {
       },
     ]);
 
-    await expectRecovery({ started: 1, settled: 0, failed: 0, skipped: 0 });
-    expect(callGateway).toHaveBeenCalledTimes(1);
-    expect(gatewayParams()).toMatchObject({ forceRestartSafeTools: true });
+    await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1 });
+    expect(callGateway).not.toHaveBeenCalled();
   });
 
   it("resumes an interrupted replay-safe tool call without restricting tools", async () => {
@@ -5086,20 +5060,18 @@ describe("main-session-restart-recovery", () => {
         replaySafe: true,
       },
     },
-  ])("resumes a Code Mode wait safely after a $label", async ({ checkpoint }) => {
+  ])("pauses a Code Mode wait without a verified matching $label", async ({ checkpoint }) => {
     await writePreparedMainSessionTranscript([
       { role: "user", content: "do the thing" },
       codeModeCheckpointMessage("wait", checkpoint),
       codeModeWaitCallMessage(),
     ]);
 
-    await expectRecovery({ started: 1, settled: 0, failed: 0, skipped: 0 });
-    expect(callGateway).toHaveBeenCalledOnce();
-    expect(gatewayParams()).toMatchObject({ forceRestartSafeTools: true });
-    expect(gatewayParams()).not.toHaveProperty("forceCodeModeTools");
+    await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1 });
+    expect(callGateway).not.toHaveBeenCalled();
   });
 
-  it("resumes a mixed Code Mode wait and side-effecting tool tail safely", async () => {
+  it("pauses a mixed Code Mode wait and unresolved write without dispatching", async () => {
     await writePreparedMainSessionTranscript([
       { role: "user", content: "do the thing" },
       codeModeCheckpointMessage("exec"),
@@ -5119,10 +5091,8 @@ describe("main-session-restart-recovery", () => {
       ]),
     ]);
 
-    await expectRecovery({ started: 1, settled: 0, failed: 0, skipped: 0 });
-    expect(callGateway).toHaveBeenCalledOnce();
-    expect(gatewayParams()).toMatchObject({ forceRestartSafeTools: true });
-    expect(gatewayParams()).not.toHaveProperty("forceCodeModeTools");
+    await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1 });
+    expect(callGateway).not.toHaveBeenCalled();
   });
 });
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

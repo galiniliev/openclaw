@@ -96,7 +96,7 @@ describe("scheduled restart during gateway suspension", () => {
       skipCooldown: true,
     });
 
-    const prepared = prepareSuspension("request-restart-delay", {
+    const prepared = await prepareSuspension("request-restart-delay", {
       createSuspensionId: () => "suspension-restart-delay",
     });
     expect(prepared.status).toBe("ready");
@@ -117,7 +117,7 @@ describe("scheduled restart during gateway suspension", () => {
     const resumeScheduling = vi.fn();
     process.on("SIGUSR2", restartHandler);
     try {
-      const prepared = prepareSuspension("request-targeted-restart", {
+      const prepared = await prepareSuspension("request-targeted-restart", {
         resumeScheduling,
         createSuspensionId: () => "suspension-targeted-restart",
       });
@@ -145,7 +145,7 @@ describe("scheduled restart during gateway suspension", () => {
 
   it("preserves prepared suspension when targeted restart delivery fails", async () => {
     const resumeScheduling = vi.fn();
-    const prepared = prepareSuspension("request-failed-targeted-restart", {
+    const prepared = await prepareSuspension("request-failed-targeted-restart", {
       resumeScheduling,
       createSuspensionId: () => "suspension-failed-targeted-restart",
     });
@@ -192,7 +192,7 @@ describe("scheduled restart during gateway suspension", () => {
     });
     await vi.advanceTimersByTimeAsync(0);
 
-    const prepared = prepareSuspension("request-restart-preparing");
+    const prepared = await prepareSuspension("request-restart-preparing");
     expect(prepared).toMatchObject({
       status: "busy",
       reason: "gateway-draining",
@@ -204,7 +204,7 @@ describe("scheduled restart during gateway suspension", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(countRestartSignalEmits(emitSpy.mock.calls)).toBe(1);
 
-    expect(prepareSuspension("request-after-restart-signal")).toMatchObject({
+    expect(await prepareSuspension("request-after-restart-signal")).toMatchObject({
       status: "busy",
       reason: "gateway-draining",
     });
@@ -245,7 +245,9 @@ describe("scheduled restart during gateway suspension", () => {
 
   it("cancels a due restart waiting behind a prepared suspension", async () => {
     const emitSpy = vi.spyOn(process, "emit");
-    expect(prepareSuspension("request-reset-waiting-restart")).toMatchObject({ status: "ready" });
+    expect(await prepareSuspension("request-reset-waiting-restart")).toMatchObject({
+      status: "ready",
+    });
     scheduleGatewayRestart({ delayMs: 0, skipCooldown: true });
     await vi.advanceTimersByTimeAsync(0);
     expect(countRestartSignalEmits(emitSpy.mock.calls)).toBe(0);
@@ -288,10 +290,10 @@ describe("scheduled restart during gateway suspension", () => {
     expect(isGatewayWorkAdmissionClosed()).toBe(false);
   });
 
-  it("resumes and clears a prepared suspension during lifecycle reset", () => {
+  it("resumes and clears a prepared suspension during lifecycle reset", async () => {
     const resumeScheduling = vi.fn();
     expect(
-      prepareSuspension("request-lifecycle-reset", {
+      await prepareSuspension("request-lifecycle-reset", {
         resumeScheduling,
         createSuspensionId: () => "suspension-lifecycle-reset",
       }),

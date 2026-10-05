@@ -24,6 +24,7 @@ export type SessionEntryStatus = NonNullable<SessionEntry["status"]>;
 export type SessionEntryStatusSelection = {
   statuses: readonly SessionEntryStatus[];
   presenceOnly?: boolean;
+  includeRestartRecovery?: boolean;
 };
 
 export type SessionTranscriptContextVersion = {

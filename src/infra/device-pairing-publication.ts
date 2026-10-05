@@ -19,7 +19,7 @@ type Publication = {
   blocked: boolean;
   mutation?: object;
   complete: boolean;
-  rows: Map<string, DevicePairingBinding | null>;
+  rows: Map<string, DevicePairingBindingFact>;
   pending: Set<() => void>;
 };
 
@@ -85,7 +85,7 @@ export function captureDevicePairingPublication(admission: OpenClawStateDatabase
   const epoch = captured.epoch;
   const install = (rows: readonly DevicePairingBindingFact[]) => {
     for (const row of rows) {
-      captured.rows.set(row.deviceId, row.binding ? { ...row.binding } : null);
+      captured.rows.set(row.deviceId, { ...row, binding: row.binding ? { ...row.binding } : null });
     }
   };
   return {
@@ -163,10 +163,10 @@ export function captureDevicePairingPublication(admission: OpenClawStateDatabase
 }
 
 /** Unknown facts suppress use without declaring an otherwise live node revoked. */
-export function getPublishedPairedDeviceBinding(
+function readPublishedPairing(
   deviceId: string,
   baseDir?: string,
-): DevicePairingBinding | null {
+): DevicePairingBindingFact | undefined {
   const path = resolveOpenClawStateSqlitePath(
     baseDir ? { ...process.env, OPENCLAW_STATE_DIR: baseDir } : process.env,
   );
@@ -181,6 +181,25 @@ export function getPublishedPairedDeviceBinding(
   ) {
     throw new Error("Device pairing authority requires a current worker publication");
   }
-  const binding = publication.rows.get(deviceId);
+  return publication.rows.get(deviceId);
+}
+
+export function getPublishedPairedDeviceBinding(
+  deviceId: string,
+  baseDir?: string,
+): DevicePairingBinding | null {
+  const binding = readPublishedPairing(deviceId, baseDir)?.binding;
   return binding ? { ...binding } : null;
+}
+
+/** Reads the same committed pairing publication without a main-thread database lookup. */
+export function getPublishedOperatorPairingIdentity(
+  deviceId: string,
+  baseDir?: string,
+): string | null {
+  const row = readPublishedPairing(deviceId, baseDir);
+  if (row && row.operatorIdentity === undefined) {
+    throw new Error("Operator pairing authority requires a current worker publication");
+  }
+  return row?.operatorIdentity ?? null;
 }

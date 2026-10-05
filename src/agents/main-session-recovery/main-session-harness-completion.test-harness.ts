@@ -377,7 +377,7 @@ export function registerHarnessCompletionRecoveryCases(
         {
           role: "assistant",
           stopReason: "toolUse",
-          content: [{ type: "toolCall", id: "status-1", name: "session_status" }],
+          content: [{ type: "toolCall", id: "status-1", name: "sessions_list" }],
         },
       ]);
       await expectRecovery({ started: 0, settled: 0, failed: 0, skipped: 1 });
@@ -428,7 +428,7 @@ export function registerHarnessCompletionRecoveryCases(
         {
           role: "assistant",
           stopReason: "toolUse",
-          content: [{ type: "toolCall", id: "status-current", name: "session_status" }],
+          content: [{ type: "toolCall", id: "status-current", name: "sessions_list" }],
         },
       ]);
       if (source === "external_user") {
@@ -480,7 +480,13 @@ export function registerHarnessCompletionRecoveryCases(
         },
       },
       { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "exec" }] },
-      { role: "toolResult", content: "done" },
+      {
+        role: "toolResult",
+        toolCallId: "call-1",
+        toolName: "exec",
+        isError: false,
+        content: "done",
+      },
     ]);
 
     await expectRecovery({ started: 1, settled: 0, failed: 0, skipped: 0 });

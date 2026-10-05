@@ -1,3 +1,4 @@
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { sql } from "kysely";
 import {
   executeSqliteQuerySync,
@@ -7,8 +8,10 @@ import {
 } from "../../infra/kysely-sync.js";
 import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db-contract.js";
 import type { DB as OpenClawAgentKyselyDatabase } from "../../state/openclaw-agent-db.generated.js";
+import { isInternalSessionEffectsKey } from "./internal-session-key.js";
 import type {
   SessionEntryStatus,
+  SessionEntryStatusSelection,
   SessionEntrySummary,
 } from "./session-accessor.sqlite-contract.js";
 import {
@@ -27,7 +30,7 @@ import {
   type SessionEntrySnapshotRow,
 } from "./session-entry-snapshots.js";
 import { projectCanonicalSessionEntryShape } from "./store-entry-shape.js";
-import type { SessionEntry } from "./types.js";
+import type { InternalSessionEntry } from "./types.js";
 
 export function selectSessionEntryRows(
   database: Pick<OpenClawAgentDatabase, "db">,
@@ -89,7 +92,7 @@ export function parseSessionEntryJson(
   } & SqliteSessionOwnerRow &
     SessionEntrySnapshotRow,
   projection: "full" | "list" = "full",
-): SessionEntry | null {
+): InternalSessionEntry | null {
   const record = parseSqliteSessionEntryRecord(row);
   if (!record) {
     return null;
@@ -108,18 +111,35 @@ export function parseSessionEntryJson(
 export function hasSessionEntriesByStatus(
   database: Pick<OpenClawAgentDatabase, "db">,
   statuses: readonly SessionEntryStatus[],
+  options: Pick<SessionEntryStatusSelection, "includeRestartRecovery"> = {},
 ): boolean {
   const selectedStatuses = new Set(statuses);
   const projectedStatuses = [...new Set(statuses.map(normalizeStatus))].filter(
     (status): status is SessionEntryStatus => status !== null,
   );
-  if (projectedStatuses.length === 0) {
+  if (projectedStatuses.length === 0 && !options.includeRestartRecovery) {
     return false;
   }
-  const query = selectSessionEntryRows(database, "list").where("status", "in", projectedStatuses);
+  const query = selectSessionEntryRows(database, "list").where((eb) =>
+    eb.or([
+      ...(projectedStatuses.length > 0 ? [eb("status", "in", projectedStatuses)] : []),
+      ...(options.includeRestartRecovery
+        ? [
+            /* kysely-allow-raw: preselect persisted recovery metadata; canonical parsing and the recovery owner still validate its meaning. */
+            sql<boolean>`CASE WHEN json_valid(entry_json) THEN json_extract(entry_json, '$.mainRestartRecovery.queuedInputsPending') = 1 OR json_type(entry_json, '$.restartRecoveryGoal') = 'object' ELSE 0 END`,
+          ]
+        : []),
+    ]),
+  );
   for (const row of iterateSqliteQuerySync(database.db, query)) {
     const entry = parseSessionEntryJson(row, "list");
-    if (entry?.status && selectedStatuses.has(entry.status)) {
+    if (
+      (entry?.status && selectedStatuses.has(entry.status)) ||
+      (options.includeRestartRecovery &&
+        !isInternalSessionEffectsKey(row.session_key) &&
+        (entry?.mainRestartRecovery?.queuedInputsPending === true ||
+          isRecord(entry?.restartRecoveryGoal)))
+    ) {
       return true;
     }
   }

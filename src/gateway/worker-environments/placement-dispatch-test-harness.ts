@@ -76,6 +76,8 @@ export function createHarness(
     workspacePath?: string;
     resolveWorkspace?: DispatchOptions["resolveWorkspace"];
     withPreparedRecovery?: DispatchOptions["withPreparedRecovery"];
+    prepareRetainedRecoveryCheckpoint?: DispatchOptions["prepareRetainedRecoveryCheckpoint"];
+    prepareFailedDisposalCheckpoint?: DispatchOptions["prepareFailedDisposalCheckpoint"];
     requiresNodeEnrollment?: boolean;
     priorWorkspaceResultConflict?: { paths: string[]; stagedResultRef: string };
     priorWorkspaceResultConflictLookup?: WorkspaceResultConflictLookup;
@@ -123,6 +125,7 @@ export function createHarness(
   };
   const placements: WorkerDispatchPlacementStore = {
     ...placementStore,
+    bindPreparedEnvironment: (...args) => placementStore.bindPreparedEnvironment(...args),
     closeWorkerTurnToolState: (claim) => placementStore.closeWorkerTurnToolState(claim),
     beginPlacementMove: (params) => {
       const begun = placementStore.beginPlacementMove(params);
@@ -565,6 +568,8 @@ export function createHarness(
       }),
     }),
     ...(options.withPreparedRecovery ? { withPreparedRecovery: options.withPreparedRecovery } : {}),
+    prepareRetainedRecoveryCheckpoint: options.prepareRetainedRecoveryCheckpoint,
+    prepareFailedDisposalCheckpoint: options.prepareFailedDisposalCheckpoint,
     ...(options.prepareAcceptedWorkspacePublication
       ? { prepareAcceptedWorkspacePublication: options.prepareAcceptedWorkspacePublication }
       : {}),

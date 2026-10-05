@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createDeferred } from "../../../test/helpers/promise.js";
+import { awaitGateBeforeSettlement, createDeferred } from "../../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import type { InternalSessionEntry } from "../../config/sessions.js";
 import {
@@ -11,6 +11,7 @@ import {
 } from "../../config/sessions/session-accessor.js";
 import { callGateway } from "../../gateway/call.js";
 import { resetAgentEventsForTest } from "../../infra/agent-events.js";
+import { resolveProjectedAgentRunProgressState } from "../../infra/agent-run-registry.js";
 import * as gatewayWorkAdmission from "../../process/gateway-work-admission.js";
 import {
   getActiveGatewayRootWorkCount,
@@ -22,6 +23,7 @@ import {
   interruptSessionWorkAdmissions,
   runExclusiveSessionLifecycleMutation,
 } from "../../sessions/session-lifecycle-admission.js";
+import { onSessionLifecycleEvent } from "../../sessions/session-lifecycle-events.js";
 import { withEnvAsync } from "../../test-utils/env.js";
 import { cleanupSessionStateForTest } from "../../test-utils/session-state-cleanup.js";
 import { waitForFast } from "../subagent-test-fixtures.test-helpers.js";
@@ -111,7 +113,13 @@ describe("startup recovery admission", () => {
     for (const message of [
       { role: "user", content: "run the tool" },
       { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "exec" }] },
-      { role: "toolResult", content: "done" },
+      {
+        role: "toolResult",
+        toolCallId: "call-1",
+        toolName: "exec",
+        isError: false,
+        content: "done",
+      },
     ]) {
       await appendTranscriptMessage(
         {
@@ -171,14 +179,38 @@ describe("startup recovery admission", () => {
     }
   });
 
-  it.each(["resume", "interrupt"] as const)(
+  it.each(["resume", "interrupt", "manual pause", "hold"] as const)(
     "owns startup recovery while waiting for capacity and releases on %s",
     async (action) => {
-      const { sessionsDir, storePath, sessionKey } = await makeMainSessionFixture();
+      const captured = action === "manual pause" || action === "hold";
+      const { sessionsDir, storePath, sessionKey } = await makeMainSessionFixture(
+        captured
+          ? {
+              lifecycleRevision: "capacity-lifecycle",
+              goal: {
+                schemaVersion: 1,
+                id: "capacity-goal",
+                objective: "Finish the accepted work",
+                status: "active",
+                createdAt: 1,
+                updatedAt: 1,
+                tokenStart: 0,
+                tokensUsed: 0,
+                continuationTurns: 0,
+              },
+            }
+          : {},
+      );
       await writeCompletedToolTranscript(sessionsDir);
       const capacity = createMainSessionRecoveryCapacity({ limit: 1 });
       const releaseCapacity = await capacity.acquire(() => true);
       const capacityEntered = createDeferred();
+      const waitingPublished = createDeferred();
+      const unsubscribe = onSessionLifecycleEvent((event) => {
+        if (event.reason === "run-capacity" && event.sessionKey === sessionKey) {
+          waitingPublished.resolve();
+        }
+      });
       const acquire = capacity.acquire.bind(capacity);
       const acquireSpy = vi.spyOn(capacity, "acquire").mockImplementation((...args) => {
         const waiting = acquire(...args);
@@ -195,8 +227,30 @@ describe("startup recovery admission", () => {
         await Promise.race([capacityEntered.promise, recovery]);
         expect(acquireSpy).toHaveBeenCalledOnce();
         expect(
+          loadSessionEntry({ sessionKey, storePath })?.mainRestartRecovery?.chargedAttempts,
+        ).toBe(0);
+        expect(
           loadSessionEntry({ sessionKey, storePath })?.mainRestartRecovery?.reservation,
-        ).toBeDefined();
+        ).toBeUndefined();
+        await awaitGateBeforeSettlement(
+          waitingPublished.promise,
+          recovery,
+          "recovery settled before publishing its capacity wait",
+        );
+        expect(
+          loadSessionEntry({ sessionKey, storePath })?.mainRestartRecovery?.capacityWait,
+        ).toMatchObject({
+          runId: expect.any(String),
+          lifecycleGeneration: expect.any(String),
+          sinceMs: expect.any(Number),
+        });
+        expect(
+          resolveProjectedAgentRunProgressState({
+            sessionKeys: [sessionKey],
+            sessionId: "main-session",
+            agentId: "main",
+          }),
+        ).toBe("queued");
         const ownerReleased = getSessionWorkAdmissionOwnerRelease({
           scope: storePath,
           identities: [sessionKey, "main-session"],
@@ -221,6 +275,25 @@ describe("startup recovery admission", () => {
           expect(
             loadSessionEntry({ sessionKey, storePath })?.mainRestartRecovery?.reservation,
           ).toBeUndefined();
+        } else if (captured) {
+          const current = loadSessionEntry({ sessionKey, storePath })!;
+          current.goal = { ...current.goal!, status: "paused" };
+          current.goalPauseOrigin = action === "manual pause" ? "manual" : "recovery-hold";
+          if (action === "hold") {
+            current.mainRestartRecovery!.pause = {
+              reason: "unverifiable-external-effect",
+              pausedAtMs: Date.now(),
+              goalId: "capacity-goal",
+            };
+          }
+          await replaceSessionEntry({ sessionKey, storePath }, current);
+          releaseCapacity?.();
+          await expect(recovery).resolves.toMatchObject({ started: 0, failed: 0, skipped: 1 });
+          expect(callGateway).not.toHaveBeenCalled();
+          expect(loadSessionEntry({ sessionKey, storePath })).toMatchObject({
+            goal: { status: "paused" },
+            mainRestartRecovery: { chargedAttempts: 0 },
+          });
         } else {
           releaseCapacity?.();
           await expect(recovery).resolves.toMatchObject({ started: 1, failed: 0 });
@@ -237,6 +310,7 @@ describe("startup recovery admission", () => {
           }),
         ).toBeUndefined();
       } finally {
+        unsubscribe();
         acquireSpy.mockRestore();
         keepRunning = false;
         releaseCapacity?.();

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { GATEWAY_OWNER_PROFILE_ID } from "../../packages/gateway-protocol/src/schema/users.js";
 import {
@@ -8,9 +9,12 @@ import {
 import {
   prepareOperatorModelPolicy,
   readOperatorModelPolicyMembership,
-  type PreparedOperatorModelPolicy,
+  readOperatorModelPolicyCeilings,
+  intersectOperatorModelPolicies,
 } from "../agents/operator-model-policy.js";
+import type { GoalRecoveryIssuerBasis } from "../config/sessions/main-session-recovery.types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { getPublishedOperatorPairingIdentity } from "../infra/device-pairing-publication.js";
 import { getProcessGatewayPluginMetadataSnapshot } from "../plugins/current-plugin-metadata-state.js";
 import { intersectOperatorScopes, roleScopesAllow } from "../shared/operator-scope-compat.js";
 import { onUserProfilesChanged } from "../state/user-profile-events.js";
@@ -19,14 +23,19 @@ import {
   onGatewayDeviceSourceRevoked,
   readGatewayDeviceSourceAuthority,
   readGatewayDeviceSourceIdentity,
+  readGatewayDeviceRecoverySource,
   retainGatewayDeviceRevocation,
 } from "./device-revocation.js";
+import { factoryGitHubDispatchCredentialReader } from "./factory-github-proof.js";
 import {
   onOperatorRolePolicyChanged,
   resolveGatewayOperatorRoleActor,
   resolveOperatorRolePolicyForAssignment,
 } from "./operator-role-policy.js";
-import { sourceRolePolicy } from "./operator-role-source-policy.js";
+import {
+  sourceRolePolicy,
+  resolveOperatorRoleSourcePolicyGeneration,
+} from "./operator-role-source-policy.js";
 import type { GatewayClient, GatewayRequestContext } from "./server-methods/shared-types.js";
 
 type OperatorSource = {
@@ -106,21 +115,6 @@ function prepareRunRolePolicy(
     : undefined;
 }
 
-function intersectRunModelPolicy(
-  original: PreparedOperatorModelPolicy | undefined,
-  current: PreparedOperatorModelPolicy | undefined,
-): PreparedOperatorModelPolicy | undefined {
-  return original &&
-    current &&
-    readOperatorModelPolicyMembership(original) !== readOperatorModelPolicyMembership(current)
-    ? Object.freeze({
-        models: Object.freeze(current.models.filter(original.allows)),
-        allows: (ref: Parameters<typeof original.allows>[0]) =>
-          original.allows(ref) && current.allows(ref),
-      })
-    : (current ?? original);
-}
-
 /** Bridge a prepared linked principal while retaining its exact channel admission capability. */
 export function captureChannelOperatorRunAuthority(input: {
   profileId: string;
@@ -177,7 +171,7 @@ export function captureChannelOperatorRunAuthority(input: {
       const metadata = getProcessGatewayPluginMetadataSnapshot();
       if (cfg !== modelPolicyConfig || metadata !== modelPolicyMetadata) {
         const current = prepareModelPolicy(cfg, metadata);
-        modelPolicy = intersectRunModelPolicy(originalModelPolicy, current);
+        modelPolicy = intersectOperatorModelPolicies(originalModelPolicy, current);
         modelPolicyConfig = cfg;
         modelPolicyMetadata = metadata;
       }
@@ -294,6 +288,33 @@ export async function captureGatewayOperatorRunAuthority(input: {
       : client.internal?.operatorAccessAuthority;
   const sourceAuthorities = [sourceAuthority, params.invocationAuthority];
   const scopes = Object.freeze([...(client.connect.scopes ?? [])]);
+  const capturedAuthPolicy = client.authPolicy;
+  const authPrincipal: GoalRecoveryIssuerBasis["authPrincipal"] | undefined =
+    capturedAuthPolicy && {
+      role: capturedAuthPolicy.role,
+      ...(capturedAuthPolicy.verifiedIdentity === undefined
+        ? {}
+        : { verifiedIdentity: capturedAuthPolicy.verifiedIdentity }),
+      authMethod: capturedAuthPolicy.authMethod,
+      ...(capturedAuthPolicy.authModeOverride === undefined
+        ? {}
+        : { authModeOverride: capturedAuthPolicy.authModeOverride }),
+      ...(capturedAuthPolicy.browserOrigin === undefined
+        ? {}
+        : {
+            browserOrigin: {
+              ...(capturedAuthPolicy.browserOrigin.requestHost === undefined
+                ? {}
+                : { requestHost: capturedAuthPolicy.browserOrigin.requestHost }),
+              ...(capturedAuthPolicy.browserOrigin.origin === undefined
+                ? {}
+                : { origin: capturedAuthPolicy.browserOrigin.origin }),
+              ...(capturedAuthPolicy.browserOrigin.isLocalClient === undefined
+                ? {}
+                : { isLocalClient: capturedAuthPolicy.browserOrigin.isLocalClient }),
+            },
+          }),
+    };
   const sourceOwners: OperatorSource["owners"] = [
     gatewayContext ?? params.context,
     resolveGatewayContext,
@@ -348,7 +369,7 @@ export async function captureGatewayOperatorRunAuthority(input: {
         policy: resolveCurrentRole(cfg)?.modelPolicy,
         manifestPlugins: metadata ?? [],
       });
-      modelPolicy = intersectRunModelPolicy(original, current);
+      modelPolicy = intersectOperatorModelPolicies(original, current);
       modelPolicyConfig = cfg;
       modelPolicyMetadata = metadata;
     }
@@ -474,6 +495,12 @@ export async function captureGatewayOperatorRunAuthority(input: {
     const capturedProfile = assertProfileCurrent();
     const capturedAssignedRole = capturedProfile.assignedRole;
     const capturedGithubLogin = capturedProfile.githubLogin ?? null;
+    let capturedAliasBindingIds: readonly string[] | undefined;
+    try {
+      capturedAliasBindingIds = preparedProfile.emailBindingIds;
+    } catch {
+      // Legacy unattributed profiles cannot supply a durable continuation issuer.
+    }
     const capturedRole = structuredClone(resolveCurrentRole());
     const capturedSourcePolicy = sourceRolePolicy(capturedRole);
     if (
@@ -538,6 +565,85 @@ export async function captureGatewayOperatorRunAuthority(input: {
         profileId,
         scopes,
         rolePolicy: prepareRunRolePolicy(capturedSourcePolicy),
+        createFactoryGitHubDispatchCredentialReader: factoryActorId
+          ? (target) => {
+              const capturedTarget = { ...target };
+              const assertFactoryCurrent = () => {
+                assertCurrent();
+                capturedTarget.assertCurrent();
+                connectionSignal?.throwIfAborted();
+                if (
+                  client.connId !== connectionId ||
+                  client.connectionSignal !== connectionSignal ||
+                  client.authenticatedFactoryGitHubAccountId !== factoryActorId ||
+                  client.authenticatedUserProfile?.profileId !== profileId ||
+                  client.internal?.authenticatedOperator !== true
+                ) {
+                  throw new Error("Original Factory GitHub source changed");
+                }
+              };
+              assertFactoryCurrent();
+              const reader = factoryGitHubDispatchCredentialReader({
+                ...capturedTarget,
+                client,
+                assertCurrent: assertFactoryCurrent,
+              });
+              if (!reader) {
+                throw new Error("Original Factory GitHub source is unavailable");
+              }
+              return reader;
+            }
+          : undefined,
+        captureRestartRecoveryIssuer: () => {
+          assertCurrent();
+          const dependency = readGatewayDeviceRecoverySource(params.hasCurrentClientAuthority);
+          const pairingIdentity = client.internal?.operatorPairingIdentity;
+          const ceilings = readOperatorModelPolicyCeilings(readModelPolicy());
+          if (
+            process.env.FACTORY_AUTH_MODE !== "github" ||
+            !client.internal?.authenticatedOperator ||
+            !factoryActorId ||
+            client.authenticatedFactoryGitHubAccountId !== factoryActorId ||
+            !dependency?.deviceId ||
+            !dependency.authPolicyGeneration ||
+            !authPrincipal ||
+            authPrincipal.role !== "operator" ||
+            !authPrincipal.authMethod ||
+            capturedAuthPolicy?.grantGeneration !== dependency.authPolicyGeneration ||
+            !pairingIdentity ||
+            !capturedAliasBindingIds ||
+            !ceilings ||
+            sourceAuthority === undefined ||
+            (sourceAuthority !== null && sourceAuthority.gatewayAccessGrant === undefined) ||
+            (dependency.shared !== null && dependency.shared.generation === undefined)
+          ) {
+            return undefined;
+          }
+          const facts = preparedProfile!.readCurrentFacts(capturedAliasBindingIds);
+          if (!facts.profile.emails.includes(`github:microsoft.ghe.com:${factoryActorId}`)) {
+            throw new Error("Original Factory actor profile binding changed");
+          }
+          if (getPublishedOperatorPairingIdentity(dependency.deviceId) !== pairingIdentity) {
+            throw new Error("Original operator pairing authority changed");
+          }
+          return {
+            version: 1,
+            profileId,
+            factoryActor: { host: "microsoft.ghe.com", accountId: factoryActorId },
+            assignedRole: capturedAssignedRole,
+            rolePolicyGeneration: resolveOperatorRoleSourcePolicyGeneration(capturedRole),
+            aliasBindingIds: [...capturedAliasBindingIds],
+            scopes,
+            modelCeilings: ceilings,
+            device: { deviceId: dependency.deviceId, identity: pairingIdentity },
+            authPrincipal: structuredClone(authPrincipal),
+            authPolicyGeneration: createHash("sha256")
+              .update(dependency.authPolicyGeneration)
+              .digest("hex"),
+            sharedAuthGeneration: dependency.shared?.generation ?? null,
+            grant: sourceAuthority?.gatewayAccessGrant ?? null,
+          };
+        },
         readCurrentRoleAssignment: () => {
           assertCurrent();
           return assertProfileCurrent().assignedRole;
@@ -575,3 +681,8 @@ export async function captureGatewayOperatorRunAuthority(input: {
     throw error;
   }
 }
+
+export {
+  captureGatewayTurnIssuerAdmission,
+  captureGatewayGoalIssuerAdmission,
+} from "./operator-recovery-issuer-admission.js";

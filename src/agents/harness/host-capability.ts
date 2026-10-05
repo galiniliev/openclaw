@@ -672,7 +672,7 @@ export function createAgentHarnessHostCapabilities(params: {
           ...getPluginRuntimeGatewayRequestScope(),
           ...nodeAuthorities,
         },
-        run,
+        () => withCaller(run),
       );
     },
     close: () => {

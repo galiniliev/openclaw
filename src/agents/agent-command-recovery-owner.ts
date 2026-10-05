@@ -4,6 +4,7 @@ import {
   createSessionWorkStartChangedError,
   SessionWorkStartChangedError,
 } from "../config/sessions/lifecycle.js";
+import { withSessionEntryReadOnlyInWorker } from "../config/sessions/session-entry-read-runtime.js";
 import { racePromiseWithAbortSignal } from "../infra/abort-signal.js";
 import { assertAgentRunLifecycleGenerationCurrent } from "../infra/agent-events.js";
 import { formatErrorMessage } from "../infra/errors.js";
@@ -16,6 +17,7 @@ import { scheduleMainSessionRecoveryPendingTarget } from "./main-session-recover
 import {
   claimMainSessionRecoveryOwner,
   inspectMainSessionRecoveryRequired,
+  promoteQueuedMainSessionInput,
   refreshMainSessionRecoveryOwner,
   releaseMainSessionRecoveryOwner,
   type MainSessionRecoveryOwnerLease,
@@ -266,6 +268,40 @@ export async function runWithAgentCommandRecoveryOwner<
     try {
       await prepared?.runLease?.release();
     } finally {
+      if (!lease && params.opts.mainRestartRecoveryAdmitted === true && prepared?.sessionKey) {
+        try {
+          const target = {
+            agentId: prepared.sessionAgentId,
+            sessionKey: prepared.sessionKey,
+            sessionId: prepared.sessionId,
+            storePath: prepared.storePath,
+          };
+          const assertCurrent = () =>
+            assertAgentRunLifecycleGenerationCurrent(params.lifecycleGeneration);
+          const promoted = await withSessionEntryReadOnlyInWorker(
+            { ...target, readConsistency: "latest" },
+            assertCurrent,
+            async (read, owner) => {
+              owner.assertCurrent();
+              if (!read.ok) {
+                throw read.error;
+              }
+              const entry = read.value;
+              return entry?.sessionId === target.sessionId &&
+                entry.mainRestartRecovery?.queuedInputsPending &&
+                entry.status === "done"
+                ? await promoteQueuedMainSessionInput(target, entry, () => {
+                    assertCurrent();
+                    owner.assertCurrent();
+                  })
+                : undefined;
+            },
+          );
+          pendingRecovery ??= promoted;
+        } catch (error) {
+          log.warn(`failed to promote accepted queued input: ${formatErrorMessage(error)}`);
+        }
+      }
       scheduleMainSessionRecoveryPendingTarget(pendingRecovery);
     }
   }

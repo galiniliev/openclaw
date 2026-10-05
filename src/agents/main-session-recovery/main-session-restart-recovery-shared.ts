@@ -33,6 +33,19 @@ export type ExhaustedRestartRecoveryTarget = ExpectedRestartRecoveryTarget & {
   storePath: string;
 };
 
+export function readInterruptedRunId(entry: SessionEntry): string | undefined {
+  const original = entry.mainRestartRecovery?.turnIntent?.runId;
+  if (original && entry.restartRecoveryRuns?.some((run) => run.runId === original)) {
+    return original;
+  }
+  const runs = entry.restartRecoveryRuns;
+  return runs?.length === 1
+    ? runs[0]?.runId
+    : !runs?.length
+      ? normalizeOptionalString(entry.lifecycleRunId)
+      : undefined;
+}
+
 export function resolveRestartRecoveryTerminalClientRunId(
   entry: Pick<SessionEntry, "restartRecoveryDeliverySourceRunId" | "restartRecoverySourceIngress">,
 ): string | undefined {
@@ -45,6 +58,7 @@ export async function discoverRestartRecoveryStoreTargets(params: {
   cfg?: OpenClawConfig;
   stateDir?: string;
   statuses?: Parameters<typeof hasSessionEntriesByStatusReadOnly>[1];
+  includeRestartRecovery?: boolean;
   shouldContinue?: () => boolean;
 }): Promise<SessionStoreTarget[]> {
   if (params.shouldContinue?.() === false) {
@@ -104,7 +118,9 @@ export async function discoverRestartRecoveryStoreTargets(params: {
     }
     const hasStatus =
       !params.statuses ||
-      (await hasSessionEntriesByStatusReadOnly({ ...target, env }, params.statuses));
+      (await hasSessionEntriesByStatusReadOnly({ ...target, env }, params.statuses, {
+        includeRestartRecovery: params.includeRestartRecovery,
+      }));
     if (params.shouldContinue?.() === false) {
       return [];
     }

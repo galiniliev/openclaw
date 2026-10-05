@@ -157,7 +157,7 @@ export function createSessionRowProjectionRevisions() {
     sharing: () => (sharing ??= {}),
     selection: () => (selection ??= {}),
     invalidate,
-    materialized(row: Row, previousBoard: Row["hasBoard"]) {
+    materialized(this: void, row: Row, previousBoard: Row["hasBoard"]) {
       const changed = row.hasBoard !== previousBoard;
       invalidate(changed);
       if (changed && !isIncognitoSessionKey(row.key)) {

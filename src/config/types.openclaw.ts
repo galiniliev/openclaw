@@ -100,6 +100,8 @@ export type OpenClawConfig = {
   worktreeAcceleration?: boolean;
   /** Global live managed-worktree cap; oldest idle checkouts may lose unsaved data (default: 4096). */
   worktreeMaxCount?: number;
+  /** Prefix for newly allocated remote repository branches (default: openclaw). */
+  repositoryBranchPrefix?: string;
   /** Tool exposure, policy, web/media tools, exec, and code-mode settings. */
   tools?: ToolsConfig;
   /** Legacy/direct agent bindings used by runtime resolution. */

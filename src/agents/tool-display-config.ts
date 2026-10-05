@@ -194,6 +194,7 @@ export const TOOL_DISPLAY_CONFIG: ToolDisplayConfig = {
     tool_call_update: displayTool("🧰", "Tool Call", []),
     session_status: displayTool("📊", "Session Status", ["sessionKey", "model"]),
     github_publish: displayTool("🔀", "GitHub Publish", ["title"]),
+    github_pull_request_read: displayTool("🔎", "GitHub Pull Request Read", ["pull_request"]),
     github_identity_status: displayTool("🔐", "GitHub Identity Status", []),
     sessions: {
       emoji: "🗂️",

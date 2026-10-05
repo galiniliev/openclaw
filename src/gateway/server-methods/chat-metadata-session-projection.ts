@@ -12,11 +12,16 @@ import type { SessionAcpMeta } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
 import { resolveGatewaySessionRuntimeSelectionLocked } from "../session-utils-projection.js";
+import {
+  prepareChatAccountSelection,
+  resolveChatAccountSelection,
+} from "./chat-account-selection.js";
 import type {
   ChatMetadataReadParams,
   ChatMetadataResult,
   ChatMetadataSessionEntry,
 } from "./chat-metadata-contract.js";
+import type { PreparedAgentFacts, ChatMetadataRuntimeDeps } from "./chat-metadata-facts.js";
 import type { GatewayModelCatalogContext } from "./models-list-context.js";
 
 export type ChatMetadataProjectionFacts = {
@@ -195,7 +200,7 @@ export function projectSessionModelCatalog(
   });
 }
 
-export function projectChatSessionMetadata(
+function projectChatSessionMetadata(
   readParams: ChatMetadataReadParams,
   metadata: ChatMetadataResult,
   config: OpenClawConfig,
@@ -215,4 +220,42 @@ export function projectChatSessionMetadata(
       preparedAcpMeta ?? undefined,
     ),
   };
+}
+
+export type PreparedAgentMetadata = PreparedAgentFacts & {
+  commands?: unknown[];
+  swarmEnabled: boolean;
+};
+
+export type PreparedChatMetadataProjection = Awaited<
+  ReturnType<ChatMetadataRuntimeDeps["buildProjection"]>
+> & {
+  agent: PreparedAgentMetadata;
+};
+
+export function readPreparedChatMetadata(
+  projection: PreparedChatMetadataProjection,
+  readParams: ChatMetadataReadParams,
+  config: OpenClawConfig,
+  acpMeta: SessionAcpMeta | null,
+  readAccountSelection?: Awaited<ReturnType<typeof prepareChatAccountSelection>>,
+): ChatMetadataResult {
+  readParams.draftAccountSelection?.assertCurrent();
+  const { agent } = projection;
+  return projectChatSessionMetadata(
+    readParams,
+    {
+      ...projection.read(),
+      ...(agent.commands !== undefined ? { commands: agent.commands } : {}),
+      swarmEnabled: agent.swarmEnabled,
+      accountSelection:
+        readAccountSelection?.() ??
+        resolveChatAccountSelection({
+          authStore: agent.authStore,
+          sessionEntry: readParams.sessionEntry,
+        }),
+    },
+    config,
+    acpMeta,
+  );
 }

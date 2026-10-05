@@ -44,6 +44,7 @@ export async function appendSessionTurnInWorker(
     execution.assertCurrent();
     options.assertCurrent?.();
     options.sessionTurnMutation?.assertCurrent?.();
+    options.sessionTurnMutation?.issuerAdmission?.assertCurrent();
     if (options.sessionTurnMutation) {
       assertSessionGoalOperationTime(options.sessionTurnMutation.operation, Date.now());
     }
@@ -176,6 +177,13 @@ export async function appendSessionTurnInWorker(
           return preparation.result;
         }
         plan.options.preparedGoalId = preparation.goalId;
+        if (preparation.goalAdmission && sessionTurnMutation?.issuerAdmission) {
+          const admitted = preparation.goalAdmission;
+          plan.options.preparedGoalIssuer = structuredClone(
+            sessionTurnMutation.issuerAdmission.capture(admitted, { id: admitted.goalId }),
+          );
+          assertCurrent();
+        }
         plan.options.messages = plan.options.messages.map((append, index) => {
           const hooks = accepted[index]!.workerPreparation;
           const facts = preparation.messages[index]!;

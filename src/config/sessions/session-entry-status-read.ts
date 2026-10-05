@@ -6,7 +6,10 @@ import {
   resolveOpenClawAgentSqlitePath,
 } from "../../state/openclaw-agent-db.paths.js";
 import { isInternalSessionEffectsKey } from "./internal-session-key.js";
-import type { SessionEntryStatus } from "./session-accessor.sqlite-contract.js";
+import type {
+  SessionEntryStatus,
+  SessionEntryStatusSelection,
+} from "./session-accessor.sqlite-contract.js";
 import { resolveSqliteScope, toDatabaseOptions } from "./session-accessor.sqlite-scope.js";
 import {
   hasSessionEntriesByStatus,
@@ -23,23 +26,24 @@ async function readSessionStatusSelection(
   input: Partial<Omit<SessionAccessScope, "sessionKey">>,
   statuses: readonly SessionEntryStatus[],
   presenceOnly: boolean,
+  options: Pick<SessionEntryStatusSelection, "includeRestartRecovery"> = {},
 ) {
   const { scope, agentId } = captureSessionEntryReadScope({ ...input, sessionKey: "" });
   const selected = [...new Set(statuses)];
-  if (selected.length === 0) {
+  if (selected.length === 0 && !options.includeRestartRecovery) {
     return { entries: [], statusFound: false };
   }
   if (isNativeSessionEntryRead(scope, agentId)) {
-    const options = toDatabaseOptions(resolveSqliteScope(scope));
+    const databaseOptions = toDatabaseOptions(resolveSqliteScope(scope));
     if (!presenceOnly) {
       return {
-        entries: readSessionEntriesByStatus(openOpenClawAgentDatabase(options), selected),
+        entries: readSessionEntriesByStatus(openOpenClawAgentDatabase(databaseOptions), selected),
         statusFound: false,
       };
     }
     const read = withOpenClawAgentDatabaseReadOnly(
-      (database) => hasSessionEntriesByStatus(database, selected),
-      options,
+      (database) => hasSessionEntriesByStatus(database, selected, options),
+      databaseOptions,
     );
     return {
       entries: [],
@@ -67,7 +71,7 @@ async function readSessionStatusSelection(
       const read = await reader.readExactEntries({
         env: database.env,
         sessionKeys: [],
-        statusSelection: { statuses: selected, presenceOnly },
+        statusSelection: { statuses: selected, presenceOnly, ...options },
       });
       assertCurrent();
       assertAdmitted?.();
@@ -86,8 +90,9 @@ async function readSessionStatusSelection(
 export async function hasSessionEntriesByStatusReadOnly(
   scope: Partial<Omit<SessionAccessScope, "sessionKey">>,
   statuses: readonly SessionEntryStatus[],
+  options: Pick<SessionEntryStatusSelection, "includeRestartRecovery"> = {},
 ): Promise<boolean> {
-  return (await readSessionStatusSelection(scope, statuses, true)).statusFound === true;
+  return (await readSessionStatusSelection(scope, statuses, true, options)).statusFound === true;
 }
 
 export async function listSessionEntriesByStatus(

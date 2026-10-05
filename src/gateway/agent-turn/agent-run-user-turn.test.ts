@@ -5,7 +5,7 @@ import { prepareAgentRunUserTurn } from "./agent-run-user-turn.js";
 import type { AgentTurnContext } from "./types.js";
 
 const mocks = vi.hoisted(() => ({
-  loadSessionEntry: vi.fn(),
+  readSessionEntryReadOnlyInWorker: vi.fn(),
   persistSessionTranscriptTurn: vi.fn(),
   resolveSessionTranscriptRuntimeTarget: vi.fn(),
   stageSessionPendingInput: vi.fn(),
@@ -27,10 +27,10 @@ vi.mock("../../media/store.js", async () => {
   return { ...actual, deleteMediaBuffer: mocks.deleteMediaBuffer };
 });
 
-vi.mock("../session-utils.js", async () => {
-  const actual = await vi.importActual<typeof import("../session-utils.js")>("../session-utils.js");
-  return { ...actual, loadSessionEntry: mocks.loadSessionEntry };
-});
+vi.mock("../../config/sessions/session-entry-read-runtime.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../config/sessions/session-entry-read-runtime.js")>()),
+  readSessionEntryReadOnlyInWorker: mocks.readSessionEntryReadOnlyInWorker,
+}));
 
 vi.mock("../../config/sessions/session-accessor.js", async () => {
   const actual = await vi.importActual<typeof import("../../config/sessions/session-accessor.js")>(
@@ -46,7 +46,7 @@ vi.mock("../../config/sessions/session-accessor.js", async () => {
 
 describe("prepareAgentRunUserTurn", () => {
   beforeEach(() => {
-    mocks.loadSessionEntry.mockReset();
+    mocks.readSessionEntryReadOnlyInWorker.mockReset();
     mocks.resolveSessionTranscriptRuntimeTarget.mockReset().mockResolvedValue({});
     mocks.persistInboundImagesForTranscript.mockReset().mockResolvedValue({ entries: [] });
     mocks.deleteMediaBuffer.mockReset().mockResolvedValue(undefined);
@@ -104,13 +104,7 @@ describe("prepareAgentRunUserTurn", () => {
       sessionId: admittedSessionId,
       updatedAt: 1,
     };
-    mocks.loadSessionEntry.mockReturnValue({
-      cfg: {},
-      storePath: "/tmp/sessions.json",
-      canonicalKey: sessionKey,
-      entry: undefined,
-      store: {},
-    });
+    mocks.readSessionEntryReadOnlyInWorker.mockResolvedValue(undefined);
 
     await expect(
       prepareAgentRunUserTurn({
@@ -122,6 +116,7 @@ describe("prepareAgentRunUserTurn", () => {
         cfg: {},
         sessionEntry,
         resolvedSessionKey: sessionKey,
+        sessionStorePath: "/tmp/sessions.json",
         admittedSessionId,
         activeSessionAgentId: "main",
         suppressVisibleSessionEffects: false,
@@ -145,13 +140,7 @@ describe("prepareAgentRunUserTurn", () => {
     const sessionKey = "agent:main:worker-child";
     const admittedSessionId = "worker-child-session";
     const sessionEntry: SessionEntry = { sessionId: admittedSessionId, updatedAt: 1 };
-    mocks.loadSessionEntry.mockReturnValue({
-      cfg: {},
-      storePath: "/tmp/sessions.json",
-      canonicalKey: sessionKey,
-      entry: sessionEntry,
-      store: { [sessionKey]: sessionEntry },
-    });
+    mocks.readSessionEntryReadOnlyInWorker.mockResolvedValue(sessionEntry);
     let authorityActive = true;
     mocks.beforeTranscriptCommit = () => {
       authorityActive = false;
@@ -163,6 +152,7 @@ describe("prepareAgentRunUserTurn", () => {
         cfg: {},
         sessionEntry,
         resolvedSessionKey: sessionKey,
+        sessionStorePath: "/tmp/sessions.json",
         admittedSessionId,
         activeSessionAgentId: "main",
         suppressVisibleSessionEffects: false,
@@ -188,13 +178,7 @@ describe("prepareAgentRunUserTurn", () => {
   it("deletes persisted media when delegated runtime authority closes during persistence", async () => {
     const sessionKey = "agent:main:worker-child";
     const sessionEntry: SessionEntry = { sessionId: "revoked-media-session", updatedAt: 1 };
-    mocks.loadSessionEntry.mockReturnValue({
-      cfg: {},
-      storePath: "/tmp/sessions.json",
-      canonicalKey: sessionKey,
-      entry: sessionEntry,
-      store: { [sessionKey]: sessionEntry },
-    });
+    mocks.readSessionEntryReadOnlyInWorker.mockResolvedValue(sessionEntry);
     let authorityActive = true;
     mocks.persistInboundImagesForTranscript.mockImplementationOnce(async () => {
       authorityActive = false;
@@ -207,6 +191,7 @@ describe("prepareAgentRunUserTurn", () => {
         cfg: {},
         sessionEntry,
         resolvedSessionKey: sessionKey,
+        sessionStorePath: "/tmp/sessions.json",
         admittedSessionId: "revoked-media-session",
         activeSessionAgentId: "main",
         suppressVisibleSessionEffects: false,
@@ -227,7 +212,7 @@ describe("prepareAgentRunUserTurn", () => {
       }),
     ).rejects.toThrow("agent runtime authority is no longer active");
     expect(mocks.deleteMediaBuffer).toHaveBeenCalledWith("revoked-media", "inbound");
-    expect(mocks.loadSessionEntry).not.toHaveBeenCalled();
+    expect(mocks.readSessionEntryReadOnlyInWorker).not.toHaveBeenCalled();
     expect(mocks.resolveSessionTranscriptRuntimeTarget).not.toHaveBeenCalled();
     expect(mocks.stageSessionPendingInput).not.toHaveBeenCalled();
     expect(mocks.persistedMessages).toEqual([]);

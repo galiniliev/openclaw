@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { isMainThread } from "node:worker_threads";
 import { safeParseJson } from "@openclaw/normalization-core/json-coercion";
 import { sha256Hex } from "@openclaw/normalization-core/node-crypto";
 import { lazyCompile } from "../../../packages/gateway-protocol/src/protocol-validator.js";
@@ -9,11 +10,13 @@ import {
 } from "../../infra/kysely-sync.js";
 import { getAdmittedSqliteSchemaFacts } from "../../infra/sqlite-schema-facts.js";
 import { runSqliteDeferredTransactionSync } from "../../infra/sqlite-transaction.js";
+import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db-contract.js";
 import type { OpenClawAgentReadOnlyDatabase } from "../../state/openclaw-agent-db-readonly.js";
 import {
   openOpenClawAgentDatabase,
   runOpenClawAgentWriteTransaction,
 } from "../../state/openclaw-agent-db.js";
+import { supportsOpenClawAgentDatabaseExecution } from "../../state/openclaw-agent-execution.js";
 import {
   ensureSessionGoalOperationsSchema,
   SESSION_GOAL_OPERATIONS_TABLE,
@@ -30,12 +33,14 @@ import {
   buildCreatedSessionGoal,
   buildUpdatedSessionGoalObjective,
   buildUpdatedSessionGoalStatus,
+  buildSessionGoalIssuerPatch,
 } from "./goals-transitions.js";
 import type { SessionAccessScope } from "./session-accessor.sqlite-contract.js";
 import { readSessionEntryRow, writeSessionEntry } from "./session-accessor.sqlite-entry-store.js";
 import {
   getSessionKysely,
   resolveSqliteScope,
+  prepareSqliteScope,
   runExclusiveSqliteSessionWrite,
   toDatabaseOptions,
 } from "./session-accessor.sqlite-scope.js";
@@ -283,8 +288,15 @@ export async function mutateSessionGoal(
     };
   },
 ): Promise<SessionTranscriptTurnMutationResult & { sessionEntry?: SessionEntry }> {
-  const resolved = resolveSqliteScope(options);
+  options.assertCurrent?.();
+  const resolved = isMainThread ? await prepareSqliteScope(options) : resolveSqliteScope(options);
+  options.assertCurrent?.();
   const databaseOptions = toDatabaseOptions(resolved);
+  if (isMainThread && supportsOpenClawAgentDatabaseExecution(databaseOptions)) {
+    const { mutateSessionGoalInWorker } = await import("./session-goal-mutation.js");
+    options.assertCurrent?.();
+    return mutateSessionGoalInWorker(resolved, options);
+  }
   return await runExclusiveSqliteSessionWrite(
     resolved,
     async () => {
@@ -292,40 +304,7 @@ export async function mutateSessionGoal(
       const committed = runOpenClawAgentWriteTransaction(
         (database) => {
           options.assertCurrent?.();
-          const fresh = readSessionEntryRow(database, resolved.sessionKey);
-          const replay = readSessionGoalOperationReceipt(
-            database.db,
-            resolved.sessionKey,
-            options.expectedSessionId,
-            options.operation,
-          );
-          if (replay && fresh?.entry.sessionId === options.expectedSessionId) {
-            return { result: replay, replayed: true };
-          }
-          if (!fresh || fresh.entry.sessionId !== options.expectedSessionId) {
-            throw new SessionGoalOperationError(
-              "session-rebound",
-              "Session changed; refresh before changing its Goal.",
-            );
-          }
-          const goal = applySessionGoalOperation(fresh.entry, options.operation, Date.now());
-          const next = mergeSessionEntry(fresh.entry, { goal });
-          // Goal management preserves the session key and generation, so no identity publication is due.
-          writeSessionEntry(database, resolved.sessionKey, next, {
-            canonicalPreviousEntry: fresh.entry,
-          });
-          const result = writeSessionGoalOperationReceipt(
-            database.db,
-            resolved.sessionKey,
-            options.expectedSessionId,
-            options.operation,
-            goal,
-          );
-          return {
-            result,
-            replayed: false,
-            next,
-          };
+          return mutateSessionGoalInDatabase(database, resolved.sessionKey, options);
         },
         databaseOptions,
         { operationLabel: "session.goal.mutate" },
@@ -338,4 +317,58 @@ export async function mutateSessionGoal(
     },
     "session.goal.mutate",
   );
+}
+
+/** Native kernel shared by admitted worker management and process-held incognito sessions. */
+export function mutateSessionGoalInDatabase(
+  database: OpenClawAgentDatabase,
+  sessionKey: string,
+  options: Pick<Parameters<typeof mutateSessionGoal>[0], "expectedSessionId" | "operation">,
+) {
+  const fresh = readSessionEntryRow(database, sessionKey);
+  const replay = readSessionGoalOperationReceipt(
+    database.db,
+    sessionKey,
+    options.expectedSessionId,
+    options.operation,
+  );
+  if (replay && fresh?.entry.sessionId === options.expectedSessionId) {
+    return { result: replay, replayed: true };
+  }
+  if (!fresh || fresh.entry.sessionId !== options.expectedSessionId) {
+    throw new SessionGoalOperationError(
+      "session-rebound",
+      "Session changed; refresh before changing its Goal.",
+    );
+  }
+  const goal = applySessionGoalOperation(fresh.entry, options.operation, Date.now());
+  const next = mergeSessionEntry(fresh.entry, {
+    goal,
+    ...(options.operation.action === "edit"
+      ? {}
+      : buildSessionGoalIssuerPatch(fresh.entry, undefined)),
+    goalPauseOrigin:
+      options.operation.action === "pause"
+        ? "manual"
+        : options.operation.action === "edit"
+          ? fresh.entry.goalPauseOrigin
+          : undefined,
+  });
+  // Goal management preserves the session key and generation, so no identity publication is due.
+  writeSessionEntry(database, sessionKey, next, {
+    canonicalPreviousEntry: fresh.entry,
+  });
+  const result = writeSessionGoalOperationReceipt(
+    database.db,
+    sessionKey,
+    options.expectedSessionId,
+    options.operation,
+    goal,
+  );
+  return {
+    result,
+    replayed: false,
+    next,
+    previous: fresh.entry,
+  };
 }

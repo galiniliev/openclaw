@@ -13,6 +13,12 @@ import {
 import { hasSqliteWorkerOutcomeUnknown } from "../../infra/sqlite-worker-contract.js";
 import type { PersistedUserTurnMessage } from "../../sessions/user-turn-transcript.types.js";
 import { runOpenClawAgentWriteAdmission } from "../../state/openclaw-agent-write-admission.js";
+import type {
+  GoalRecoveryInputAdmission,
+  SessionTranscriptTurnMutationResult,
+} from "./goals-operations.types.js";
+import { captureGoalRecoveryInput } from "./goals-transitions.js";
+import type { TurnRecoveryIssuerAdmission } from "./main-session-recovery.types.js";
 import {
   preparePendingInputRequest,
   resolveCommittedPendingInputRequestHash,
@@ -23,6 +29,8 @@ import {
 import type { SessionAccessScope } from "./session-accessor.sqlite-contract.js";
 import {
   prepareCurrentSessionPendingInputDedupeRecovery,
+  readOriginalPendingInputIntent,
+  isOriginalInputRecovery,
   isFinalInputCompletion,
   parseSessionPendingInputMessage,
   hasRegisteredSessionPendingInputOwner,
@@ -44,15 +52,22 @@ import {
 } from "./session-accessor.sqlite-scope.js";
 import { redactTranscriptMessageForStorage } from "./session-accessor.sqlite-transcript-store.js";
 import { SessionPendingInputCustodyError } from "./session-pending-input-custody-error.js";
+import type {
+  PendingInputQueueSnapshot,
+  PendingInputQueueCandidate,
+  PendingInputSnapshot,
+} from "./session-pending-input-operations.types.js";
 import { readPendingInputSource } from "./session-pending-input-source.js";
 import { preparePendingInputStore } from "./session-pending-input-store.js";
 import { readMessageIdempotencyKey } from "./transcript-message-identity.js";
 import { captureSessionTranscriptStorageEnvironment } from "./transcript-target-binding.js";
+import type { InternalSessionEntry } from "./types.js";
 
 export { withSessionPendingInputRelocation };
 export type { SessionPendingInput, SessionPendingInputPage };
 type PendingInputScope = SessionAccessScope & { agentId: string; sessionId: string };
 export type SessionPendingInputReceipt = {
+  goalOperation?: SessionTranscriptTurnMutationResult;
   state: "queued" | "consumed";
   inputId: string;
   message: PersistedUserTurnMessage;
@@ -183,7 +198,138 @@ type PendingInputStageOptions = PendingInputRequest & {
   assertCurrent: () => void;
   assertAdmittedCurrent?: () => void;
   assertCompletionCurrent?: () => void;
+  turnIssuerAdmission?: TurnRecoveryIssuerAdmission;
+  goalRecoveryAdmission?: GoalRecoveryInputAdmission;
 };
+
+export async function readSessionPendingInputStage(
+  scope: PendingInputScope,
+  idempotencyKey: string,
+  assertCurrent: () => void,
+): Promise<PendingInputSnapshot> {
+  assertCurrent();
+  const store = await preparePendingInputStore(scope, assertCurrent);
+  try {
+    const snapshot = await store.read({
+      kind: "stage",
+      sessionKey: store.sessionKey,
+      sessionId: scope.sessionId,
+      idempotencyKey,
+      trackCompletion: false,
+    });
+    assertCurrent();
+    store.assertCurrent();
+    if (snapshot.kind !== "stage") {
+      throw new Error("Pending input read returned a different operation");
+    }
+    return snapshot;
+  } finally {
+    await store.release();
+  }
+}
+
+export async function withSessionPendingInputQueue<T>(
+  scope: PendingInputScope,
+  assertCurrent: () => void,
+  run: (operations: {
+    read(
+      runId?: string,
+      page?: { afterSeq?: number; throughSeq?: number },
+    ): Promise<PendingInputQueueSnapshot>;
+    cancel(
+      expectedEntry: InternalSessionEntry,
+      row: PendingInputQueueCandidate,
+      assertCancellationCurrent: () => void,
+    ): Promise<boolean>;
+    promote(input: {
+      expectedEntry: InternalSessionEntry;
+      lifecycleGeneration: string;
+    }): Promise<{ entry: InternalSessionEntry } | undefined>;
+  }) => Promise<T>,
+): Promise<T> {
+  const captured = {
+    ...scope,
+    env: captureSessionTranscriptStorageEnvironment(scope.env ?? process.env),
+  };
+  const admission = resolveSqliteWriteAdmissionScope(captured);
+  const operation = async () => {
+    assertCurrent();
+    const store = await preparePendingInputStore(captured, assertCurrent);
+    try {
+      return await store.withAdmission(
+        () =>
+          run({
+            async read(runId, page) {
+              const snapshot = await store.read({
+                kind: "queue",
+                sessionKey: store.sessionKey,
+                sessionId: scope.sessionId,
+                runId,
+                ...page,
+              });
+              assertCurrent();
+              store.assertCurrent();
+              if (snapshot.kind !== "queue") {
+                throw new Error("Pending queue read returned a different operation");
+              }
+              return snapshot;
+            },
+            async cancel(expectedEntry, row, assertCancellationCurrent) {
+              const result = await store.mutate(
+                {
+                  kind: "cancel-queued",
+                  sessionKey: store.sessionKey,
+                  sessionId: scope.sessionId,
+                  lifecycleGeneration: getAgentEventLifecycleGeneration(),
+                  expectedEntry,
+                  row,
+                },
+                () => {
+                  assertCurrent();
+                  assertCancellationCurrent();
+                },
+              );
+              if (result.operation !== "cancel-queued") {
+                throw new Error("Pending queue cancellation returned a different receipt");
+              }
+              return result.changed;
+            },
+            async promote(input) {
+              const result = await store.mutate(
+                {
+                  kind: "promote",
+                  sessionKey: store.sessionKey,
+                  sessionId: scope.sessionId,
+                  ...input,
+                },
+                assertCurrent,
+              );
+              if (result.operation !== "promote") {
+                throw new Error("Pending queue promotion returned a different receipt");
+              }
+              return result.entry ? { entry: result.entry } : undefined;
+            },
+          }),
+        admission !== undefined,
+      );
+    } finally {
+      await store.release();
+    }
+  };
+  return admission
+    ? runOpenClawAgentWriteAdmission(toDatabaseOptions(admission), operation)
+    : operation();
+}
+
+export function promoteQueuedSessionPendingInput(
+  scope: PendingInputScope,
+  input: { expectedEntry: InternalSessionEntry; lifecycleGeneration: string },
+  assertCurrent: () => void,
+): Promise<{ entry: InternalSessionEntry } | undefined> {
+  return withSessionPendingInputQueue(scope, assertCurrent, (operations) =>
+    operations.promote(input),
+  );
+}
 
 /** Accept durable input without changing the active transcript or scheduling execution. */
 export function stageSessionPendingInput(
@@ -219,6 +365,12 @@ async function stagePreparedPendingInput(
   let finished = false;
   let owner: SessionPendingInputOwner | undefined;
   let completion: Promise<AgentRunTerminalOutcome> | undefined;
+  const assertAcceptance = () => {
+    options.assertCurrent();
+    options.turnIssuerAdmission?.assertCurrent();
+    options.goalRecoveryAdmission?.decision.assertCurrent();
+    options.goalRecoveryAdmission?.issuer.assertCurrent();
+  };
   try {
     const identity = {
       sessionKey: store.sessionKey,
@@ -229,14 +381,27 @@ async function stagePreparedPendingInput(
       ...identity,
       kind: "stage",
       trackCompletion: options.trackCompletion === true,
+      goalOperation: options.goalRecoveryAdmission?.operation,
     });
     if (snapshot.kind !== "stage") {
       throw new Error("Pending input read returned a different operation");
     }
-    options.assertCurrent();
+    assertAcceptance();
     assertAgentRunLifecycleGenerationCurrent(lifecycleGeneration);
     if (!snapshot.current) {
       return undefined;
+    }
+    if (snapshot.goalReceipt) {
+      return {
+        state: "consumed",
+        inputId: identity.idempotencyKey,
+        message: preparedRequest.message,
+        goalOperation: { result: snapshot.goalReceipt, replayed: true },
+        run: () => {
+          throw new Error("Goal recovery input has already been accepted");
+        },
+        finish: () => {},
+      };
     }
     const { existing, previous, committed } = snapshot;
     const replayRequest = resolvePendingInputReplayRequest(preparedRequest, previous ?? existing);
@@ -283,10 +448,21 @@ async function stagePreparedPendingInput(
         };
       }
       assertUnowned();
+      const admittedIntent =
+        snapshot.entry &&
+        options.turnIssuerAdmission?.capture(snapshot.entry, {
+          inputId: existing.input_id,
+          idempotencyKey: identity.idempotencyKey,
+        });
+      const originalIntent =
+        snapshot.entry && readOriginalPendingInputIntent(existing, snapshot.entry, admittedIntent);
+      const originalRecovery = isOriginalInputRecovery(originalIntent, admittedIntent, existing);
       if (
-        (!options.requestFingerprint && !options.trackCompletion) ||
+        (!options.requestFingerprint && !options.trackCompletion && !originalRecovery) ||
         (existing.state !== "queued" && existing.state !== "interrupted") ||
-        (existing.lifecycle_generation === lifecycleGeneration && !options.trackCompletion)
+        (existing.lifecycle_generation === lifecycleGeneration &&
+          !options.trackCompletion &&
+          !originalRecovery)
       ) {
         throw new Error("Pending input ownership ended; submit a new turn to continue");
       }
@@ -437,6 +613,17 @@ async function stagePreparedPendingInput(
       throw new Error("Approved pending input exceeds the Gateway payload limit");
     }
     const inputId = existing?.input_id ?? randomUUID();
+    assertAcceptance();
+    const turnIntent = existing
+      ? snapshot.entry && readOriginalPendingInputIntent(existing, snapshot.entry)
+      : snapshot.entry &&
+        options.turnIssuerAdmission?.capture(snapshot.entry, {
+          inputId,
+          idempotencyKey: identity.idempotencyKey,
+        });
+    const goalRecovery =
+      snapshot.entry &&
+      captureGoalRecoveryInput(snapshot.entry, options.goalRecoveryAdmission, turnIntent);
     owner = {
       inputId,
       transcriptInputId: inputId,
@@ -452,7 +639,7 @@ async function stagePreparedPendingInput(
       ...(existing ? { restartRecovered: true as const } : {}),
       finish,
     };
-    await store.mutate(
+    const staged = await store.mutate(
       {
         ...settlementIdentity(),
         kind: "stage",
@@ -460,20 +647,26 @@ async function stagePreparedPendingInput(
         trackCompletion: options.trackCompletion === true,
         inputId,
         messageJson,
+        turnIntent,
+        goalRecovery,
       },
       (_stage, facts) => {
-        options.assertCurrent();
+        assertAcceptance();
         assertAgentRunLifecycleGenerationCurrent(lifecycleGeneration);
         assertUnowned(facts?.candidate);
       },
       () => {
-        options.assertCurrent();
+        (options.assertAdmittedCurrent ?? options.assertCurrent)();
         assertAgentRunLifecycleGenerationCurrent(lifecycleGeneration);
         registerSessionPendingInputOwner(owner!);
       },
     );
     retained = true;
-    return Object.assign(ownerReceipt(owner), completionMethods);
+    return Object.assign(
+      ownerReceipt(owner),
+      completionMethods,
+      staged.goalOperation ? { goalOperation: staged.goalOperation } : {},
+    );
   } finally {
     if (!retained) {
       await store.release();

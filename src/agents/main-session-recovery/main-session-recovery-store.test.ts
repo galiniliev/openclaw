@@ -235,7 +235,7 @@ describe("main session recovery store", () => {
         }),
       );
       await reserve();
-      const restorePrevious = await admitAgentRestartRecovery({
+      const { restoreInterrupted: restorePrevious } = await admitAgentRestartRecovery({
         lifecycleGeneration,
         runId: "recovery-1",
         sessionId: "session-1",
@@ -268,7 +268,7 @@ describe("main session recovery store", () => {
       await sessionAccessor.updateSessionEntry({ sessionKey, storePath }, () => ({
         restartRecoveryDeliveryRunId: successorRunId,
       }));
-      const restoreSuccessor = await admitAgentRestartRecovery({
+      const { restoreInterrupted: restoreSuccessor } = await admitAgentRestartRecovery({
         lifecycleGeneration,
         runId: successorRunId,
         sessionId: "session-1",
@@ -301,7 +301,7 @@ describe("main session recovery store", () => {
       }),
     );
     await reserve();
-    const restore = await admitAgentRestartRecovery({
+    const { restoreInterrupted: restore } = await admitAgentRestartRecovery({
       lifecycleGeneration,
       runId: "recovery-1",
       sessionId: "session-1",

@@ -1,6 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 import { sql } from "kysely";
 import { executeSqliteQueryTakeFirstSync, getNodeSqliteKysely } from "../../infra/kysely-sync.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import {
   getUserTurnTranscriptAdmissionOwner,
   readPendingUserTurnTranscriptAdmission,
@@ -14,8 +16,14 @@ import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
 import { isSameOpenClawAgentDatabasePath } from "../../state/openclaw-agent-db.paths.js";
 import type { SessionTranscriptRuntimeTarget } from "./session-accessor.types.js";
 import { transcriptEventNavigationSql } from "./transcript-payload.js";
+import { getOwnedSessionTranscriptWriterFence } from "./transcript-write-context.js";
 
 const transcriptReadFenceStorage = new AsyncLocalStorage<UserTurnTranscriptAdmissionReceipt>();
+const log = createSubsystemLogger("sessions/transcript-read-fence");
+
+function identityHash(value: string | null): string | null {
+  return value === null ? null : createHash("sha256").update(value).digest("hex");
+}
 
 function isSameTranscriptStore(left: string, right: string): boolean {
   return left === right || isSameOpenClawAgentDatabasePath(left, right);
@@ -216,6 +224,28 @@ export function resolveSqliteSessionTranscriptReadFence(params: {
     boundary.parent_id !== receipt.effectiveParentId ||
     boundary.message_position !== receipt.activeMessagePosition
   ) {
+    // These are observed boundary facts, not a replacement admission or historical cause.
+    const writer = getOwnedSessionTranscriptWriterFence({ sessionKey: receipt.sessionKey });
+    log.warn("Current-turn transcript admission identity mismatch", {
+      operation: "validate-current-turn-transcript-read",
+      reason: "admission_identity_changed",
+      transcriptScopeHash: identityHash(receipt.sessionId),
+      entryHash: identityHash(receipt.entryId),
+      logicalTurnHash: identityHash(receipt.logicalTurnId),
+      writerRunHash: writer ? identityHash(writer.expectedWriterRunId) : null,
+      generationChanged: boundary.generation !== receipt.generation,
+      rawSeqChanged: boundary.seq !== receipt.rawSeq,
+      parentChanged: boundary.parent_id !== receipt.effectiveParentId,
+      activeMessagePositionChanged: boundary.message_position !== receipt.activeMessagePosition,
+      expectedGenerationHash: identityHash(receipt.generation),
+      currentGenerationHash: identityHash(boundary.generation),
+      expectedRawSeq: receipt.rawSeq,
+      currentRawSeq: boundary.seq,
+      expectedParentHash: identityHash(receipt.effectiveParentId),
+      currentParentHash: identityHash(boundary.parent_id),
+      expectedActiveMessagePosition: receipt.activeMessagePosition,
+      currentActiveMessagePosition: boundary.message_position,
+    });
     throw new SessionTranscriptReadFenceError(
       `Current-turn transcript admission identity changed: ${receipt.entryId}`,
     );

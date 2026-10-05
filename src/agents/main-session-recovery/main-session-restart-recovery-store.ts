@@ -7,7 +7,6 @@ import {
 import { buildRestartRecoveryClaimCleanupPatch } from "../../config/sessions/restart-recovery-state.js";
 import {
   listSessionEntriesByStatus,
-  loadExactSessionEntry,
   updateSessionEntry,
 } from "../../config/sessions/session-accessor.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
@@ -20,13 +19,17 @@ import {
   readAdmittedHarnessCompletionInput,
 } from "../agent-harness-completion-recovery.js";
 import { resolveExecDefaults } from "../exec-defaults.js";
-import type { MainSessionRecoveryAdmission } from "./main-session-recovery-admission.js";
+import {
+  withPreparedRestartRecoveryTarget,
+  type MainSessionRecoveryAdmission,
+} from "./main-session-recovery-admission.js";
 import type { MainSessionRecoveryCapacity } from "./main-session-recovery-capacity.js";
 import { createCurrentProcessOwnerLookup } from "./main-session-recovery-live-owners.js";
 import {
   getMainSessionRecoveryRetryCount,
   isMainRestartRecoveryAggregateTerminalOnly,
   isMainRestartRecoveryCandidate,
+  isCapturedMainRestartGoalCurrent,
 } from "./main-session-recovery-state.js";
 import {
   commitMainSessionRecovery,
@@ -41,11 +44,15 @@ import {
   markSessionCompletedAfterRecoveryCheckpoint,
   reconcileInvalidHarnessCompletion,
 } from "./main-session-restart-recovery-checkpoint.js";
-import { tombstoneMainRestartRecoveryWithNotice } from "./main-session-restart-recovery-failure.js";
+import {
+  pauseMainRestartRecoveryWithNotice,
+  tombstoneMainRestartRecoveryWithNotice,
+} from "./main-session-restart-recovery-failure.js";
 import { readMainSessionRecoveryCheckpoint } from "./main-session-restart-recovery-replay-safety.js";
 import {
   hasReplaySafeCodeModeCheckpointInCurrentTurn,
   resolveMainSessionResumePolicy,
+  resolveUnverifiableRestartEffect,
 } from "./main-session-restart-recovery-resume-policy.js";
 import {
   type ExhaustedRestartRecoveryTarget,
@@ -145,27 +152,34 @@ async function completePendingFinalRecoveryWithNotice(
   return completed;
 }
 
-export function loadExpectedRestartRecoveryTarget(params: {
-  expected: ExpectedRestartRecoveryTarget;
-  storePath: string;
-}): SessionEntry | undefined {
-  const exact = loadExactSessionEntry({
-    ...params.expected,
-    storePath: params.storePath,
-    readConsistency: "latest",
-  });
-  const entry = exact?.sessionKey === params.expected.sessionKey ? exact.entry : undefined;
-  return entry?.sessionId === params.expected.sessionId &&
+export function isExpectedRestartRecoveryTarget(
+  entry: SessionEntry | undefined,
+  expected: ExpectedRestartRecoveryTarget,
+): boolean {
+  return (
+    entry?.sessionId === expected.sessionId &&
     entry.status === "running" &&
     entry.abortedLastRun === true &&
-    (params.expected.claim
-      ? normalizeOptionalString(entry.restartRecoveryDeliveryRunId) ===
-          params.expected.claim.runId &&
+    (expected.claim
+      ? normalizeOptionalString(entry.restartRecoveryDeliveryRunId) === expected.claim.runId &&
         normalizeOptionalString(entry.restartRecoveryDeliverySourceRunId) ===
-          params.expected.claim.sourceRunId
-      : isMainRestartRecoveryCandidate(entry, params.expected.sessionKey))
-    ? entry
-    : undefined;
+          expected.claim.sourceRunId
+      : isMainRestartRecoveryCandidate(entry, expected.sessionKey))
+  );
+}
+
+export async function loadExpectedRestartRecoveryTarget(params: {
+  expected: ExpectedRestartRecoveryTarget;
+  storePath: string;
+}): Promise<SessionEntry | undefined> {
+  return await withPreparedRestartRecoveryTarget(
+    { ...params.expected, storePath: params.storePath },
+    async ({ entry, readCurrent }) =>
+      isExpectedRestartRecoveryTarget(entry, params.expected) &&
+      isExpectedRestartRecoveryTarget(readCurrent(), params.expected)
+        ? entry
+        : undefined,
+  );
 }
 
 export async function recoverStore(params: {
@@ -183,6 +197,7 @@ export async function recoverStore(params: {
   lifecycleGeneration?: string;
   recoveryCapacity?: MainSessionRecoveryCapacity;
   shouldContinue?: () => boolean;
+  shouldContinueDelivery?: () => boolean;
   gatewayRuntime: GatewayRecoveryRuntime;
 }): Promise<{ started: number; settled: number; failed: number; skipped: number }> {
   const result = { started: 0, settled: 0, failed: 0, skipped: 0 };
@@ -198,7 +213,7 @@ export async function recoverStore(params: {
   let entries: Array<{ sessionKey: string; entry: SessionEntry }>;
   try {
     if (params.expectedTarget) {
-      const entry = loadExpectedRestartRecoveryTarget({
+      const entry = await loadExpectedRestartRecoveryTarget({
         expected: params.expectedTarget,
         storePath: params.storePath,
       });
@@ -229,6 +244,10 @@ export async function recoverStore(params: {
       continue;
     }
     if (!isMainRestartRecoveryCandidate(entry, sessionKey)) {
+      result.skipped++;
+      continue;
+    }
+    if (entry.restartRecoveryGoal && !isCapturedMainRestartGoalCurrent(entry)) {
       result.skipped++;
       continue;
     }
@@ -428,6 +447,7 @@ export async function recoverStore(params: {
       entry.restartRecoveryDisableMessageTool !== true &&
       entry.restartRecoverySuppressTextDelivery !== true;
     let replaySafeCheckpoint: boolean;
+    let unresolvedEffect: ReturnType<typeof resolveUnverifiableRestartEffect>;
     let source: Awaited<ReturnType<typeof readMainSessionRecoveryCheckpoint>>["source"];
     let messages: unknown[];
     try {
@@ -441,8 +461,15 @@ export async function recoverStore(params: {
         maxMessages: 20,
         maxBytes: 256 * 1024,
       });
-      const checkpoint = await readMainSessionRecoveryCheckpoint(transcriptScope);
+      const checkpoint = await readMainSessionRecoveryCheckpoint(
+        transcriptScope,
+        entry.restartRecoveryDeliveryReceiptState === "delivered-terminal"
+          ? entry.restartRecoveryDeliveryToolCallId
+          : undefined,
+        expectedRecoverySourceRunId,
+      );
       source = checkpoint.source;
+      unresolvedEffect = checkpoint.unresolvedEffect;
       replaySafeCheckpoint = fullAccess && !entry.pendingFinalDelivery && checkpoint.replaySafe;
     } catch (err) {
       if (stopped()) {
@@ -455,6 +482,29 @@ export async function recoverStore(params: {
 
     if (stopped()) {
       return result;
+    }
+    if (
+      !entry.mainRestartRecovery?.acknowledgedPause &&
+      (unresolvedEffect || entry.restartRecoveryDeliveryReceiptState === "terminal-pending")
+    ) {
+      const { action: _action, ...effect } = unresolvedEffect ?? {
+        action: "pause" as const,
+        reason: "unverifiable-external-effect" as const,
+        toolCallId: entry.restartRecoveryDeliveryToolCallId,
+      };
+      const paused = await pauseMainRestartRecoveryWithNotice({
+        ...target,
+        observation: recoveryView.observation,
+        effect,
+        shouldContinue: params.shouldContinue,
+      });
+      result.skipped++;
+      if (paused) {
+        mainSessionRecoveryLog.warn(
+          `main-session restart recovery paused ${sessionKey}: ${effect.reason}`,
+        );
+      }
+      continue;
     }
     if (
       !recoverableHarnessCompletion &&
@@ -503,6 +553,10 @@ export async function recoverStore(params: {
         entry.restartRecoveryDeliveryToolCallId,
         fullAccess && !retainedSafeTools,
       );
+      if (resumePolicy.action === "pause" && !entry.mainRestartRecovery?.acknowledgedPause) {
+        result.skipped++;
+        continue;
+      }
       if (resumePolicy.action === "complete") {
         if (stopped()) {
           return result;
@@ -529,8 +583,11 @@ export async function recoverStore(params: {
         resumeOptions = { forceRestartSafeTools: true };
       } else {
         resumeOptions = {
-          forceRestartSafeTools: retainedSafeTools || resumePolicy.forceRestartSafeTools,
-          forceCodeModeTools: resumePolicy.forceCodeModeTools === true,
+          forceRestartSafeTools:
+            retainedSafeTools ||
+            (resumePolicy.action === "resume" && resumePolicy.forceRestartSafeTools),
+          forceCodeModeTools:
+            resumePolicy.action === "resume" && resumePolicy.forceCodeModeTools === true,
         };
       }
     }
@@ -550,12 +607,13 @@ export async function recoverStore(params: {
       lifecycleGeneration: params.lifecycleGeneration,
       recoveryCapacity: params.recoveryCapacity,
       shouldContinue: params.shouldContinue,
+      shouldContinueDelivery: params.shouldContinueDelivery ?? params.shouldContinue,
     });
     result[resumeResult]++;
     if (resumeResult === "started" || resumeResult === "settled") {
       params.handledSessionKeys.add(resumeDedupeKey);
     } else if (resumeResult === "failed") {
-      const current = loadExpectedRestartRecoveryTarget({
+      const current = await loadExpectedRestartRecoveryTarget({
         expected: { agentId, sessionId: entry.sessionId, sessionKey },
         storePath: params.storePath,
       });

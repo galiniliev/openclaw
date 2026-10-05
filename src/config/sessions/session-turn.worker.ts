@@ -2,7 +2,11 @@ import { isDeepStrictEqual } from "node:util";
 import { ensureSessionGoalOperationsSchema } from "../../state/openclaw-agent-goal-operations-schema.js";
 import type { AgentWorkerOperationContext } from "../../state/openclaw-agent-operation-context.js";
 import { runWithCliHistoryWriter } from "./cli-history-boundary.js";
-import { applySessionGoalOperation, readSessionGoalOperationReceipt } from "./goals-operations.js";
+import {
+  applySessionGoalOperation,
+  readSessionGoalOperationReceipt,
+  mutateSessionGoalInDatabase,
+} from "./goals-operations.js";
 import {
   readSessionPendingInputWorkerReceipt,
   resolveSessionPendingInputAppend,
@@ -17,7 +21,12 @@ import {
   createSessionTranscriptTurnKernel,
   sqliteSessionTranscriptTurnRebound,
 } from "./session-turn.kernel.js";
-import type { SessionTurnCommitted, SessionTurnPlan } from "./session-turn.types.js";
+import type {
+  SessionTurnCommitted,
+  SessionTurnPlan,
+  SessionGoalCommitted,
+  SessionGoalMutationPlan,
+} from "./session-turn.types.js";
 import { readMessageIdempotencyKey } from "./transcript-message-identity.js";
 
 function inCustody<T>(
@@ -111,12 +120,21 @@ export function prepareSessionTurn(input: SessionTurnPlan, context: AgentWorkerO
           };
         }),
       );
+  const goalId =
+    mutation && !result && expectedEntry && input.options.messages.length
+      ? applySessionGoalOperation(expectedEntry, mutation.operation, Date.now())?.id
+      : undefined;
   return {
     result,
     messages,
-    goalId:
-      mutation && !result && expectedEntry && input.options.messages.length
-        ? applySessionGoalOperation(expectedEntry, mutation.operation, Date.now())?.id
+    goalId,
+    goalAdmission:
+      goalId && expectedEntry
+        ? {
+            sessionId: expectedEntry.sessionId,
+            lifecycleRevision: expectedEntry.lifecycleRevision,
+            goalId,
+          }
         : undefined,
   };
 }
@@ -196,4 +214,36 @@ export function commitSessionTurn(input: SessionTurnPlan, context: AgentWorkerOp
       return transferSessionEntryWorkerCandidate(database, context.admit, candidate);
     }),
   );
+}
+
+export function commitSessionGoalMutation(
+  input: SessionGoalMutationPlan,
+  context: AgentWorkerOperationContext,
+) {
+  ensureSessionGoalOperationsSchema(context.open().db);
+  return context.writeTransaction("session.goal.mutate", "Session goal", (database) => {
+    const committed = mutateSessionGoalInDatabase(database, input.sessionKey, input);
+    const candidate: SessionGoalCommitted = {
+      kind: "session-goal",
+      result: {
+        result: committed.result,
+        replayed: committed.replayed,
+        sessionEntry: committed.next,
+      },
+      publication:
+        committed.next && committed.previous
+          ? prepareSessionEntryReplacementPublication(
+              {
+                previous: new Map([[input.sessionKey, committed.previous]]),
+                current: new Map([[input.sessionKey, committed.next]]),
+                pendingArchiveRecovery: false,
+                membershipInvalidatedKeys: [],
+                maintenancePlans: [],
+              },
+              database,
+            )
+          : undefined,
+    };
+    return transferSessionEntryWorkerCandidate(database, context.admit, candidate);
+  });
 }

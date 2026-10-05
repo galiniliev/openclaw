@@ -7,7 +7,10 @@ import {
 } from "../../infra/agent-events.js";
 import { sleepWithAbort } from "../../infra/backoff.js";
 import { runWithGatewayIndependentRootWorkAdmission } from "../../process/gateway-work-admission.js";
-import { runWithMainSessionRecoveryAdmission } from "./main-session-recovery-admission.js";
+import {
+  runWithMainSessionRecoveryAdmission,
+  withPreparedRestartRecoveryTarget,
+} from "./main-session-recovery-admission.js";
 import { createMainSessionRecoveryCapacity } from "./main-session-recovery-capacity.js";
 import { getMainSessionRecoveryRetryCount } from "./main-session-recovery-state.js";
 import type { MainSessionRecoveryStoreTarget } from "./main-session-recovery-store.js";
@@ -24,6 +27,7 @@ import {
 } from "./main-session-restart-recovery-shared.js";
 import {
   loadExpectedRestartRecoveryTarget,
+  isExpectedRestartRecoveryTarget,
   recoverStore,
 } from "./main-session-restart-recovery-store.js";
 
@@ -151,25 +155,32 @@ async function recoverExpectedRestartRecovery(
   },
 ): Promise<RecoveryCounts> {
   const expected = params.expectedTarget;
-  const loadExpected = () =>
-    loadExpectedRestartRecoveryTarget({ expected, storePath: params.storePath });
-  if (!loadExpected()) {
-    return { started: 0, settled: 0, failed: 0, skipped: 0 };
-  }
-  return (
-    (await runWithMainSessionRecoveryAdmission({
-      ...params,
-      canonicalSessionKey: expected.canonicalSessionKey,
-      sessionId: expected.sessionId,
-      isCurrent: () => Boolean(loadExpected()),
-      run: (recoveryAdmission) =>
-        recoverStore({
+  return await withPreparedRestartRecoveryTarget(
+    { ...expected, storePath: params.storePath },
+    async (target) => {
+      if (!isExpectedRestartRecoveryTarget(target.readCurrent(), expected)) {
+        return { started: 0, settled: 0, failed: 0, skipped: 0 };
+      }
+      return (
+        (await runWithMainSessionRecoveryAdmission({
           ...params,
-          shouldContinue: recoveryAdmission.shouldContinue,
-          handledSessionKeys: new Set<string>(),
-          recoveryAdmission,
-        }),
-    })) ?? { started: 0, settled: 0, failed: 0, skipped: 1 }
+          canonicalSessionKey: expected.canonicalSessionKey,
+          sessionId: expected.sessionId,
+          isCurrent: () => isExpectedRestartRecoveryTarget(target.readCurrent(), expected),
+          run: (recoveryAdmission) =>
+            recoverStore({
+              ...params,
+              shouldContinueDelivery: () => params.shouldContinue?.() !== false,
+              shouldContinue: () => {
+                target.assertSourceCurrent();
+                return recoveryAdmission.shouldContinue();
+              },
+              handledSessionKeys: new Set<string>(),
+              recoveryAdmission,
+            }),
+        })) ?? { started: 0, settled: 0, failed: 0, skipped: 1 }
+      );
+    },
   );
 }
 
@@ -202,7 +213,7 @@ export function scheduleRestartAbortedMainSessionRecoveryAfterOwnerRelease(
     shouldContinue: () => true,
     attempt: async (finalAttempt) => {
       const result = await recover();
-      const stillPending = loadExpectedRestartRecoveryTarget({
+      const stillPending = await loadExpectedRestartRecoveryTarget({
         expected: {
           agentId: params.agentId,
           sessionId: params.expectedSessionId,

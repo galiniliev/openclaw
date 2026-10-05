@@ -72,6 +72,15 @@ function listRestartRecoveryRuns(
   );
 }
 
+function isRestartRecoverySourceCurrent(entry: ChatAbortControllerEntry): boolean {
+  try {
+    entry.assertSourceCurrent?.();
+    return !entry.controller.signal.aborted;
+  } catch {
+    return false;
+  }
+}
+
 function formatRestartReplyDrainDetails(counts: {
   pendingReplies: number;
   activeRuns: number;
@@ -177,6 +186,7 @@ function collectActiveRestartSessionRefs(
         sessionKey,
         sessionId,
         observedAt: entry.projectSessionTerminalObservedAt,
+        ...(entry.accepted === true ? { accepted: true as const } : {}),
       });
     }
   }
@@ -188,6 +198,37 @@ function collectActiveRestartSessionRefs(
     });
   }
   return [...activeRuns.values()];
+}
+
+/** Suspension and shutdown retain the same exact registrations across capture awaits. */
+export function captureGatewayRestartRecoveryRuns(
+  params: Pick<
+    GatewayRunShutdownParams,
+    "chatAbortControllers" | "resolveActiveSessionIdForKey" | "restartRecoveryCandidates"
+  > & { acceptedOnly?: true },
+) {
+  const activeEntries = new Map(params.chatAbortControllers);
+  const recoveryCandidates = new Map(params.restartRecoveryCandidates);
+  return {
+    activeRuns: collectActiveRestartSessionRefs(params),
+    isActiveRun: (run: RestartRecoveryCandidate): boolean => {
+      const entry = params.chatAbortControllers.get(run.runId);
+      const candidate = params.restartRecoveryCandidates?.get(run.runId);
+      return (
+        (entry &&
+          entry === activeEntries.get(run.runId) &&
+          (!params.acceptedOnly || entry.accepted === true) &&
+          isRestartRecoverySourceCurrent(entry) &&
+          (entry.registrationCleanupRequested !== true ||
+            entry.projectSessionTerminalPersisted !== true) &&
+          entry.lifecycleGeneration === run.lifecycleGeneration) ||
+        (!params.acceptedOnly &&
+          candidate !== undefined &&
+          candidate === recoveryCandidates.get(run.runId) &&
+          candidate.lifecycleGeneration === run.lifecycleGeneration)
+      );
+    },
+  };
 }
 
 async function settleTerminalSessionPersistenceForRestart(
@@ -238,8 +279,7 @@ async function markActiveRunsForRestartRecovery(
     return 0;
   }
   await settleTerminalSessionPersistenceForRestart(params.chatAbortControllers);
-  const activeRuns = collectActiveRestartSessionRefs(params);
-  const activeEntries = new Map(params.chatAbortControllers);
+  const { activeRuns, isActiveRun } = captureGatewayRestartRecoveryRuns(params);
   const recoveryCandidates = new Map(params.restartRecoveryCandidates);
   const abortReplyRuns = captureGatewayReplyRunRestartAbort(params.resolveGatewayContext);
   try {
@@ -251,21 +291,7 @@ async function markActiveRunsForRestartRecovery(
             resolveGatewayContext: params.resolveGatewayContext,
             activeRuns,
             reason: params.reason,
-            isActiveRun: (run) => {
-              const entry = params.chatAbortControllers.get(run.runId);
-              const candidate = params.restartRecoveryCandidates?.get(run.runId);
-              return (
-                (entry &&
-                  entry === activeEntries.get(run.runId) &&
-                  !entry.controller.signal.aborted &&
-                  (entry.registrationCleanupRequested !== true ||
-                    entry.projectSessionTerminalPersisted !== true) &&
-                  entry.lifecycleGeneration === run.lifecycleGeneration) ||
-                (candidate !== undefined &&
-                  candidate === recoveryCandidates.get(run.runId) &&
-                  candidate.lifecycleGeneration === run.lifecycleGeneration)
-              );
-            },
+            isActiveRun,
           }),
         );
         return markerOutcome.then(() => false);

@@ -205,6 +205,34 @@ export function prepareSessionWorkerPlacementMutationCheck(
   return assertCurrent;
 }
 
+/** Accepting recovery intent retains physical resources; dispatch still owns reclaim and fencing. */
+export async function prepareSessionWorkerPlacementRecoveryIntentCheck(
+  params: Pick<SessionWorkerPlacementMutationParams, "context" | "sessionId">,
+) {
+  const service = params.context.workerSessionPlacementService;
+  if (!params.sessionId || !service) {
+    return { assertCurrent: () => {}, [Symbol.dispose]: () => {} };
+  }
+  if (!service.prepareRuntimeRefresh) {
+    throw new Error("Worker placement recovery observation is unavailable");
+  }
+  const prepared = await service.prepareRuntimeRefresh(params.sessionId);
+  try {
+    prepared.assertCurrent();
+    const current = prepared.placement;
+    if (
+      current?.turnClaim ||
+      (current && !["local", "active", "failed", "reclaimed"].includes(current.state))
+    ) {
+      throw new Error("Worker placement changed before recovery intent acceptance");
+    }
+    return { assertCurrent: prepared.assertCurrent, [Symbol.dispose]: prepared.release };
+  } catch (error) {
+    prepared.release();
+    throw error;
+  }
+}
+
 /** Archive visibility can change while a failed placement retains its physical cleanup. */
 export function prepareSessionWorkerPlacementArchiveCheck(
   params: Pick<SessionWorkerPlacementMutationParams, "context" | "sessionId">,

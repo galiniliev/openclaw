@@ -305,6 +305,7 @@ export async function prepareEmbeddedAttemptToolBase(params: {
             sessionConfigSource: attempt.oneShotCliRun ? "pinned" : "runtime",
             webSearchEnabled: attempt.toolOverrides?.webSearch !== false,
             githubPublicationAvailable: attempt.githubPublicationAvailable,
+            githubPullRequestReadAvailable: attempt.githubPullRequestReadAvailable,
             abortSignal,
             skillWorkshop: {
               env: attempt.skillWorkshopProposalEnv,

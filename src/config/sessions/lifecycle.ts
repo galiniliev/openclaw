@@ -88,6 +88,9 @@ export function resolveSessionWorkStartError(
   if (entry?.initializationPending === true) {
     return `Session "${sessionKey}" is still initializing. Retry after initialization completes.`;
   }
+  if (entry?.mainRestartRecovery?.pause && options?.purpose !== "accepted-result-settlement") {
+    return `Session "${sessionKey}" is paused because an interrupted external action has no verified outcome. Review the action and explicitly choose whether to continue.`;
+  }
   if (entry?.providerReview && options?.purpose !== "accepted-result-settlement") {
     try {
       if (!options?.providerReviewAcknowledgment) {

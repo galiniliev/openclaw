@@ -69,6 +69,11 @@ it("does not create or register missing stores and recognizes non-session state"
   const databasePath = resolveOpenClawAgentSqlitePath(scope);
   const registered = listOpenClawRegisteredAgentDatabases({ env: state.env });
   expect(await hasSessionEntriesByStatusReadOnly(scope, ["running"])).toBe(false);
+  expect(
+    await hasSessionEntriesByStatusReadOnly(scope, ["running"], {
+      includeRestartRecovery: true,
+    }),
+  ).toBe(false);
   expect(await listSessionEntriesByStatus(scope, ["running"])).toEqual([]);
   await expect(fs.stat(databasePath)).rejects.toMatchObject({ code: "ENOENT" });
   expect(listOpenClawRegisteredAgentDatabases({ env: state.env })).toEqual(registered);
@@ -92,7 +97,77 @@ it("keeps unknown schemas eligible for recovery without treating them as empty",
   database.db.exec("DROP TABLE schema_meta");
   await closeOpenClawAgentDatabasesAsync();
   expect(await hasSessionEntriesByStatusReadOnly(scope, ["running"])).toBe(true);
+  expect(
+    await hasSessionEntriesByStatusReadOnly(scope, ["running"], {
+      includeRestartRecovery: true,
+    }),
+  ).toBe(true);
   await expect(listSessionEntriesByStatus(scope, ["running"])).rejects.toThrow();
+});
+
+it("preselects only an exact durable queue hint without entering host SQLite", async () => {
+  const scope = { agentId: "queued-hints", env: state.env };
+  const database = openOpenClawAgentDatabase(scope);
+  const key = "agent:queued-hints:done";
+  const entry = { sessionId: "queued-done", status: "done" as const, updatedAt: 10 };
+  writeSessionEntry(database, key, entry);
+  for (const [suffix, record] of [
+    ["numeric", { ...entry, mainRestartRecovery: { queuedInputsPending: 1 } }],
+    [
+      "numeric-invalid-goal",
+      {
+        ...entry,
+        mainRestartRecovery: { queuedInputsPending: 1 },
+        restartRecoveryGoal: "not an object",
+      },
+    ],
+    ["false", { ...entry, mainRestartRecovery: { queuedInputsPending: false } }],
+    ["invalid", { ...entry, sessionId: null, mainRestartRecovery: { queuedInputsPending: true } }],
+    ["malformed", undefined],
+  ] as const) {
+    const candidate = `${key}-${suffix}`;
+    writeSessionEntry(database, candidate, entry);
+    database.db
+      .prepare("UPDATE session_nodes SET entry_json = ? WHERE session_key = ?")
+      .run(record ? JSON.stringify(record) : "not JSON", candidate);
+  }
+  await closeOpenClawAgentDatabasesAsync();
+  const observer = observeParentSqlite();
+  try {
+    expect(
+      await hasSessionEntriesByStatusReadOnly(scope, ["running"], {
+        includeRestartRecovery: true,
+      }),
+    ).toBe(false);
+    expect(observer.counts).toEqual(emptySqliteCounts());
+  } finally {
+    observer.restore();
+  }
+  writeSessionEntry(openOpenClawAgentDatabase(scope), key, {
+    ...entry,
+    mainRestartRecovery: {
+      cycleId: "queued-cycle",
+      revision: 1,
+      chargedAttempts: 0,
+      queuedInputsPending: true,
+    },
+  });
+  await closeOpenClawAgentDatabasesAsync();
+  const queuedObserver = observeParentSqlite();
+  try {
+    expect(await hasSessionEntriesByStatusReadOnly(scope, ["running"])).toBe(false);
+    expect(
+      await hasSessionEntriesByStatusReadOnly(scope, ["running"], {
+        includeRestartRecovery: true,
+      }),
+    ).toBe(true);
+    expect(
+      await hasSessionEntriesByStatusReadOnly(scope, [], { includeRestartRecovery: true }),
+    ).toBe(true);
+    expect(queuedObserver.counts).toEqual(emptySqliteCounts());
+  } finally {
+    queuedObserver.restore();
+  }
 });
 
 it("keeps process-held incognito status reads on their native owner", async () => {

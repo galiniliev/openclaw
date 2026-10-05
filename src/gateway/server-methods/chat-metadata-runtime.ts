@@ -16,10 +16,7 @@ import { getSkillsSnapshotVersion } from "../../skills/runtime/refresh-state.js"
 import { assertAgentDatabaseAdmitted } from "../../state/agent-database-admission.js";
 import { isUserModelAuthProfileId } from "../../state/user-model-account-id.js";
 import { listUserProfileAuthLinks } from "../../state/user-model-accounts.js";
-import {
-  prepareChatAccountSelection,
-  resolveChatAccountSelection,
-} from "./chat-account-selection.js";
+import { prepareChatAccountSelection } from "./chat-account-selection.js";
 import type {
   ChatMetadataReadParams,
   ChatMetadataResult,
@@ -30,7 +27,6 @@ import {
   ChatMetadataSnapshotUnavailableError,
   generationFactsMatch,
   type ChatMetadataRuntimeDeps,
-  type PreparedAgentFacts,
   type PreparedGenerationFacts,
 } from "./chat-metadata-facts.js";
 import { createChatMetadataModelList } from "./chat-metadata-model-list.js";
@@ -40,7 +36,9 @@ import {
   prepareSessionAcpMeta,
   sessionProjectionKey,
   resolveSessionCatalogProfiles,
-  projectChatSessionMetadata,
+  readPreparedChatMetadata,
+  type PreparedAgentMetadata,
+  type PreparedChatMetadataProjection,
 } from "./chat-metadata-session-projection.js";
 import type {
   ChatStartupProjectionReadParams,
@@ -51,18 +49,7 @@ import type {
   PreparedModelsListRequest,
 } from "./models-list-context.js";
 
-type PreparedAgentMetadata = PreparedAgentFacts & {
-  commands?: unknown[];
-  swarmEnabled: boolean;
-};
-
 type PreparedProjection<T> = { read: () => T; isCurrent: () => boolean };
-
-type PreparedChatMetadataProjection = Awaited<
-  ReturnType<ChatMetadataRuntimeDeps["buildProjection"]>
-> & {
-  agent: PreparedAgentMetadata;
-};
 
 type AgentProjectionEntry =
   | { state: "pending"; promise: Promise<PreparedChatMetadataProjection> }
@@ -80,33 +67,6 @@ type PreparedMetadataGeneration = {
 type ChatMetadataRefreshOptions = { notifyIfUnchanged?: boolean };
 
 const CHAT_METADATA_CACHE_MAX_ENTRIES = 64;
-
-function readPreparedChatMetadata(
-  projection: PreparedChatMetadataProjection,
-  readParams: ChatMetadataReadParams,
-  config: OpenClawConfig,
-  acpMeta: SessionAcpMeta | null,
-  readAccountSelection?: Awaited<ReturnType<typeof prepareChatAccountSelection>>,
-): ChatMetadataResult {
-  readParams.draftAccountSelection?.assertCurrent();
-  const { agent } = projection;
-  return projectChatSessionMetadata(
-    readParams,
-    {
-      ...projection.read(),
-      ...(agent.commands !== undefined ? { commands: agent.commands } : {}),
-      swarmEnabled: agent.swarmEnabled,
-      accountSelection:
-        readAccountSelection?.() ??
-        resolveChatAccountSelection({
-          authStore: agent.authStore,
-          sessionEntry: readParams.sessionEntry,
-        }),
-    },
-    config,
-    acpMeta,
-  );
-}
 
 export function createGatewayChatMetadataRuntime(params: {
   getConfig: () => OpenClawConfig;
