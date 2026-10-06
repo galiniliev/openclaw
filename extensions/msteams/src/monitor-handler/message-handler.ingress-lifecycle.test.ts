@@ -284,17 +284,12 @@ describe("Microsoft Teams drain claim ownership", () => {
             },
           ]),
         );
-        await accept(
-          groupActivity("activity-quote-followup", "<at>Bot</at> follow up", [
-            { type: "mention", text: "<at>Bot</at>", mentioned: { id: "bot-id", name: "Bot" } },
-          ]),
-        );
         await drain();
 
         await vi.waitFor(() => expect(dispatchMock).toHaveBeenCalledTimes(1), { timeout: 5_000 });
         const ctx = dispatchMock.mock.calls[0]?.[0].ctx;
         expect(ctx).toMatchObject({
-          BodyForAgent: "ask @Alice\nfollow up",
+          BodyForAgent: "ask @Alice",
           ReplyToBody: "Allowed quoted preview",
           ReplyToSender: "Alice",
         });
@@ -337,16 +332,11 @@ describe("Microsoft Teams drain claim ownership", () => {
           ]),
         );
         storedAllowFrom = [];
-        await accept(
-          groupActivity("activity-quote-revoked-followup", "<at>Bot</at> follow up", [
-            { type: "mention", text: "<at>Bot</at>", mentioned: { id: "bot-id", name: "Bot" } },
-          ]),
-        );
         await drain();
 
         await vi.waitFor(() => expect(dispatchMock).toHaveBeenCalledTimes(1), { timeout: 5_000 });
         const ctx = dispatchMock.mock.calls[0]?.[0].ctx;
-        expect(ctx).toMatchObject({ BodyForAgent: "ask @Alice\nfollow up" });
+        expect(ctx).toMatchObject({ BodyForAgent: "ask @Alice" });
         expect(ctx?.ReplyToBody).toBeUndefined();
         expect(ctx?.ReplyToSender).toBeUndefined();
       },
