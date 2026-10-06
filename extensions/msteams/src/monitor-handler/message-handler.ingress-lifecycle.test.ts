@@ -92,15 +92,33 @@ async function withIntegratedIngress(
   });
   const dispatchMock = runtimeApiMockState.dispatchReplyWithBufferedBlockDispatcher;
   let capturedDrain: (() => Promise<void>) | undefined;
+  let capturedFlushKey: ((key: string) => Promise<void>) | undefined;
+  let acceptedCount = 0;
+  let debouncedEntryCount = 0;
+  const debounceKeys = new Set<string>();
   const createDebouncer: typeof createInboundDebouncer = (debouncerOptions) => {
-    const debouncer = createInboundDebouncer(debouncerOptions);
+    const debouncer = createInboundDebouncer({
+      ...debouncerOptions,
+      buildKey: (item) => {
+        const key = debouncerOptions.buildKey(item);
+        if (key) {
+          debounceKeys.add(key);
+        }
+        return key;
+      },
+    });
     capturedDrain = debouncer.drain;
-    return debouncer;
+    capturedFlushKey = debouncer.flushKey;
+    const enqueue: typeof debouncer.enqueue = async (item) => {
+      await debouncer.enqueue(item);
+      debouncedEntryCount += 1;
+    };
+    return { ...debouncer, enqueue };
   };
   const { deps } = createMessageHandlerDeps(cfg, {
     ...options,
     createInboundDebouncer: createDebouncer,
-    resolveInboundDebounceMs: vi.fn(() => 40),
+    resolveInboundDebounceMs: vi.fn(() => 60_000),
   });
   const handler = createMSTeamsMessageHandler(deps);
   const ingress = createMSTeamsIngress({
@@ -110,21 +128,25 @@ async function withIntegratedIngress(
     dispatch: async (activity, lifecycle) => await handler(context(activity), lifecycle),
   });
   const monitorResult = vi.mocked(createChannelIngressMonitor).mock.results.at(-1);
-  if (monitorResult?.type !== "return" || !capturedDrain) {
+  if (monitorResult?.type !== "return" || !capturedDrain || !capturedFlushKey) {
     throw new Error("Expected the Microsoft Teams ingress and debounce owners");
   }
   const monitor = monitorResult.value;
   const drainDebounce = capturedDrain;
+  const flushDebounceKey = capturedFlushKey;
   const drain = async () => {
     ingress.start();
-    await monitor.waitForIdle();
-    await monitor.waitForIdle();
+    await vi.waitFor(() => expect(debouncedEntryCount).toBe(acceptedCount), { timeout: 5_000 });
+    for (const key of debounceKeys) {
+      await flushDebounceKey(key);
+    }
     await drainDebounce();
   };
   try {
     await run({
       accept: async (activity) => {
         await ingress.accept(activity);
+        acceptedCount += 1;
       },
       drain,
       dispatchMock,
