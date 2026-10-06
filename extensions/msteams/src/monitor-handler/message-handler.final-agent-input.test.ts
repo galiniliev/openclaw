@@ -1,13 +1,5 @@
-import fs from "node:fs/promises";
 import { createServer, type ServerResponse } from "node:http";
-import os from "node:os";
-import path from "node:path";
 import { createInboundDebouncer } from "openclaw/plugin-sdk/channel-inbound-debounce";
-import {
-  closeOpenClawStateDatabaseForTest,
-  createChannelIngressQueueForTests,
-} from "openclaw/plugin-sdk/channel-ingress-test-runtime";
-import { createChannelIngressMonitor } from "openclaw/plugin-sdk/channel-outbound";
 import { closeOpenClawStateDatabaseAsync } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { describe, expect, it, vi } from "vitest";
 import { buildMockOpenAiResponsesProvider } from "../../../../src/gateway/test-openai-responses-model.js";
@@ -15,16 +7,10 @@ import { createPluginRuntime } from "../../../../src/plugins/runtime/index.js";
 import { withOpenClawTestState } from "../../../../src/test-utils/openclaw-test-state.js";
 import type { OpenClawConfig } from "../../runtime-api.js";
 import type { MSTeamsMessageHandlerDeps } from "../monitor-handler.types.js";
-import { createMSTeamsIngress } from "../msteams-ingress.js";
 import { setMSTeamsRuntime } from "../runtime.js";
 import type { MSTeamsTurnContext } from "../sdk-types.js";
 import { createMSTeamsMessageHandler } from "./message-handler.js";
 import { buildChannelActivity } from "./message-handler.test-support.js";
-
-vi.mock("openclaw/plugin-sdk/channel-outbound", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("openclaw/plugin-sdk/channel-outbound")>();
-  return { ...actual, createChannelIngressMonitor: vi.fn(actual.createChannelIngressMonitor) };
-});
 
 function writeOpenAiResponsesText(
   response: ServerResponse,
@@ -105,7 +91,7 @@ function groupActivity(
   } as MSTeamsTurnContext["activity"];
 }
 
-async function withRealAgentInputIngress(
+async function withRealAgentInputHandler(
   cfg: OpenClawConfig,
   run: (params: {
     accept: (activity: MSTeamsTurnContext["activity"]) => Promise<void>;
@@ -145,7 +131,6 @@ async function withRealAgentInputIngress(
           response.destroy(error instanceof Error ? error : new Error(String(error)));
         });
       });
-      let stopIngress: (() => Promise<void>) | undefined;
       try {
         await new Promise<void>((resolve, reject) => {
           server.once("error", reject);
@@ -191,8 +176,6 @@ async function withRealAgentInputIngress(
         const runtime = createPluginRuntime();
         let capturedDrain: (() => Promise<void>) | undefined;
         let capturedFlushKey: ((key: string) => Promise<void>) | undefined;
-        let acceptedCount = 0;
-        let debouncedEntryCount = 0;
         const debounceKeys = new Set<string>();
         runtime.channel.debounce.createInboundDebouncer = (debouncerOptions) => {
           const debouncer = createInboundDebouncer({
@@ -207,11 +190,7 @@ async function withRealAgentInputIngress(
           });
           capturedDrain = debouncer.drain;
           capturedFlushKey = debouncer.flushKey;
-          const enqueue: typeof debouncer.enqueue = async (item) => {
-            await debouncer.enqueue(item);
-            debouncedEntryCount += 1;
-          };
-          return { ...debouncer, enqueue };
+          return debouncer;
         };
         runtime.channel.debounce.resolveInboundDebounceMs = vi.fn(() => 60_000);
         runtime.channel.routing.resolveAgentRoute = vi.fn(({ peer }) => ({
@@ -225,16 +204,6 @@ async function withRealAgentInputIngress(
         runtime.channel.pairing.readAllowFromStore = vi.fn(async () => []);
         runtime.channel.pairing.upsertPairingRequest = vi.fn(async () => null);
         setMSTeamsRuntime(runtime);
-
-        const created = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-msteams-agent-"));
-        const stateDir = await fs.realpath(created);
-        type Queue = NonNullable<Parameters<typeof createMSTeamsIngress>[0]["queue"]>;
-        type Payload = Parameters<Queue["enqueue"]>[1];
-        const queue = createChannelIngressQueueForTests<Payload>({
-          channelId: "msteams",
-          accountId: "test-app",
-          stateDir,
-        });
         const conversationStore = {
           get: vi.fn<MSTeamsMessageHandlerDeps["conversationStore"]["get"]>(async () => null),
           upsert: vi.fn(async () => undefined),
@@ -263,48 +232,31 @@ async function withRealAgentInputIngress(
           } as unknown as MSTeamsMessageHandlerDeps["log"],
         };
         const handler = createMSTeamsMessageHandler(deps);
-        const ingress = createMSTeamsIngress({
-          accountId: "test-app",
-          queue,
-          runtime: { error: vi.fn(), log: vi.fn() },
-          dispatch: async (activity, lifecycle) => await handler(context(activity), lifecycle),
-        });
-        const monitorResult = vi.mocked(createChannelIngressMonitor).mock.results.at(-1);
-        if (monitorResult?.type !== "return" || !capturedDrain || !capturedFlushKey) {
-          throw new Error("Expected the Microsoft Teams real-agent ingress and debounce owners");
+        if (!capturedDrain || !capturedFlushKey) {
+          throw new Error("Expected the Microsoft Teams real-agent debounce owner");
         }
-        const monitor = monitorResult.value;
         const drainDebounce = capturedDrain;
         const flushDebounceKey = capturedFlushKey;
         const drain = async (beforeFlush?: () => void | Promise<void>) => {
-          ingress.start();
-          await monitor.waitForIdle();
-          expect(debouncedEntryCount).toBe(acceptedCount);
           await beforeFlush?.();
           for (const key of debounceKeys) {
             await flushDebounceKey(key);
           }
           await drainDebounce();
         };
-        stopIngress = async () => {
-          await monitor.pause();
-          await monitor.waitForIdle();
+        try {
+          await run({
+            accept: async (activity) => {
+              await handler(context(activity));
+            },
+            drain,
+            modelRequests,
+          });
+        } finally {
           await drainDebounce();
-          await ingress.stop();
           await closeOpenClawStateDatabaseAsync();
-          closeOpenClawStateDatabaseForTest();
-          await fs.rm(stateDir, { recursive: true, force: true });
-        };
-        await run({
-          accept: async (activity) => {
-            await ingress.accept(activity);
-            acceptedCount += 1;
-          },
-          drain,
-          modelRequests,
-        });
+        }
       } finally {
-        await stopIngress?.();
         server.closeAllConnections();
         await new Promise<void>((resolve) => {
           server.close(() => resolve());
@@ -320,7 +272,7 @@ describe("Microsoft Teams final agent input", () => {
     { timeout: 90_000 },
     async () => {
       const groupAllowFrom = ["bob-aad", "alice-aad"];
-      await withRealAgentInputIngress(
+      await withRealAgentInputHandler(
         {
           messages: { inbound: { debounceMs: 40 } },
           channels: {
