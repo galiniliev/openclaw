@@ -284,7 +284,11 @@ describe("Microsoft Teams drain claim ownership", () => {
             },
           ]),
         );
-        await accept(groupActivity("activity-quote-followup", "follow up"));
+        await accept(
+          groupActivity("activity-quote-followup", "<at>Bot</at> follow up", [
+            { type: "mention", text: "<at>Bot</at>", mentioned: { id: "bot-id", name: "Bot" } },
+          ]),
+        );
         await drain();
 
         await vi.waitFor(() => expect(dispatchMock).toHaveBeenCalledTimes(1), { timeout: 5_000 });
@@ -333,7 +337,11 @@ describe("Microsoft Teams drain claim ownership", () => {
           ]),
         );
         storedAllowFrom = [];
-        await accept(groupActivity("activity-quote-revoked-followup", "follow up"));
+        await accept(
+          groupActivity("activity-quote-revoked-followup", "<at>Bot</at> follow up", [
+            { type: "mention", text: "<at>Bot</at>", mentioned: { id: "bot-id", name: "Bot" } },
+          ]),
+        );
         await drain();
 
         await vi.waitFor(() => expect(dispatchMock).toHaveBeenCalledTimes(1), { timeout: 5_000 });
