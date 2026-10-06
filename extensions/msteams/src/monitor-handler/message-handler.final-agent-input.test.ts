@@ -7,6 +7,7 @@ import { createPluginRuntime } from "../../../../src/plugins/runtime/index.js";
 import { withOpenClawTestState } from "../../../../src/test-utils/openclaw-test-state.js";
 import type { OpenClawConfig } from "../../runtime-api.js";
 import type { MSTeamsMessageHandlerDeps } from "../monitor-handler.types.js";
+import type { MSTeamsIngressLifecycle } from "../msteams-ingress.js";
 import { setMSTeamsRuntime } from "../runtime.js";
 import type { MSTeamsTurnContext } from "../sdk-types.js";
 import { createMSTeamsMessageHandler } from "./message-handler.js";
@@ -71,6 +72,23 @@ function context(activity: MSTeamsTurnContext["activity"]): MSTeamsTurnContext {
     sendActivities: vi.fn(async () => []),
     updateActivity: vi.fn(async () => ({ id: "updated" })),
     deleteActivity: vi.fn(async () => {}),
+  };
+}
+
+function createLifecycle(): MSTeamsIngressLifecycle & {
+  settled: Promise<void>;
+} {
+  let settle!: () => void;
+  const settled = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
+  return {
+    abortSignal: new AbortController().signal,
+    onAdopted: vi.fn(async () => settle()),
+    onAbandoned: vi.fn(async () => settle()),
+    onDeferred: () => {},
+    onAdoptionFinalizing: () => {},
+    settled,
   };
 }
 
@@ -174,6 +192,7 @@ async function withRealAgentInputHandler(
         } satisfies OpenClawConfig;
         await state.writeConfig(proofCfg);
         const runtime = createPluginRuntime();
+        const runtimeErrors: string[] = [];
         let capturedDrain: (() => Promise<void>) | undefined;
         let capturedFlushKey: ((key: string) => Promise<void>) | undefined;
         const debounceKeys = new Set<string>();
@@ -211,9 +230,13 @@ async function withRealAgentInputHandler(
           remove: vi.fn(async () => false),
           findPreferredDmByUserId: vi.fn(async () => null),
         } satisfies MSTeamsMessageHandlerDeps["conversationStore"];
+        const pendingLifecycles: ReturnType<typeof createLifecycle>[] = [];
+        const recordRuntimeError = (message: unknown) => {
+          runtimeErrors.push(String(message));
+        };
         const deps: MSTeamsMessageHandlerDeps = {
           cfg: proofCfg,
-          runtime: { error: vi.fn() },
+          runtime: { error: vi.fn(recordRuntimeError) },
           appId: "test-app",
           app: {} as MSTeamsMessageHandlerDeps["app"],
           tokenProvider: {
@@ -228,7 +251,9 @@ async function withRealAgentInputHandler(
           log: {
             info: vi.fn(),
             debug: vi.fn(),
-            error: vi.fn(),
+            error: vi.fn((message: string, details?: unknown) => {
+              runtimeErrors.push(`${message}: ${JSON.stringify(details)}`);
+            }),
           } as unknown as MSTeamsMessageHandlerDeps["log"],
         };
         const handler = createMSTeamsMessageHandler(deps);
@@ -243,11 +268,15 @@ async function withRealAgentInputHandler(
             await flushDebounceKey(key);
           }
           await drainDebounce();
+          await Promise.all(pendingLifecycles.splice(0).map((lifecycle) => lifecycle.settled));
+          expect(runtimeErrors).toEqual([]);
         };
         try {
           await run({
             accept: async (activity) => {
-              await handler(context(activity));
+              const lifecycle = createLifecycle();
+              pendingLifecycles.push(lifecycle);
+              await handler(context(activity), lifecycle);
             },
             drain,
             modelRequests,
