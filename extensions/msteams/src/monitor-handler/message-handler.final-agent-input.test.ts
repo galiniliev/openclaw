@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import { createServer } from "node:http";
+import { createServer, type ServerResponse } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { createInboundDebouncer } from "openclaw/plugin-sdk/channel-inbound-debounce";
@@ -10,22 +10,73 @@ import {
 import { createChannelIngressMonitor } from "openclaw/plugin-sdk/channel-outbound";
 import { closeOpenClawStateDatabaseAsync } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { describe, expect, it, vi } from "vitest";
-import { createMSTeamsIngress } from "../extensions/msteams/src/msteams-ingress.js";
-import type { MSTeamsMessageHandlerDeps } from "../extensions/msteams/src/monitor-handler.types.js";
-import { createMSTeamsMessageHandler } from "../extensions/msteams/src/monitor-handler/message-handler.js";
-import { buildChannelActivity } from "../extensions/msteams/src/monitor-handler/message-handler.test-support.js";
-import { setMSTeamsRuntime } from "../extensions/msteams/src/runtime.js";
-import type { MSTeamsTurnContext } from "../extensions/msteams/src/sdk-types.js";
-import type { OpenClawConfig } from "../src/config/types.openclaw.js";
-import { buildMockOpenAiResponsesProvider } from "../src/gateway/test-openai-responses-model.js";
-import { createPluginRuntime } from "../src/plugins/runtime/index.js";
-import { withOpenClawTestState } from "../src/test-utils/openclaw-test-state.js";
-import { writeOpenAiResponsesText } from "./helpers/openai-responses-sse.js";
+import { buildMockOpenAiResponsesProvider } from "../../../../src/gateway/test-openai-responses-model.js";
+import { createPluginRuntime } from "../../../../src/plugins/runtime/index.js";
+import { withOpenClawTestState } from "../../../../src/test-utils/openclaw-test-state.js";
+import type { OpenClawConfig } from "../../runtime-api.js";
+import type { MSTeamsMessageHandlerDeps } from "../monitor-handler.types.js";
+import { createMSTeamsIngress } from "../msteams-ingress.js";
+import { setMSTeamsRuntime } from "../runtime.js";
+import type { MSTeamsTurnContext } from "../sdk-types.js";
+import { createMSTeamsMessageHandler } from "./message-handler.js";
+import { buildChannelActivity } from "./message-handler.test-support.js";
 
 vi.mock("openclaw/plugin-sdk/channel-outbound", async (importOriginal) => {
   const actual = await importOriginal<typeof import("openclaw/plugin-sdk/channel-outbound")>();
   return { ...actual, createChannelIngressMonitor: vi.fn(actual.createChannelIngressMonitor) };
 });
+
+function writeOpenAiResponsesText(
+  response: ServerResponse,
+  params: { text: string; messageId: string; responseId: string },
+): void {
+  const message = {
+    type: "message",
+    id: params.messageId,
+    role: "assistant",
+    status: "completed",
+    content: [{ type: "output_text", text: params.text, annotations: [] }],
+  };
+  const events = [
+    {
+      type: "response.output_item.added",
+      output_index: 0,
+      item: { ...message, status: "in_progress", content: [] },
+    },
+    {
+      type: "response.output_text.delta",
+      item_id: message.id,
+      output_index: 0,
+      content_index: 0,
+      delta: params.text,
+    },
+    {
+      type: "response.output_text.done",
+      item_id: message.id,
+      output_index: 0,
+      content_index: 0,
+      text: params.text,
+    },
+    { type: "response.output_item.done", output_index: 0, item: message },
+    {
+      type: "response.completed",
+      response: {
+        id: params.responseId,
+        status: "completed",
+        output: [message],
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      },
+    },
+  ];
+  response.writeHead(200, {
+    "content-type": "text/event-stream",
+    "cache-control": "no-store",
+    connection: "keep-alive",
+  });
+  response.end(
+    `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`,
+  );
+}
 
 function context(activity: MSTeamsTurnContext["activity"]): MSTeamsTurnContext {
   return {
