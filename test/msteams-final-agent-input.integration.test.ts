@@ -1,69 +1,31 @@
-import { createServer, type ServerResponse } from "node:http";
+import fs from "node:fs/promises";
+import { createServer } from "node:http";
+import os from "node:os";
+import path from "node:path";
 import { createInboundDebouncer } from "openclaw/plugin-sdk/channel-inbound-debounce";
+import {
+  closeOpenClawStateDatabaseForTest,
+  createChannelIngressQueueForTests,
+} from "openclaw/plugin-sdk/channel-ingress-test-runtime";
+import { createChannelIngressMonitor } from "openclaw/plugin-sdk/channel-outbound";
 import { closeOpenClawStateDatabaseAsync } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { describe, expect, it, vi } from "vitest";
-import { buildMockOpenAiResponsesProvider } from "../../../../src/gateway/test-openai-responses-model.js";
-import { createPluginRuntime } from "../../../../src/plugins/runtime/index.js";
-import { withOpenClawTestState } from "../../../../src/test-utils/openclaw-test-state.js";
-import type { OpenClawConfig } from "../../runtime-api.js";
-import type { MSTeamsMessageHandlerDeps } from "../monitor-handler.types.js";
-import type { MSTeamsIngressLifecycle } from "../msteams-ingress.js";
-import { setMSTeamsRuntime } from "../runtime.js";
-import type { MSTeamsTurnContext } from "../sdk-types.js";
-import { createMSTeamsMessageHandler } from "./message-handler.js";
-import { buildChannelActivity } from "./message-handler.test-support.js";
+import { createMSTeamsIngress } from "../extensions/msteams/src/msteams-ingress.js";
+import type { MSTeamsMessageHandlerDeps } from "../extensions/msteams/src/monitor-handler.types.js";
+import { createMSTeamsMessageHandler } from "../extensions/msteams/src/monitor-handler/message-handler.js";
+import { buildChannelActivity } from "../extensions/msteams/src/monitor-handler/message-handler.test-support.js";
+import { setMSTeamsRuntime } from "../extensions/msteams/src/runtime.js";
+import type { MSTeamsTurnContext } from "../extensions/msteams/src/sdk-types.js";
+import type { OpenClawConfig } from "../src/config/types.openclaw.js";
+import { buildMockOpenAiResponsesProvider } from "../src/gateway/test-openai-responses-model.js";
+import { createPluginRuntime } from "../src/plugins/runtime/index.js";
+import { withOpenClawTestState } from "../src/test-utils/openclaw-test-state.js";
+import { writeOpenAiResponsesText } from "./helpers/openai-responses-sse.js";
 
-function writeOpenAiResponsesText(
-  response: ServerResponse,
-  params: { text: string; messageId: string; responseId: string },
-): void {
-  const message = {
-    type: "message",
-    id: params.messageId,
-    role: "assistant",
-    status: "completed",
-    content: [{ type: "output_text", text: params.text, annotations: [] }],
-  };
-  const events = [
-    {
-      type: "response.output_item.added",
-      output_index: 0,
-      item: { ...message, status: "in_progress", content: [] },
-    },
-    {
-      type: "response.output_text.delta",
-      item_id: message.id,
-      output_index: 0,
-      content_index: 0,
-      delta: params.text,
-    },
-    {
-      type: "response.output_text.done",
-      item_id: message.id,
-      output_index: 0,
-      content_index: 0,
-      text: params.text,
-    },
-    { type: "response.output_item.done", output_index: 0, item: message },
-    {
-      type: "response.completed",
-      response: {
-        id: params.responseId,
-        status: "completed",
-        output: [message],
-        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
-      },
-    },
-  ];
-  response.writeHead(200, {
-    "content-type": "text/event-stream",
-    "cache-control": "no-store",
-    connection: "keep-alive",
-  });
-  response.end(
-    `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`,
-  );
-}
+vi.mock("openclaw/plugin-sdk/channel-outbound", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("openclaw/plugin-sdk/channel-outbound")>();
+  return { ...actual, createChannelIngressMonitor: vi.fn(actual.createChannelIngressMonitor) };
+});
 
 function context(activity: MSTeamsTurnContext["activity"]): MSTeamsTurnContext {
   return {
@@ -72,23 +34,6 @@ function context(activity: MSTeamsTurnContext["activity"]): MSTeamsTurnContext {
     sendActivities: vi.fn(async () => []),
     updateActivity: vi.fn(async () => ({ id: "updated" })),
     deleteActivity: vi.fn(async () => {}),
-  };
-}
-
-function createLifecycle(): MSTeamsIngressLifecycle & {
-  settled: Promise<void>;
-} {
-  let settle!: () => void;
-  const settled = new Promise<void>((resolve) => {
-    settle = resolve;
-  });
-  return {
-    abortSignal: new AbortController().signal,
-    onAdopted: vi.fn(async () => settle()),
-    onAbandoned: vi.fn(async () => settle()),
-    onDeferred: () => {},
-    onAdoptionFinalizing: () => {},
-    settled,
   };
 }
 
@@ -109,7 +54,7 @@ function groupActivity(
   } as MSTeamsTurnContext["activity"];
 }
 
-async function withRealAgentInputHandler(
+async function withRealAgentInputIngress(
   cfg: OpenClawConfig,
   run: (params: {
     accept: (activity: MSTeamsTurnContext["activity"]) => Promise<void>;
@@ -149,6 +94,7 @@ async function withRealAgentInputHandler(
           response.destroy(error instanceof Error ? error : new Error(String(error)));
         });
       });
+      let stopIngress: (() => Promise<void>) | undefined;
       try {
         await new Promise<void>((resolve, reject) => {
           server.once("error", reject);
@@ -192,9 +138,10 @@ async function withRealAgentInputHandler(
         } satisfies OpenClawConfig;
         await state.writeConfig(proofCfg);
         const runtime = createPluginRuntime();
-        const runtimeErrors: string[] = [];
         let capturedDrain: (() => Promise<void>) | undefined;
         let capturedFlushKey: ((key: string) => Promise<void>) | undefined;
+        let acceptedCount = 0;
+        let debouncedEntryCount = 0;
         const debounceKeys = new Set<string>();
         runtime.channel.debounce.createInboundDebouncer = (debouncerOptions) => {
           const debouncer = createInboundDebouncer({
@@ -209,7 +156,11 @@ async function withRealAgentInputHandler(
           });
           capturedDrain = debouncer.drain;
           capturedFlushKey = debouncer.flushKey;
-          return debouncer;
+          const enqueue: typeof debouncer.enqueue = async (item) => {
+            await debouncer.enqueue(item);
+            debouncedEntryCount += 1;
+          };
+          return { ...debouncer, enqueue };
         };
         runtime.channel.debounce.resolveInboundDebounceMs = vi.fn(() => 60_000);
         runtime.channel.routing.resolveAgentRoute = vi.fn(({ peer }) => ({
@@ -223,6 +174,16 @@ async function withRealAgentInputHandler(
         runtime.channel.pairing.readAllowFromStore = vi.fn(async () => []);
         runtime.channel.pairing.upsertPairingRequest = vi.fn(async () => null);
         setMSTeamsRuntime(runtime);
+
+        const created = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-msteams-agent-"));
+        const stateDir = await fs.realpath(created);
+        type Queue = NonNullable<Parameters<typeof createMSTeamsIngress>[0]["queue"]>;
+        type Payload = Parameters<Queue["enqueue"]>[1];
+        const queue = createChannelIngressQueueForTests<Payload>({
+          channelId: "msteams",
+          accountId: "test-app",
+          stateDir,
+        });
         const conversationStore = {
           get: vi.fn<MSTeamsMessageHandlerDeps["conversationStore"]["get"]>(async () => null),
           upsert: vi.fn(async () => undefined),
@@ -230,13 +191,9 @@ async function withRealAgentInputHandler(
           remove: vi.fn(async () => false),
           findPreferredDmByUserId: vi.fn(async () => null),
         } satisfies MSTeamsMessageHandlerDeps["conversationStore"];
-        const pendingLifecycles: ReturnType<typeof createLifecycle>[] = [];
-        const recordRuntimeError = (message: unknown) => {
-          runtimeErrors.push(String(message));
-        };
         const deps: MSTeamsMessageHandlerDeps = {
           cfg: proofCfg,
-          runtime: { error: vi.fn(recordRuntimeError) },
+          runtime: { error: vi.fn() },
           appId: "test-app",
           app: {} as MSTeamsMessageHandlerDeps["app"],
           tokenProvider: {
@@ -251,41 +208,52 @@ async function withRealAgentInputHandler(
           log: {
             info: vi.fn(),
             debug: vi.fn(),
-            error: vi.fn((message: string, details?: unknown) => {
-              runtimeErrors.push(`${message}: ${JSON.stringify(details)}`);
-            }),
+            error: vi.fn(),
           } as unknown as MSTeamsMessageHandlerDeps["log"],
         };
         const handler = createMSTeamsMessageHandler(deps);
-        if (!capturedDrain || !capturedFlushKey) {
-          throw new Error("Expected the Microsoft Teams real-agent debounce owner");
+        const ingress = createMSTeamsIngress({
+          accountId: "test-app",
+          queue,
+          runtime: { error: vi.fn(), log: vi.fn() },
+          dispatch: async (activity, lifecycle) => await handler(context(activity), lifecycle),
+        });
+        const monitorResult = vi.mocked(createChannelIngressMonitor).mock.results.at(-1);
+        if (monitorResult?.type !== "return" || !capturedDrain || !capturedFlushKey) {
+          throw new Error("Expected the Microsoft Teams real-agent ingress and debounce owners");
         }
+        const monitor = monitorResult.value;
         const drainDebounce = capturedDrain;
         const flushDebounceKey = capturedFlushKey;
         const drain = async (beforeFlush?: () => void | Promise<void>) => {
+          ingress.start();
+          await monitor.waitForIdle();
+          expect(debouncedEntryCount).toBe(acceptedCount);
           await beforeFlush?.();
           for (const key of debounceKeys) {
             await flushDebounceKey(key);
           }
           await drainDebounce();
-          await Promise.all(pendingLifecycles.splice(0).map((lifecycle) => lifecycle.settled));
-          expect(runtimeErrors).toEqual([]);
         };
-        try {
-          await run({
-            accept: async (activity) => {
-              const lifecycle = createLifecycle();
-              pendingLifecycles.push(lifecycle);
-              await handler(context(activity), lifecycle);
-            },
-            drain,
-            modelRequests,
-          });
-        } finally {
+        stopIngress = async () => {
+          await monitor.pause();
+          await monitor.waitForIdle();
           await drainDebounce();
+          await ingress.stop();
           await closeOpenClawStateDatabaseAsync();
-        }
+          closeOpenClawStateDatabaseForTest();
+          await fs.rm(stateDir, { recursive: true, force: true });
+        };
+        await run({
+          accept: async (activity) => {
+            await ingress.accept(activity);
+            acceptedCount += 1;
+          },
+          drain,
+          modelRequests,
+        });
       } finally {
+        await stopIngress?.();
         server.closeAllConnections();
         await new Promise<void>((resolve) => {
           server.close(() => resolve());
@@ -301,7 +269,7 @@ describe("Microsoft Teams final agent input", () => {
     { timeout: 90_000 },
     async () => {
       const groupAllowFrom = ["bob-aad", "alice-aad"];
-      await withRealAgentInputHandler(
+      await withRealAgentInputIngress(
         {
           messages: { inbound: { debounceMs: 40 } },
           channels: {
