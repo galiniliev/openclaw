@@ -72,6 +72,83 @@ function createHandler(cfg: OpenClawConfig, createDebouncer = createInboundDebou
   return createMSTeamsMessageHandler(deps);
 }
 
+async function withIntegratedIngress(
+  cfg: OpenClawConfig,
+  options: Parameters<typeof createMessageHandlerDeps>[1],
+  run: (params: {
+    accept: (activity: MSTeamsTurnContext["activity"]) => Promise<void>;
+    dispatchMock: typeof runtimeApiMockState.dispatchReplyWithBufferedBlockDispatcher;
+  }) => Promise<void>,
+) {
+  const created = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-msteams-proof-"));
+  const stateDir = await fs.realpath(created);
+  type Queue = NonNullable<Parameters<typeof createMSTeamsIngress>[0]["queue"]>;
+  type Payload = Parameters<Queue["enqueue"]>[1];
+  const queue = createChannelIngressQueueForTests<Payload>({
+    channelId: "msteams",
+    accountId: "test-app",
+    stateDir,
+  });
+  const dispatchMock = runtimeApiMockState.dispatchReplyWithBufferedBlockDispatcher;
+  let capturedDrain: (() => Promise<void>) | undefined;
+  const createDebouncer: typeof createInboundDebouncer = (debouncerOptions) => {
+    const debouncer = createInboundDebouncer(debouncerOptions);
+    capturedDrain = debouncer.drain;
+    return debouncer;
+  };
+  const { deps } = createMessageHandlerDeps(cfg, {
+    ...options,
+    createInboundDebouncer: createDebouncer,
+    resolveInboundDebounceMs: vi.fn(() => 40),
+  });
+  const handler = createMSTeamsMessageHandler(deps);
+  const ingress = createMSTeamsIngress({
+    accountId: "test-app",
+    queue,
+    runtime: { error: vi.fn(), log: vi.fn() },
+    dispatch: async (activity, lifecycle) => await handler(context(activity), lifecycle),
+  });
+  const monitorResult = vi.mocked(createChannelIngressMonitor).mock.results.at(-1);
+  if (monitorResult?.type !== "return" || !capturedDrain) {
+    throw new Error("Expected the Microsoft Teams ingress and debounce owners");
+  }
+  const monitor = monitorResult.value;
+  ingress.start();
+  try {
+    await run({
+      accept: async (activity) => {
+        await ingress.accept(activity);
+      },
+      dispatchMock,
+    });
+  } finally {
+    await monitor.pause();
+    await monitor.waitForIdle();
+    await capturedDrain();
+    await ingress.stop();
+    await closeOpenClawStateDatabaseAsync();
+    closeOpenClawStateDatabaseForTest();
+    await fs.rm(stateDir, { recursive: true, force: true });
+  }
+}
+
+function groupActivity(
+  id: string,
+  text: string,
+  entities: MSTeamsTurnContext["activity"]["entities"] = [],
+): MSTeamsTurnContext["activity"] {
+  return {
+    ...buildChannelActivity({
+      id,
+      text,
+      from: { id: "bob-id", aadObjectId: "bob-aad", name: "Bob" },
+      conversation: { id: "19:proof-group@thread.v2", conversationType: "groupChat" },
+      channelData: {},
+      entities,
+    }),
+  } as MSTeamsTurnContext["activity"];
+}
+
 describe("Microsoft Teams drain claim ownership", () => {
   beforeEach(() => {
     runtimeApiMockState.dispatchReplyWithBufferedBlockDispatcher.mockClear();
@@ -142,6 +219,98 @@ describe("Microsoft Teams drain claim ownership", () => {
     ).toMatchObject({ admission: "exclusive" });
     expect(lifecycle.onAdopted).toHaveBeenCalledTimes(1);
     expect(lifecycle.onAbandoned).not.toHaveBeenCalled();
+  });
+
+  it("proves allowed quotedReply context through queued ingress and debounce", async () => {
+    await withIntegratedIngress(
+      {
+        messages: { inbound: { debounceMs: 40 } },
+        channels: {
+          msteams: {
+            groupPolicy: "allowlist",
+            groupAllowFrom: ["bob-aad", "alice-aad"],
+            contextVisibility: "allowlist",
+            requireMention: false,
+          },
+        },
+      } as OpenClawConfig,
+      {},
+      async ({ accept, dispatchMock }) => {
+        await accept(
+          groupActivity("activity-quote-allowed", "<at>Bot</at> ask <at>Alice</at>", [
+            { type: "mention", text: "<at>Bot</at>", mentioned: { id: "bot-id", name: "Bot" } },
+            {
+              type: "mention",
+              text: "<at>Alice</at>",
+              mentioned: { id: "alice-aad", name: "Alice" },
+            },
+            {
+              type: "quotedReply",
+              quotedReply: {
+                senderId: "alice-aad",
+                senderName: "Alice",
+                preview: "Allowed quoted preview",
+              },
+            },
+          ]),
+        );
+        await accept(groupActivity("activity-quote-followup", "follow up"));
+
+        await vi.waitFor(() => expect(dispatchMock).toHaveBeenCalledTimes(1), { timeout: 5_000 });
+        const ctx = dispatchMock.mock.calls[0]?.[0].ctx;
+        expect(ctx).toMatchObject({
+          BodyForAgent: "ask @Alice\nfollow up",
+          ReplyToBody: "Allowed quoted preview",
+          ReplyToSender: "Alice",
+        });
+      },
+    );
+  });
+
+  it("rechecks quote sender permission before a queued ingress debounce flush", async () => {
+    let storedAllowFrom = ["alice-aad"];
+    await withIntegratedIngress(
+      {
+        messages: { inbound: { debounceMs: 40 } },
+        channels: {
+          msteams: {
+            groupPolicy: "allowlist",
+            groupAllowFrom: ["bob-aad"],
+            contextVisibility: "allowlist",
+            requireMention: false,
+          },
+        },
+      } as OpenClawConfig,
+      { readAllowFromStore: vi.fn(async () => storedAllowFrom) },
+      async ({ accept, dispatchMock }) => {
+        await accept(
+          groupActivity("activity-quote-revoked", "<at>Bot</at> ask <at>Alice</at>", [
+            { type: "mention", text: "<at>Bot</at>", mentioned: { id: "bot-id", name: "Bot" } },
+            {
+              type: "mention",
+              text: "<at>Alice</at>",
+              mentioned: { id: "alice-aad", name: "Alice" },
+            },
+            {
+              type: "quotedReply",
+              quotedReply: {
+                senderId: "alice-aad",
+                senderName: "Alice",
+                preview: "Revoked quoted preview",
+              },
+            },
+          ]),
+        );
+        storedAllowFrom = [];
+        await accept(groupActivity("activity-quote-revoked-followup", "follow up"));
+
+        await vi.waitFor(() => expect(dispatchMock).toHaveBeenCalledTimes(1), { timeout: 5_000 });
+        const ctx = dispatchMock.mock.calls[0]?.[0].ctx;
+        expect(ctx).toMatchObject({ BodyForAgent: "ask @Alice\nfollow up" });
+        expect(ctx?.ReplyToBody).toBeUndefined();
+        expect(ctx?.ReplyToSender).toBeUndefined();
+      },
+    );
   });
 
   it("completes a gated no-dispatch turn instead of stalling its claim", async () => {
