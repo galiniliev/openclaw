@@ -77,6 +77,7 @@ async function withIntegratedIngress(
   options: Parameters<typeof createMessageHandlerDeps>[1],
   run: (params: {
     accept: (activity: MSTeamsTurnContext["activity"]) => Promise<void>;
+    drain: () => Promise<void>;
     dispatchMock: typeof runtimeApiMockState.dispatchReplyWithBufferedBlockDispatcher;
   }) => Promise<void>,
 ) {
@@ -113,12 +114,17 @@ async function withIntegratedIngress(
     throw new Error("Expected the Microsoft Teams ingress and debounce owners");
   }
   const monitor = monitorResult.value;
-  ingress.start();
+  const drain = async () => {
+    ingress.start();
+    await monitor.waitForIdle();
+    await capturedDrain();
+  };
   try {
     await run({
       accept: async (activity) => {
         await ingress.accept(activity);
       },
+      drain,
       dispatchMock,
     });
   } finally {
@@ -235,7 +241,7 @@ describe("Microsoft Teams drain claim ownership", () => {
         },
       } as OpenClawConfig,
       {},
-      async ({ accept, dispatchMock }) => {
+      async ({ accept, drain, dispatchMock }) => {
         await accept(
           groupActivity("activity-quote-allowed", "<at>Bot</at> ask <at>Alice</at>", [
             { type: "mention", text: "<at>Bot</at>", mentioned: { id: "bot-id", name: "Bot" } },
@@ -255,6 +261,7 @@ describe("Microsoft Teams drain claim ownership", () => {
           ]),
         );
         await accept(groupActivity("activity-quote-followup", "follow up"));
+        await drain();
 
         await vi.waitFor(() => expect(dispatchMock).toHaveBeenCalledTimes(1), { timeout: 5_000 });
         const ctx = dispatchMock.mock.calls[0]?.[0].ctx;
@@ -282,7 +289,7 @@ describe("Microsoft Teams drain claim ownership", () => {
         },
       } as OpenClawConfig,
       { readAllowFromStore: vi.fn(async () => storedAllowFrom) },
-      async ({ accept, dispatchMock }) => {
+      async ({ accept, drain, dispatchMock }) => {
         await accept(
           groupActivity("activity-quote-revoked", "<at>Bot</at> ask <at>Alice</at>", [
             { type: "mention", text: "<at>Bot</at>", mentioned: { id: "bot-id", name: "Bot" } },
@@ -303,6 +310,7 @@ describe("Microsoft Teams drain claim ownership", () => {
         );
         storedAllowFrom = [];
         await accept(groupActivity("activity-quote-revoked-followup", "follow up"));
+        await drain();
 
         await vi.waitFor(() => expect(dispatchMock).toHaveBeenCalledTimes(1), { timeout: 5_000 });
         const ctx = dispatchMock.mock.calls[0]?.[0].ctx;
