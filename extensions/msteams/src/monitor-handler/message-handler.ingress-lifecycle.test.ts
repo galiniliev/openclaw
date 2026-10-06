@@ -299,6 +299,102 @@ describe("Microsoft Teams drain claim ownership", () => {
     );
   });
 
+  it("omits blocked quotedReply context through queued ingress and debounce", async () => {
+    await withIntegratedIngress(
+      {
+        messages: { inbound: { debounceMs: 40 } },
+        channels: {
+          msteams: {
+            groupPolicy: "allowlist",
+            groupAllowFrom: ["bob-aad", "alice-aad"],
+            contextVisibility: "allowlist",
+            requireMention: false,
+          },
+        },
+      } as OpenClawConfig,
+      {},
+      async ({ accept, drain, dispatchMock }) => {
+        await accept(
+          groupActivity("activity-quote-blocked", "<at>Bot</at> ask <at>Mallory</at>", [
+            { type: "mention", text: "<at>Bot</at>", mentioned: { id: "bot-id", name: "Bot" } },
+            {
+              type: "mention",
+              text: "<at>Mallory</at>",
+              mentioned: { id: "mallory-aad", name: "Mallory" },
+            },
+            {
+              type: "quotedReply",
+              quotedReply: {
+                senderId: "mallory-aad",
+                senderName: "Mallory",
+                preview: "Blocked quoted preview",
+              },
+            },
+          ]),
+        );
+        await drain();
+
+        expect(dispatchMock).toHaveBeenCalledTimes(1);
+        const ctx = dispatchMock.mock.calls[0]?.[0].ctx;
+        expect(ctx).toMatchObject({ BodyForAgent: "ask @Mallory" });
+        expect(ctx?.ReplyToBody).toBeUndefined();
+        expect(ctx?.ReplyToSender).toBeUndefined();
+      },
+    );
+  });
+
+  it("ignores mismatched quotedReply entity and attachment body through queued ingress", async () => {
+    await withIntegratedIngress(
+      {
+        channels: {
+          msteams: {
+            groupPolicy: "allowlist",
+            groupAllowFrom: ["bob-aad", "alice-aad"],
+            contextVisibility: "allowlist",
+            requireMention: false,
+          },
+        },
+      } as OpenClawConfig,
+      {},
+      async ({ accept, drain, dispatchMock }) => {
+        await accept({
+          ...groupActivity("activity-quote-mismatched", "<at>Bot</at> ask <at>Alice</at>", [
+            { type: "mention", text: "<at>Bot</at>", mentioned: { id: "bot-id", name: "Bot" } },
+            {
+              type: "mention",
+              text: "<at>Alice</at>",
+              mentioned: { id: "alice-aad", name: "Alice" },
+            },
+            {
+              type: "quotedReply",
+              quotedReply: {
+                messageId: "quote-a",
+                senderId: "alice-aad",
+                senderName: "Alice",
+              },
+            },
+          ]),
+          attachments: [
+            {
+              contentType: "text/html",
+              content:
+                '<blockquote itemtype="http://schema.skype.com/Reply" itemid="quote-b">' +
+                '<strong itemprop="mri">Mallory</strong>' +
+                '<p itemprop="copy">Blocked attachment body</p></blockquote>',
+            },
+          ],
+        });
+        await drain();
+
+        expect(dispatchMock).toHaveBeenCalledTimes(1);
+        const ctx = dispatchMock.mock.calls[0]?.[0].ctx;
+        expect(ctx).toMatchObject({ BodyForAgent: "ask @Alice" });
+        expect(ctx?.ReplyToBody).toBeUndefined();
+        expect(ctx?.ReplyToSender).toBeUndefined();
+      },
+    );
+  });
+
   it("rechecks quote sender permission before a queued ingress debounce flush", async () => {
     const groupAllowFrom = ["bob-aad", "alice-aad"];
     await withIntegratedIngress(
@@ -344,6 +440,95 @@ describe("Microsoft Teams drain claim ownership", () => {
         expect(ctx?.ReplyToSender).toBeUndefined();
       },
     );
+  });
+
+  it("proves matching quotedReply context through a multi-entry debounce batch", async () => {
+    const dispatchMock = runtimeApiMockState.dispatchReplyWithBufferedBlockDispatcher;
+    let capturedDrain: (() => Promise<void>) | undefined;
+    let capturedFlushKey: ((key: string) => Promise<void>) | undefined;
+    const debounceKeys = new Set<string>();
+    const createDebouncer: typeof createInboundDebouncer = (debouncerOptions) => {
+      const debouncer = createInboundDebouncer({
+        ...debouncerOptions,
+        buildKey: (item) => {
+          const key = debouncerOptions.buildKey(item);
+          if (key) {
+            debounceKeys.add(key);
+          }
+          return key;
+        },
+      });
+      capturedDrain = debouncer.drain;
+      capturedFlushKey = debouncer.flushKey;
+      return debouncer;
+    };
+    const handler = createHandler(
+      {
+        messages: { inbound: { debounceMs: 40 } },
+        channels: {
+          msteams: {
+            groupPolicy: "allowlist",
+            groupAllowFrom: ["bob-aad", "alice-aad"],
+            contextVisibility: "allowlist",
+            requireMention: false,
+          },
+        },
+      } as OpenClawConfig,
+      createDebouncer,
+    );
+    const first = createLifecycle();
+    const second = createLifecycle();
+    const quoteEntity = {
+      type: "quotedReply",
+      quotedReply: {
+        senderId: "alice-aad",
+        senderName: "Alice",
+        preview: "Batched quoted preview",
+      },
+    };
+
+    expect(
+      await handler(
+        context(
+          groupActivity("activity-quote-batch-1", "<at>Bot</at> first question", [
+            { type: "mention", text: "<at>Bot</at>", mentioned: { id: "bot-id", name: "Bot" } },
+            quoteEntity,
+          ]),
+        ),
+        first,
+      ),
+    ).toEqual({ kind: "deferred" });
+    expect(
+      await handler(
+        context(
+          groupActivity("activity-quote-batch-2", "<at>Bot</at> second question", [
+            { type: "mention", text: "<at>Bot</at>", mentioned: { id: "bot-id", name: "Bot" } },
+            quoteEntity,
+          ]),
+        ),
+        second,
+      ),
+    ).toEqual({ kind: "deferred" });
+
+    if (!capturedDrain || !capturedFlushKey) {
+      throw new Error("Expected the Microsoft Teams debounce owner");
+    }
+    for (const key of debounceKeys) {
+      await capturedFlushKey(key);
+    }
+    await capturedDrain();
+
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    const ctx = dispatchMock.mock.calls[0]?.[0].ctx;
+    expect(ctx).toMatchObject({
+      BodyForAgent: "first question\nsecond question",
+      ReplyToBody: "Batched quoted preview",
+      ReplyToSender: "Alice",
+    });
+    expect(first.onAdopted).toHaveBeenCalledTimes(1);
+    expect(second.onAdopted).toHaveBeenCalledTimes(1);
+    expect(first.onAbandoned).not.toHaveBeenCalled();
+    expect(second.onAbandoned).not.toHaveBeenCalled();
   });
 
   it("completes a gated no-dispatch turn instead of stalling its claim", async () => {
