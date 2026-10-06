@@ -114,10 +114,12 @@ async function withIntegratedIngress(
     throw new Error("Expected the Microsoft Teams ingress and debounce owners");
   }
   const monitor = monitorResult.value;
+  const drainDebounce = capturedDrain;
   const drain = async () => {
     ingress.start();
     await monitor.waitForIdle();
-    await capturedDrain();
+    await monitor.waitForIdle();
+    await drainDebounce();
   };
   try {
     await run({
@@ -130,7 +132,7 @@ async function withIntegratedIngress(
   } finally {
     await monitor.pause();
     await monitor.waitForIdle();
-    await capturedDrain();
+    await drainDebounce();
     await ingress.stop();
     await closeOpenClawStateDatabaseAsync();
     closeOpenClawStateDatabaseForTest();
