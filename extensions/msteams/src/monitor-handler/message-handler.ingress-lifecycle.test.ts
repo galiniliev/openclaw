@@ -77,7 +77,7 @@ async function withIntegratedIngress(
   options: Parameters<typeof createMessageHandlerDeps>[1],
   run: (params: {
     accept: (activity: MSTeamsTurnContext["activity"]) => Promise<void>;
-    drain: () => Promise<void>;
+    drain: (beforeFlush?: () => void | Promise<void>) => Promise<void>;
     dispatchMock: typeof runtimeApiMockState.dispatchReplyWithBufferedBlockDispatcher;
   }) => Promise<void>,
 ) {
@@ -134,9 +134,11 @@ async function withIntegratedIngress(
   const monitor = monitorResult.value;
   const drainDebounce = capturedDrain;
   const flushDebounceKey = capturedFlushKey;
-  const drain = async () => {
+  const drain = async (beforeFlush?: () => void | Promise<void>) => {
     ingress.start();
-    await vi.waitFor(() => expect(debouncedEntryCount).toBe(acceptedCount), { timeout: 5_000 });
+    await monitor.waitForIdle();
+    expect(debouncedEntryCount).toBe(acceptedCount);
+    await beforeFlush?.();
     for (const key of debounceKeys) {
       await flushDebounceKey(key);
     }
@@ -286,7 +288,7 @@ describe("Microsoft Teams drain claim ownership", () => {
         );
         await drain();
 
-        await vi.waitFor(() => expect(dispatchMock).toHaveBeenCalledTimes(1), { timeout: 5_000 });
+        expect(dispatchMock).toHaveBeenCalledTimes(1);
         const ctx = dispatchMock.mock.calls[0]?.[0].ctx;
         expect(ctx).toMatchObject({
           BodyForAgent: "ask @Alice",
@@ -298,20 +300,20 @@ describe("Microsoft Teams drain claim ownership", () => {
   });
 
   it("rechecks quote sender permission before a queued ingress debounce flush", async () => {
-    let storedAllowFrom = ["alice-aad"];
+    const groupAllowFrom = ["bob-aad", "alice-aad"];
     await withIntegratedIngress(
       {
         messages: { inbound: { debounceMs: 40 } },
         channels: {
           msteams: {
             groupPolicy: "allowlist",
-            groupAllowFrom: ["bob-aad"],
+            groupAllowFrom,
             contextVisibility: "allowlist",
             requireMention: false,
           },
         },
       } as OpenClawConfig,
-      { readAllowFromStore: vi.fn(async () => storedAllowFrom) },
+      {},
       async ({ accept, drain, dispatchMock }) => {
         await accept(
           groupActivity("activity-quote-revoked", "<at>Bot</at> ask <at>Alice</at>", [
@@ -331,10 +333,11 @@ describe("Microsoft Teams drain claim ownership", () => {
             },
           ]),
         );
-        storedAllowFrom = [];
-        await drain();
+        await drain(() => {
+          groupAllowFrom.splice(0, groupAllowFrom.length, "bob-aad");
+        });
 
-        await vi.waitFor(() => expect(dispatchMock).toHaveBeenCalledTimes(1), { timeout: 5_000 });
+        expect(dispatchMock).toHaveBeenCalledTimes(1);
         const ctx = dispatchMock.mock.calls[0]?.[0].ctx;
         expect(ctx).toMatchObject({ BodyForAgent: "ask @Alice" });
         expect(ctx?.ReplyToBody).toBeUndefined();
