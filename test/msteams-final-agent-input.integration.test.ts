@@ -10,12 +10,14 @@ import {
 import { createChannelIngressMonitor } from "openclaw/plugin-sdk/channel-outbound";
 import { closeOpenClawStateDatabaseAsync } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { describe, expect, it, vi } from "vitest";
-import type { MSTeamsMessageHandlerDeps } from "../extensions/msteams/src/monitor-handler.types.js";
-import { createMSTeamsMessageHandler } from "../extensions/msteams/src/monitor-handler/message-handler.js";
-import { buildChannelActivity } from "../extensions/msteams/src/monitor-handler/message-handler.test-support.js";
-import { createMSTeamsIngress } from "../extensions/msteams/src/msteams-ingress.js";
-import { setMSTeamsRuntime } from "../extensions/msteams/src/runtime.js";
-import type { MSTeamsTurnContext } from "../extensions/msteams/src/sdk-types.js";
+import type { MSTeamsMessageHandlerDeps } from "../extensions/msteams/test-api.js";
+import {
+  buildChannelActivity,
+  createMSTeamsIngress,
+  createMSTeamsMessageHandler,
+  setMSTeamsRuntime,
+  type MSTeamsTurnContext,
+} from "../extensions/msteams/test-api.js";
 import {
   disposeAllSessionMcpRuntimes,
   setSessionMcpRuntimeScheduler,
@@ -62,10 +64,7 @@ function groupActivity(
 async function withRealAgentInputIngress(
   cfg: OpenClawConfig,
   run: (params: {
-    accept: (
-      activity: MSTeamsTurnContext["activity"],
-      options?: { expectDebouncedEntry?: boolean },
-    ) => Promise<void>;
+    accept: (activity: MSTeamsTurnContext["activity"]) => Promise<void>;
     drain: (beforeFlush?: () => void | Promise<void>) => Promise<void>;
     modelRequests: unknown[];
   }) => Promise<void>,
@@ -261,11 +260,9 @@ async function withRealAgentInputIngress(
           await fs.rm(stateDir, { recursive: true, force: true });
         };
         await run({
-          accept: async (activity, options) => {
+          accept: async (activity) => {
             await ingress.accept(activity);
-            if (options?.expectDebouncedEntry !== false) {
-              expectedDebouncedEntryCount += 1;
-            }
+            expectedDebouncedEntryCount += 1;
           },
           drain,
           modelRequests,
@@ -423,17 +420,19 @@ describe("Microsoft Teams final agent input", () => {
               quoteEntity,
             ]),
           );
+          const requestsBeforeBatch = modelRequests.length;
           await accept(
             groupActivity("activity-agent-quote-batch-2", "<at>Bot</at> second question", [
               { type: "mention", text: "<at>Bot</at>", mentioned: { id: "bot-id", name: "Bot" } },
               quoteEntity,
             ]),
-            { expectDebouncedEntry: false },
           );
           await drain();
-          expect(latestModelInput()).toContain("first question");
-          expect(latestModelInput()).toContain("second question");
-          expect(latestModelInput()).toContain("Batched final-agent quoted preview");
+          expect(modelRequests).toHaveLength(requestsBeforeBatch + 1);
+          const batchModelInput = JSON.stringify(modelRequests[requestsBeforeBatch]);
+          expect(batchModelInput).toContain("first question");
+          expect(batchModelInput).toContain("second question");
+          expect(batchModelInput).toContain("Batched final-agent quoted preview");
         },
       );
     },
