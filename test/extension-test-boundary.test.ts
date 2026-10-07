@@ -24,6 +24,9 @@ const BUNDLED_PLUGIN_RESOLVER_TEST_FILES = [
   "src/plugins/public-surface-runtime.test.ts",
 ] as const;
 const BROAD_PUBLIC_SOURCE_ARTIFACT_BASENAMES = new Set(["api.js", "runtime-api.js"]);
+const HOST_OWNED_EXTENSION_BEHAVIOR_TEST_FILES = new Set([
+  "test/msteams-final-agent-input.integration.test.ts",
+]);
 const ROOTDIR_BOUNDARY_CANARY_RE =
   /(^|\/)__rootdir_boundary_canary__\.(?:[cm]?ts|[cm]?js|tsx|jsx)$/u;
 
@@ -204,6 +207,16 @@ function isAllowedCoreContractSuite(file: string, imports: readonly string[]): b
   );
 }
 
+function isAllowedHostOwnedExtensionBehaviorSuite(
+  file: string,
+  imports: readonly string[],
+): boolean {
+  return (
+    HOST_OWNED_EXTENSION_BEHAVIOR_TEST_FILES.has(file) &&
+    imports.every((entry) => /(?:^|\/)extensions\/msteams\/src\//u.test(entry))
+  );
+}
+
 describe("non-extension test boundaries", () => {
   it.each([
     'import { client } from "../../extensions/feishu/src/client.js";',
@@ -275,7 +288,11 @@ describe("non-extension test boundaries", () => {
         const imports = findExtensionImports(source).filter(
           (specifier) => !isAllowedExtensionPublicImport(specifier),
         );
-        if (imports.length === 0 || isAllowedCoreContractSuite(file, imports)) {
+        if (
+          imports.length === 0 ||
+          isAllowedCoreContractSuite(file, imports) ||
+          isAllowedHostOwnedExtensionBehaviorSuite(file, imports)
+        ) {
           continue;
         }
         offenders.push({ file, imports });
