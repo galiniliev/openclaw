@@ -48,13 +48,14 @@ function groupActivity(
   id: string,
   text: string,
   entities: MSTeamsTurnContext["activity"]["entities"] = [],
+  conversationId = "19:proof-group@thread.v2",
 ): MSTeamsTurnContext["activity"] {
   return {
     ...buildChannelActivity({
       id,
       text,
       from: { id: "bob-id", aadObjectId: "bob-aad", name: "Bob" },
-      conversation: { id: "19:proof-group@thread.v2", conversationType: "groupChat" },
+      conversation: { id: conversationId, conversationType: "groupChat" },
       channelData: {},
       entities,
     }),
@@ -422,10 +423,15 @@ describe("Microsoft Teams final agent input", () => {
           );
           const requestsBeforeBatch = modelRequests.length;
           await accept(
-            groupActivity("activity-agent-quote-batch-2", "<at>Bot</at> second question", [
-              { type: "mention", text: "<at>Bot</at>", mentioned: { id: "bot-id", name: "Bot" } },
-              quoteEntity,
-            ]),
+            groupActivity(
+              "activity-agent-quote-batch-2",
+              "<at>Bot</at> second question",
+              [
+                { type: "mention", text: "<at>Bot</at>", mentioned: { id: "bot-id", name: "Bot" } },
+                quoteEntity,
+              ],
+              "19:proof-group@thread.v2;messageid=batch-proof-2",
+            ),
           );
           await drain();
           expect(modelRequests).toHaveLength(requestsBeforeBatch + 1);
