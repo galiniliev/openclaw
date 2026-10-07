@@ -10,12 +10,12 @@ import {
 import { createChannelIngressMonitor } from "openclaw/plugin-sdk/channel-outbound";
 import { closeOpenClawStateDatabaseAsync } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { describe, expect, it, vi } from "vitest";
-import type { MSTeamsMessageHandlerDeps } from "../extensions/msteams/test-api.js";
 import {
   buildChannelActivity,
   createMSTeamsIngress,
   createMSTeamsMessageHandler,
   setMSTeamsRuntime,
+  type MSTeamsMessageHandlerDeps,
   type MSTeamsTurnContext,
 } from "../extensions/msteams/test-api.js";
 import {
