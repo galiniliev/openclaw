@@ -30,9 +30,6 @@ export type MSTeamsEntityLike = {
   };
 };
 
-/**
- * Strip HTML tags, preserving text content.
- */
 export function htmlToPlainText(html: string): string {
   return decodeHtmlEntities(html.replace(/<[^>]*>/g, " "))
     .replaceAll("\u00a0", " ")
@@ -78,7 +75,6 @@ export function extractMSTeamsQuoteInfo(
       continue;
     }
 
-    // Look for the Skype Reply schema blockquote.
     if (!content.includes("http://schema.skype.com/Reply")) {
       continue;
     }
