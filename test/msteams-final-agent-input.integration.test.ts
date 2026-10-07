@@ -16,9 +16,14 @@ import { buildChannelActivity } from "../extensions/msteams/src/monitor-handler/
 import { createMSTeamsIngress } from "../extensions/msteams/src/msteams-ingress.js";
 import { setMSTeamsRuntime } from "../extensions/msteams/src/runtime.js";
 import type { MSTeamsTurnContext } from "../extensions/msteams/src/sdk-types.js";
+import {
+  disposeAllSessionMcpRuntimes,
+  setSessionMcpRuntimeScheduler,
+} from "../src/agents/agent-bundle-mcp-manager-api.js";
 import type { OpenClawConfig } from "../src/config/types.openclaw.js";
 import { buildMockOpenAiResponsesProvider } from "../src/gateway/test-openai-responses-model.js";
 import { createPluginRuntime } from "../src/plugins/runtime/index.js";
+import { createTestGatewayScheduler } from "../src/test-utils/gateway-scheduler-clock.js";
 import { withOpenClawTestState } from "../src/test-utils/openclaw-test-state.js";
 import { writeOpenAiResponsesText } from "./helpers/openai-responses-sse.js";
 
@@ -137,6 +142,8 @@ async function withRealAgentInputIngress(
           },
         } satisfies OpenClawConfig;
         await state.writeConfig(proofCfg);
+        const scheduler = createTestGatewayScheduler("fake-timers");
+        await setSessionMcpRuntimeScheduler(scheduler);
         const runtime = createPluginRuntime();
         let capturedDrain: (() => Promise<void>) | undefined;
         let capturedFlushKey: ((key: string) => Promise<void>) | undefined;
@@ -244,6 +251,8 @@ async function withRealAgentInputIngress(
           await monitor.waitForIdle();
           await drainDebounce();
           await ingress.stop();
+          await disposeAllSessionMcpRuntimes();
+          await scheduler.stop();
           await closeOpenClawStateDatabaseAsync();
           closeOpenClawStateDatabaseForTest();
           await fs.rm(stateDir, { recursive: true, force: true });
@@ -286,7 +295,13 @@ describe("Microsoft Teams final agent input", () => {
           },
         },
         async ({ accept, drain, modelRequests }) => {
-          const latestModelInput = () => JSON.stringify(modelRequests.at(-1));
+          const latestModelInput = () => {
+            expect(
+              modelRequests,
+              "expected the embedded agent to call the mock model",
+            ).not.toHaveLength(0);
+            return JSON.stringify(modelRequests.at(-1));
+          };
 
           await accept(
             groupActivity("activity-agent-quote-allowed", "<at>Bot</at> ask <at>Alice</at>", [
