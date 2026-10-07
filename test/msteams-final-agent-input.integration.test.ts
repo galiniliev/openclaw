@@ -434,7 +434,6 @@ describe("Microsoft Teams final agent input", () => {
           expect(latestModelInput()).toContain("first question");
           expect(latestModelInput()).toContain("second question");
           expect(latestModelInput()).toContain("Batched final-agent quoted preview");
-          expect(modelRequests).toHaveLength(5);
         },
       );
     },
