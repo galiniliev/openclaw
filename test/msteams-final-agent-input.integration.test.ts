@@ -62,7 +62,10 @@ function groupActivity(
 async function withRealAgentInputIngress(
   cfg: OpenClawConfig,
   run: (params: {
-    accept: (activity: MSTeamsTurnContext["activity"]) => Promise<void>;
+    accept: (
+      activity: MSTeamsTurnContext["activity"],
+      options?: { expectDebouncedEntry?: boolean },
+    ) => Promise<void>;
     drain: (beforeFlush?: () => void | Promise<void>) => Promise<void>;
     modelRequests: unknown[];
   }) => Promise<void>,
@@ -147,7 +150,7 @@ async function withRealAgentInputIngress(
         const runtime = createPluginRuntime();
         let capturedDrain: (() => Promise<void>) | undefined;
         let capturedFlushKey: ((key: string) => Promise<void>) | undefined;
-        let acceptedCount = 0;
+        let expectedDebouncedEntryCount = 0;
         let debouncedEntryCount = 0;
         const debounceKeys = new Set<string>();
         runtime.channel.debounce.createInboundDebouncer = (debouncerOptions) => {
@@ -239,7 +242,7 @@ async function withRealAgentInputIngress(
         const drain = async (beforeFlush?: () => void | Promise<void>) => {
           ingress.start();
           await monitor.waitForIdle();
-          expect(debouncedEntryCount).toBe(acceptedCount);
+          expect(debouncedEntryCount).toBe(expectedDebouncedEntryCount);
           await beforeFlush?.();
           for (const key of debounceKeys) {
             await flushDebounceKey(key);
@@ -258,9 +261,11 @@ async function withRealAgentInputIngress(
           await fs.rm(stateDir, { recursive: true, force: true });
         };
         await run({
-          accept: async (activity) => {
+          accept: async (activity, options) => {
             await ingress.accept(activity);
-            acceptedCount += 1;
+            if (options?.expectDebouncedEntry !== false) {
+              expectedDebouncedEntryCount += 1;
+            }
           },
           drain,
           modelRequests,
@@ -423,6 +428,7 @@ describe("Microsoft Teams final agent input", () => {
               { type: "mention", text: "<at>Bot</at>", mentioned: { id: "bot-id", name: "Bot" } },
               quoteEntity,
             ]),
+            { expectDebouncedEntry: false },
           );
           await drain();
           expect(latestModelInput()).toContain("first question");
