@@ -10,10 +10,10 @@ import {
 import { createChannelIngressMonitor } from "openclaw/plugin-sdk/channel-outbound";
 import { closeOpenClawStateDatabaseAsync } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { describe, expect, it, vi } from "vitest";
-import { createMSTeamsIngress } from "../extensions/msteams/src/msteams-ingress.js";
 import type { MSTeamsMessageHandlerDeps } from "../extensions/msteams/src/monitor-handler.types.js";
 import { createMSTeamsMessageHandler } from "../extensions/msteams/src/monitor-handler/message-handler.js";
 import { buildChannelActivity } from "../extensions/msteams/src/monitor-handler/message-handler.test-support.js";
+import { createMSTeamsIngress } from "../extensions/msteams/src/msteams-ingress.js";
 import { setMSTeamsRuntime } from "../extensions/msteams/src/runtime.js";
 import type { MSTeamsTurnContext } from "../extensions/msteams/src/sdk-types.js";
 import type { OpenClawConfig } from "../src/config/types.openclaw.js";
@@ -166,13 +166,17 @@ async function withRealAgentInputIngress(
         runtime.channel.routing.resolveAgentRoute = vi.fn(({ peer }) => ({
           sessionKey: `agent:main:msteams:${peer.kind}:${peer.id}`,
           agentId: "main",
+          channel: "msteams",
           accountId: "default",
           mainSessionKey: "agent:main:main",
           lastRoutePolicy: "session" as const,
           matchedBy: "default" as const,
         }));
         runtime.channel.pairing.readAllowFromStore = vi.fn(async () => []);
-        runtime.channel.pairing.upsertPairingRequest = vi.fn(async () => null);
+        runtime.channel.pairing.upsertPairingRequest = vi.fn(async () => ({
+          code: "111111",
+          created: true,
+        }));
         setMSTeamsRuntime(runtime);
 
         const created = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-msteams-agent-"));
@@ -193,7 +197,7 @@ async function withRealAgentInputIngress(
         } satisfies MSTeamsMessageHandlerDeps["conversationStore"];
         const deps: MSTeamsMessageHandlerDeps = {
           cfg: proofCfg,
-          runtime: { error: vi.fn() },
+          runtime: { error: vi.fn(), exit: vi.fn(), log: vi.fn() },
           appId: "test-app",
           app: {} as MSTeamsMessageHandlerDeps["app"],
           tokenProvider: {
