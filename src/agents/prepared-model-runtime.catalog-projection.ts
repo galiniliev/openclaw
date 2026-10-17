@@ -1,5 +1,6 @@
 import { matchesProviderPluginRef } from "../plugins/provider-registry-shared.js";
 import { prepareModelCatalogThinkingPolicies } from "../plugins/provider-thinking.js";
+import { withPluginRuntimeGenerationScope } from "../plugins/runtime/generation-scope.js";
 import { dedupeByKey } from "../shared/dedupe-by-key.js";
 import { collectConfiguredCatalogModels } from "./configured-model-entries.js";
 import { projectClaudeCliNativeCatalog } from "./model-catalog-cli-wildcard.js";
@@ -53,12 +54,20 @@ export function createPreparedModelCatalogProjection(params: {
         ],
       };
     }
-    const configured = prepareConfiguredRuntimeFacts({
-      agentFacts: params.agentFacts,
-      workspaceFacts: params.pluginGeneration,
-      templateModelRegistry: params.catalogFacts.templateModelRegistry,
-      configuredRuntimeModels,
-    }).modelCatalog;
+    // Deferred registry normalization must retain the same metadata and executable owners.
+    const configured = withPluginRuntimeGenerationScope(
+      {
+        metadataSnapshot: params.pluginGeneration.pluginMetadataSnapshot,
+        pluginRegistry: params.pluginGeneration.pluginRegistry,
+      },
+      () =>
+        prepareConfiguredRuntimeFacts({
+          agentFacts: params.agentFacts,
+          workspaceFacts: params.pluginGeneration,
+          templateModelRegistry: params.catalogFacts.templateModelRegistry,
+          configuredRuntimeModels,
+        }).modelCatalog,
+    );
     const current = materializePreparedModelCatalog(
       configured,
       params.agentFacts.runtimeCapabilityModels,
