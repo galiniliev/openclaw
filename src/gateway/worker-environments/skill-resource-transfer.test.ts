@@ -5,7 +5,13 @@ import path from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
+import { finalizeAgentToolAvailability } from "../../agents/agent-tool-availability.js";
 import { readCodeModeSkill, resolveCodeModeSkills } from "../../agents/code-mode-skills.js";
+import { resolveSandboxSkillRuntimeInputs } from "../../agents/embedded-agent-runner/sandbox-skills.js";
+import { bindHostSkillCatalog } from "../../agents/harness/host-skills.js";
+import { withSessionSkillResources } from "../../agents/session-placement-skill-resources.js";
+import { createAgentToolsSandboxContext } from "../../agents/test-helpers/agent-tools-sandbox-context.js";
+import { createInstalledSkillTools } from "../../agents/tools/installed-skill-tools.js";
 import { registerAgentWorkspaceAccess } from "../../agents/workspace-access.js";
 import { NodeWorkerWorkspaceRuntime } from "../../node-host/node-worker-workspace.js";
 import { formatSkillsCompactForPrompt } from "../../skills/loading/skill-contract.js";
@@ -222,6 +228,109 @@ async function expectRejectedResourceRequest(
   expect(injected).toBe(true);
   await expectMissing(transport.allocated!);
 }
+
+it.each(["prompt", "discovery"])(
+  "shares delivered paired-node %s instructions with search and read",
+  async (mode) => {
+    const { snapshot, filePath } = await createSource(16);
+    await fs.writeFile(
+      filePath,
+      "---\ndescription: Transfer\n---\n# Resources\nRead data.bin and run scripts/check.sh.\n",
+    );
+    snapshot.resolvedSkills![0]!.readContent = "Stale host cache must not be read";
+    if (mode === "discovery") {
+      snapshot.prompt = "";
+      snapshot.resolvedSkills = [];
+    }
+    const carrier = await createCarrier("node");
+    let active = true;
+    const assertCurrent = () => {
+      if (!active) {
+        throw new Error("turn claim closed");
+      }
+    };
+    const resources = await transferSkillResources({
+      snapshot,
+      remoteWorkspaceDir: carrier.workspace,
+      assertCurrent,
+      tunnel: carrier,
+    });
+    expect(resources).toBeDefined();
+    await fs.writeFile(filePath, "Changed host instructions after transfer");
+    try {
+      await withSessionSkillResources(resources!, async () => {
+        // Paired-node placement deliberately has no host filesystem bridge.
+        const sandbox = {
+          ...createAgentToolsSandboxContext({
+            workspaceDir: "/unreadable/gateway",
+            containerWorkdir: carrier.workspace,
+          }),
+          backendId: "node" as const,
+          readOnlyResourceMounts: resources!.mounts,
+        };
+        const getCatalog = bindHostSkillCatalog({
+          snapshot: resources!.snapshot,
+          workspaceDir: sandbox.workspaceDir,
+          sandbox,
+          readable: true,
+          assertCurrent: () => {},
+        });
+        expect(
+          bindHostSkillCatalog({
+            snapshot: resources!.snapshot,
+            workspaceDir: sandbox.workspaceDir,
+            sandbox: { ...sandbox, readOnlyResourceMounts: [...resources!.mounts] },
+            readable: true,
+            assertCurrent: () => {},
+          })(),
+        ).toEqual([]);
+        const inputs = resolveSandboxSkillRuntimeInputs({
+          sandbox,
+          skillsAnchorWorkspace: sandbox.workspaceDir,
+          skillsSnapshot: snapshot,
+        });
+        expect(inputs.skillsSnapshot).toBeDefined();
+        expect(inputs.skillsSnapshot!.prompt.includes(filePath)).toBe(false);
+        const promptSkills = resolveCodeModeSkills({
+          skillsPrompt: inputs.skillsSnapshot!.prompt,
+          candidates: inputs.skillsSnapshot!.resolvedSkills ?? [],
+        });
+        if (mode === "prompt") {
+          expect(await readCodeModeSkill(promptSkills[0]!)).toBe(
+            await readText(resources!.mounts[0]!.containerPath, "SKILL.md"),
+          );
+        } else {
+          expect(promptSkills).toEqual([]);
+        }
+        const catalog = getCatalog();
+        expect(catalog.map((skill) => skill.name)).toEqual(["source"]);
+        expect(catalog[0]!.location).toBe(`${resources!.mounts[0]!.containerPath}/SKILL.md`);
+        expect(catalog[0]!.location).not.toBe(filePath);
+        expect(catalog[0]!.promptListed).toBe(mode === "prompt");
+        const tools = createInstalledSkillTools(catalog);
+        finalizeAgentToolAvailability(tools);
+        expect((await tools[0]!.execute("search", { query: "data.bin" })).details).toMatchObject({
+          skills: [{ name: "source" }],
+        });
+        expect((await tools[1]!.execute("read", { name: "source" })).details).toMatchObject({
+          content:
+            "---\ndescription: Transfer\n---\n# Resources\nRead data.bin and run scripts/check.sh.\n",
+        });
+        active = false;
+        expect(getCatalog).toThrow("turn claim closed");
+        await expect(tools[0]!.execute("closed-search", { query: "data.bin" })).rejects.toThrow(
+          "turn claim closed",
+        );
+        await expect(tools[1]!.execute("closed", { name: "source" })).rejects.toThrow(
+          "turn claim closed",
+        );
+      });
+    } finally {
+      active = true;
+      await resources?.cleanup();
+    }
+  },
+);
 
 it("transfers host bytes rather than stale Gateway bytes", async () => {
   const source = await createSource(16);

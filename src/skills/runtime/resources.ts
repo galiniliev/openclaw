@@ -144,6 +144,7 @@ export async function prepareSkillResourceDelivery(
   assertCurrent();
   if (
     !inputSnapshot.resolvedSkills?.length &&
+    !inputSnapshot.discoverySkills?.length &&
     !inputSnapshot.librarySelections?.length &&
     !inputExplicitSelections.length
   ) {
