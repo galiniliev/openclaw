@@ -300,7 +300,7 @@ export async function transferSkillResources(params: {
         resolvedSkills,
         discoverySkills: [
           ...deliveredSkills.filter((skill) => !skill.disableModelInvocation),
-          ...resolvedSkills.filter(
+          ...(params.snapshot.discoverySkills ?? resolvedSkills).filter(
             (skill) => skill.filePath.startsWith("node://") && !skill.disableModelInvocation,
           ),
         ],

@@ -332,6 +332,48 @@ it.each(["prompt", "discovery"])(
   },
 );
 
+it("keeps node-hosted discovery instructions when they are omitted from the prompt", async () => {
+  const { snapshot } = await createSource(16);
+  const native = {
+    ...snapshot.discoverySkills![0]!,
+    name: "node-guide",
+    filePath: "node://node-1/skills/node-guide/SKILL.md",
+    baseDir: "node://node-1/skills/node-guide",
+    readContent: "Native-only instructions remain available.",
+  };
+  snapshot.discoverySkills!.push(native);
+  snapshot.skills.push({ name: native.name, skillKey: native.name });
+  const carrier = await createCarrier("node");
+  await withResources(await transfer(carrier, snapshot), async (resources) => {
+    await withSessionSkillResources(resources, async () => {
+      const sandbox = {
+        ...createAgentToolsSandboxContext({
+          workspaceDir: "/unreadable/gateway",
+          containerWorkdir: carrier.workspace,
+        }),
+        backendId: "node" as const,
+        readOnlyResourceMounts: resources.mounts,
+      };
+      const catalog = bindHostSkillCatalog({
+        snapshot: resources.snapshot,
+        workspaceDir: sandbox.workspaceDir,
+        sandbox,
+        readable: true,
+        assertCurrent: () => {},
+      })();
+      const tools = createInstalledSkillTools(catalog);
+      finalizeAgentToolAvailability(tools);
+      expect(
+        (await tools[0]!.execute("search-native", { query: "Native-only" })).details,
+      ).toMatchObject({ skills: [{ name: "node-guide" }] });
+      expect(
+        (await tools[1]!.execute("read-native", { name: "node-guide" })).details,
+      ).toMatchObject({ location: native.filePath, content: native.readContent });
+      expect(resources.snapshot.prompt).not.toContain("node-guide");
+    });
+  });
+});
+
 it("transfers host bytes rather than stale Gateway bytes", async () => {
   const source = await createSource(16);
   const hostRoot = temps.make("skill-resource-host-");
