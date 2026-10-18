@@ -29,7 +29,7 @@ export function createPreparedModelCatalogProjection(params: {
     ...(params.pluginGeneration.preparedStaticProviderCatalog?.providers ?? []),
     ...(params.pluginGeneration.pluginRegistry?.providers.map(({ provider }) => provider) ?? []),
   ];
-  return (
+  const project = (
     inventory: Pick<PreparedModelCatalogInventory, "catalog"> &
       Partial<Pick<PreparedModelCatalogInventory, "discoveryOrigins" | "providers">>,
     configuredRuntimeModels = params.catalogFacts.configuredRuntimeModels,
@@ -54,20 +54,12 @@ export function createPreparedModelCatalogProjection(params: {
         ],
       };
     }
-    // Deferred registry normalization must retain the same metadata and executable owners.
-    const configured = withPluginRuntimeGenerationScope(
-      {
-        metadataSnapshot: params.pluginGeneration.pluginMetadataSnapshot,
-        pluginRegistry: params.pluginGeneration.pluginRegistry,
-      },
-      () =>
-        prepareConfiguredRuntimeFacts({
-          agentFacts: params.agentFacts,
-          workspaceFacts: params.pluginGeneration,
-          templateModelRegistry: params.catalogFacts.templateModelRegistry,
-          configuredRuntimeModels,
-        }).modelCatalog,
-    );
+    const configured = prepareConfiguredRuntimeFacts({
+      agentFacts: params.agentFacts,
+      workspaceFacts: params.pluginGeneration,
+      templateModelRegistry: params.catalogFacts.templateModelRegistry,
+      configuredRuntimeModels,
+    }).modelCatalog;
     const current = materializePreparedModelCatalog(
       configured,
       params.agentFacts.runtimeCapabilityModels,
@@ -135,4 +127,13 @@ export function createPreparedModelCatalogProjection(params: {
     });
     return projected;
   };
+  // Materialization and final identity deduplication resolve provider policies too.
+  return (...args: Parameters<typeof project>) =>
+    withPluginRuntimeGenerationScope(
+      {
+        metadataSnapshot: params.pluginGeneration.pluginMetadataSnapshot,
+        pluginRegistry: params.pluginGeneration.pluginRegistry,
+      },
+      () => project(...args),
+    );
 }

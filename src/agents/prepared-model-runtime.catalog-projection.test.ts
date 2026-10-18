@@ -1,8 +1,13 @@
 // Preserve module setup before modules that consume it.
 // oxfmt-ignore
 import { usePreparedModelRuntimeHarness } from "./prepared-model-runtime.test-harness.js";
-import { expect, it } from "vitest";
-import { getPluginRuntimeGenerationRegistry } from "../plugins/runtime/generation-scope.js";
+import { expect, it, vi } from "vitest";
+import * as providerPolicy from "../plugins/provider-policy-surface.js";
+import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
+import {
+  getPluginRuntimeGenerationRegistry,
+  withPluginRuntimeGenerationScope,
+} from "../plugins/runtime/generation-scope.js";
 import {
   prepareModelRuntimeSnapshot,
   refreshPreparedModelRuntimeSnapshots,
@@ -26,7 +31,43 @@ it("retains the prepared plugin generation during deferred catalog normalization
     registries.push(getPluginRuntimeGenerationRegistry());
     return [];
   });
-  await owner.loadFullModelCatalog!({ refresh: true, wait: true });
+  const ambientRegistry = createEmptyPluginRegistry();
+  const policy = vi
+    .spyOn(providerPolicy, "resolveDirectBundledProviderPolicySurface")
+    .mockImplementation((provider) =>
+      provider === "fixture"
+        ? {
+            normalizeModelCatalogId:
+              getPluginRuntimeGenerationRegistry() === owner.pluginRegistry
+                ? ({ modelId }) => (modelId === "legacy" ? "canonical" : modelId)
+                : ({ modelId }) => modelId,
+          }
+        : null,
+    );
+  const entries = ["legacy", "canonical"].map((id) => ({
+    id,
+    name: id,
+    provider: "fixture",
+  }));
+  mocks.runPreparedModelCatalogWorker.mockResolvedValue({ entries, routeVariants: entries });
+  try {
+    const catalog = await withPluginRuntimeGenerationScope(
+      { metadataSnapshot: owner.metadataSnapshot, pluginRegistry: ambientRegistry },
+      async () => {
+        const result = await owner.loadFullModelCatalog!({ refresh: true, wait: true });
+        expect(getPluginRuntimeGenerationRegistry()).toBe(ambientRegistry);
+        return result;
+      },
+    );
+    expect(
+      catalog.entries.filter(({ provider }) => provider === "fixture").map(({ id }) => id),
+    ).toEqual(["legacy"]);
+    expect(
+      catalog.routeVariants.filter(({ provider }) => provider === "fixture").map(({ id }) => id),
+    ).toEqual(["legacy"]);
+  } finally {
+    policy.mockRestore();
+  }
   expect(registries.length).toBeGreaterThan(0);
   expect(registries.every((registry) => registry === owner.pluginRegistry)).toBe(true);
   expect(getPluginRuntimeGenerationRegistry()).toBeUndefined();
