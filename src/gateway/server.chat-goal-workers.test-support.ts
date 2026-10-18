@@ -260,7 +260,10 @@ export function registerWorkerGoalChatCases(
           async () => {
             if (mode === "claim-revoked" || mode === "claim-reassigned") {
               const current = await placements.getAsync(sessionId);
-              revokedClaim = current && projectPlacementTurnClaim(current);
+              if (current?.state !== "active") {
+                throw new Error("Expected an active worker placement before Goal promotion");
+              }
+              revokedClaim = projectPlacementTurnClaim(current);
               if (!revokedClaim || !placements.validateTurnClaim(revokedClaim)) {
                 throw new Error("Expected a live launcher-owned claim before Goal promotion");
               }
