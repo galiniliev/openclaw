@@ -229,9 +229,13 @@ it("mirrors a correlated input to another session without borrowing or consuming
   expect(await loadTranscriptEvents(target)).toEqual(targetTranscript);
 });
 
-it.each(["interrupted", "collected-consumed"] as const)(
-  "preserves request-bound receipts across legacy-hash rejection and re-upgrade (%s)",
-  async (disposition) => {
+it.each([
+  { disposition: "interrupted", restart: true },
+  { disposition: "interrupted", restart: false },
+  { disposition: "collected-consumed", restart: true },
+] as const)(
+  "preserves request-bound receipts across legacy-hash rejection ($disposition, restart=$restart)",
+  async ({ disposition, restart }) => {
     const runId = "versioned-input";
     const requestFingerprint = "f".repeat(64);
     const receipt = await stage(runId, { requestFingerprint });
@@ -240,7 +244,9 @@ it.each(["interrupted", "collected-consumed"] as const)(
     }
     receipt.finish("interrupted");
     await receipt.settled?.();
-    rotateAgentEventLifecycleGeneration();
+    if (restart) {
+      rotateAgentEventLifecycleGeneration();
+    }
     const readStoredSource = () =>
       database()
         .db.prepare("SELECT * FROM session_pending_inputs WHERE input_id = ?")

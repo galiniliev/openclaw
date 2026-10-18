@@ -132,7 +132,7 @@ export function registerWorkerGoalChatCases(
       runEmbeddedAgent.mockImplementation(async (params) => {
         prepared.resolve();
         await promote.promise;
-        if (mode === "preparation-failed") {
+        if (mode === "preparation-failed" && runEmbeddedAgent.mock.calls.length === 1) {
           throw new Error("Worker setup declined input");
         }
         if (mode === "revoked") {
@@ -155,7 +155,7 @@ export function registerWorkerGoalChatCases(
             await params.userTurnTranscriptRecorder?.persistApproved();
           },
         );
-        if (calls === 1 || calls === 4) {
+        if (calls === 1 || calls === 4 || mode === "preparation-failed") {
           await patchSessionEntryCore(scope(), (entry) => ({
             goal: entry.goal && { ...entry.goal, status: calls === 1 ? "paused" : "complete" },
           }));
@@ -201,6 +201,34 @@ export function registerWorkerGoalChatCases(
           await waitForDispatchEnd();
           expect(loadSessionEntry(scope())?.goal).toBeUndefined();
           expect(userMessages()).toEqual([]);
+          if (mode === "preparation-failed") {
+            const changed = await rpc(
+              "chat.send",
+              { ...request, message: "A different objective" },
+              undefined,
+              operator,
+            );
+            expect(changed.mock.calls[0]?.[0]).toBe(false);
+            expect(changed.mock.calls[0]?.[2]).toMatchObject({
+              code: "INVALID_REQUEST",
+              details: { reason: "goal-operation-conflict" },
+            });
+            expect(runEmbeddedAgent).toHaveBeenCalledOnce();
+            const retried = await rpc("chat.send", request, undefined, operator);
+            expect(retried.mock.calls[0]).toEqual([
+              true,
+              expect.objectContaining({ status: "started", action: "start" }),
+              undefined,
+              expect.anything(),
+            ]);
+            await waitForDispatchEnd();
+            expect(loadSessionEntry(scope())?.goal).toMatchObject({
+              status: "complete",
+              continuationTurns: 0,
+            });
+            expect(userMessages()).toHaveLength(1);
+            expect(runEmbeddedAgent).toHaveBeenCalledTimes(2);
+          }
           return;
         }
         expect(started.mock.calls[0]).toEqual([

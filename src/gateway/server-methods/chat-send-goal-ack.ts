@@ -31,6 +31,14 @@ export async function acknowledgeWorkerGoal(params: {
       runId: session.clientRunId,
     });
   } catch (error) {
+    if (!userTurn.recorder.hasPersisted() && request.goalOperation) {
+      // Dispatch settled before admission: keep the input binding, not its terminal response.
+      context.dedupe.set(`chat:${session.clientRunId}`, {
+        ts: Date.now(),
+        ok: true,
+        requestIdentity: request.goalOperation.requestFingerprint,
+      });
+    }
     params.respond(
       false,
       undefined,

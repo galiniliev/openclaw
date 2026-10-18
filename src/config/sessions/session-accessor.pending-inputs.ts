@@ -360,7 +360,9 @@ async function stagePreparedPendingInput(
       if (
         (!options.requestFingerprint && !options.trackCompletion) ||
         (existing.state !== "queued" && existing.state !== "interrupted") ||
-        (existing.lifecycle_generation === lifecycleGeneration && !options.trackCompletion)
+        (existing.lifecycle_generation === lifecycleGeneration &&
+          existing.state !== "interrupted" &&
+          !options.trackCompletion)
       ) {
         throw new Error("Pending input ownership ended; submit a new turn to continue");
       }
