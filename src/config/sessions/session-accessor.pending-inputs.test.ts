@@ -268,8 +268,12 @@ it.each([
     expect(await readTranscript()).toEqual(transcript);
     expect((await pendingInputs()).total).toBe(disposition === "interrupted" ? 1 : 0);
 
+    if (!restart) {
+      await expect(stage(runId, { requestFingerprint })).rejects.toThrow("ownership ended");
+    }
     const renewed = await stage(runId, {
       requestFingerprint,
+      retryInterrupted: !restart,
       prepareMessageAfterIdempotencyCheck: prepare,
     });
     expect(renewed.inputId).toBe(receipt.inputId);

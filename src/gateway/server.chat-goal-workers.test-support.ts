@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { it, expect, vi, type MockInstance, type Mock } from "vitest";
 import { awaitGateBeforeSettlement, createDeferred } from "../../test/helpers/promise.js";
 import type { runEmbeddedAgent as executeEmbeddedAgent } from "../agents/embedded-agent.js";
@@ -10,7 +11,10 @@ import { loadSessionEntry, patchSessionEntryCore } from "../config/sessions/sess
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { clearAgentRunContext, registerAgentRunContext } from "../infra/agent-run-registry.js";
 import { waitForGatewayActiveWork } from "../infra/gateway-active-work.js";
+import * as workerAdmission from "../infra/sqlite-worker-operation-admission.js";
+import { sqliteWorkerOwnerProbe } from "../infra/sqlite-worker-owner-probe.test-support.js";
 import { getSessionWorkAdmissionRelease } from "../sessions/session-lifecycle-admission.js";
+import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import { ensureProfileForEmail } from "../state/user-profiles.js";
 import type { GatewayClient, GatewayRequestContext, RespondFn } from "./server-methods/types.js";
 import {
@@ -19,8 +23,18 @@ import {
 } from "./server.chat-goal.test-support.js";
 import { prepareGatewayReplyRuntimeForTest } from "./test-helpers.js";
 import { getTestPluginRegistry } from "./test-helpers.plugin-registry.js";
+import { createDispatchEnvironmentFixtures } from "./worker-environments/placement-dispatch-test-fixtures.js";
+import {
+  projectPlacementTurnClaim,
+  type WorkerSessionTurnClaim,
+} from "./worker-environments/placement-record.js";
 import { createWorkerSessionPlacementStore } from "./worker-environments/placement-store.js";
-import { withWorkerTurnTranscriptDatabase } from "./worker-environments/worker-turn-transcript-target.js";
+import {
+  advancePlacementFixtureToActive,
+  createPlacementTurnClaimFixtureOps,
+} from "./worker-environments/placement-test-fixtures.js";
+import { createWorkerSessionTurnPlacementProvider } from "./worker-environments/worker-turn-launcher.js";
+import { createWorkerWorkspaceOperationCoordinator } from "./worker-environments/workspace-operation-coordinator.js";
 
 type Scope = { agentId: string; sessionKey: string; sessionId: string; storePath: string };
 
@@ -38,7 +52,13 @@ export function registerWorkerGoalChatCases(
   client: GatewayClient,
 ) {
   const userMessages = () => readGoalChatUserMessages(scope());
-  it.each(["continue", "preparation-failed", "revoked"] as const)(
+  it.each([
+    "continue",
+    "preparation-failed",
+    "revoked",
+    "claim-revoked",
+    "claim-reassigned",
+  ] as const)(
     "admits native worker Goal input and continuation through current placement (%s)",
     async (mode) => {
       const { sessionKey, sessionId, storePath } = scope();
@@ -91,25 +111,110 @@ export function registerWorkerGoalChatCases(
       expect(getRegisteredAgentHarness("codex")?.harness.cloudPlacement?.mode).toBe("remote-exec");
       const placements = createWorkerSessionPlacementStore();
       context.workerSessionPlacementService = placements;
-      const placement = await placements.startDispatch({
-        agentId: "main",
-        sessionKey,
-        sessionId,
-        executionMode: "remote-exec",
-      });
-      const releasePlacement = installSessionPlacementAdmissionProvider({
-        withRequiredSession: async (_identity, task, assertCurrent) => {
-          assertCurrent?.();
-          return task(() => assertCurrent?.());
+      const environment = {
+        ...createDispatchEnvironmentFixtures().attached,
+        environmentId: "worker-goal-environment",
+        ownerEpoch: 7,
+        nodeDeviceId: "worker-goal-node",
+        sshEndpoint: null,
+        attachedSessionIds: [sessionId],
+      };
+      await advancePlacementFixtureToActive(
+        placements,
+        openOpenClawStateDatabase(),
+        { agentId: "main", sessionKey, sessionId, executionMode: "remote-exec" },
+        {
+          environmentId: environment.environmentId,
+          ownerEpoch: environment.ownerEpoch,
+          workerBundleHash: environment.bootstrapReceipt.bundleHash,
+          remoteWorkspaceDir: "/worker/goal-workspace",
         },
-        usesWorkerInference: async () => true,
-        resolveRuntimeOverride: async () => "codex",
-        assertCompactionSuccessorAllowed: () => {
-          throw new Error("unexpected compaction successor");
+      );
+      const unexpectedTransport = async () => {
+        throw new Error("Unexpected external worker operation");
+      };
+      // Only node/model I/O is synthetic; the launcher owns real SQLite placement claims.
+      const provider = createWorkerSessionTurnPlacementProvider({
+        placements,
+        environments: {
+          get: () => environment,
+          acquireTurnCredential: unexpectedTransport,
+          acknowledgeCredentialDelivery: unexpectedTransport,
+          destroy: unexpectedTransport,
+          stopTunnel: async () => {},
+          startTunnel: async () => ({
+            environmentId: environment.environmentId,
+            ownerEpoch: environment.ownerEpoch,
+            runWorkspaceCommand: async (command) => {
+              command.assertCurrent?.();
+              expect(JSON.parse(command.input ?? "null")).toEqual({ op: "discover" });
+              return {
+                stdout: "",
+                stderr: "",
+                code: 0,
+                signal: null,
+                killed: false,
+                termination: "exit",
+              };
+            },
+            quiesceWorkspace: unexpectedTransport,
+            reconcileWorkspace: unexpectedTransport,
+            syncWorkspace: unexpectedTransport,
+            stop: async () => {},
+          }),
         },
-        executeLocalTurn: async (_claim, run) => run(),
-        executeTurn: async (_claim, _params, run) => run(),
+        resolveWorkspace: async () => ({
+          kind: "device-folder",
+          deviceId: environment.nodeDeviceId,
+          path: "/worker/goal-workspace",
+        }),
+        workspaceOperations: createWorkerWorkspaceOperationCoordinator(),
+        waitForAdmissionNode: unexpectedTransport,
+        reconcileActivePlacement: unexpectedTransport,
+        redispatchPlacement: unexpectedTransport,
       });
+      const releasePlacement = installSessionPlacementAdmissionProvider(provider);
+      const modelExecuted = vi.fn();
+      let revokedClaim: WorkerSessionTurnClaim | undefined;
+      let replacementClaim: WorkerSessionTurnClaim | undefined;
+      const claimOps = createPlacementTurnClaimFixtureOps(
+        openOpenClawStateDatabase(),
+        placements.workspaceResultInstanceId(),
+      );
+      let claimChangedAtCommit = false;
+      // Change the real claim in the synchronous native COMMIT callback; retain all source checks.
+      const commitAdmission = sqliteWorkerOwnerProbe.admission(
+        workerAdmission,
+        (request, grant, admit) => {
+          const publication = isRecord(request.facts) ? request.facts.publication : undefined;
+          if (
+            revokedClaim &&
+            !claimChangedAtCommit &&
+            request.stage === "commit" &&
+            isRecord(publication) &&
+            publication.kind === "session-actor-admission" &&
+            publication.final === true &&
+            isRecord(publication.publication) &&
+            publication.publication.kind === "session-turn"
+          ) {
+            claimChangedAtCommit = true;
+            claimOps.cancelWorkspaceResultAndReleaseTurn(revokedClaim, {
+              reason: "node-disconnect",
+            });
+            if (mode === "claim-reassigned") {
+              replacementClaim = claimOps.claimTurn({
+                agentId: "main",
+                sessionKey,
+                sessionId,
+                claimId: "replacement-goal-claim",
+                runId: "replacement-goal-run",
+                owner: revokedClaim.owner,
+              });
+            }
+          }
+          admit(request, grant);
+        },
+      );
       const prepared = createDeferred();
       const promote = createDeferred();
       const objective = "Finish a native worker checklist";
@@ -143,38 +248,49 @@ export function registerWorkerGoalChatCases(
           throw new Error("Completed Goal continued again");
         }
         const target = { agentId: "main", sessionKey, sessionId: params.sessionId, storePath };
-        // The physical worker is simulated; promotion uses the same prepared transcript
-        // owner as canonical remote-exec, after setup has accepted this exact placement.
-        await withWorkerTurnTranscriptDatabase(
-          { ...target, sessionTarget: target },
+        return provider.executeTurn(
+          { ...target, runId: params.runId },
           {
-            assertCurrent: () => params.abortSignal?.throwIfAborted(),
-            prepareAuthority: async () => ({ isCurrent: () => true, release: () => {} }),
+            ...params,
+            sessionFile: sessionKey,
+            sessionTarget: target,
+            skillsSnapshot: undefined,
+            explicitSkillSelections: undefined,
           },
           async () => {
+            if (mode === "claim-revoked" || mode === "claim-reassigned") {
+              const current = await placements.getAsync(sessionId);
+              revokedClaim = current && projectPlacementTurnClaim(current);
+              if (!revokedClaim || !placements.validateTurnClaim(revokedClaim)) {
+                throw new Error("Expected a live launcher-owned claim before Goal promotion");
+              }
+            }
             await params.userTurnTranscriptRecorder?.persistApproved();
+            modelExecuted();
+            if (calls === 1 || calls === 4 || mode === "preparation-failed") {
+              await patchSessionEntryCore(scope(), (entry) => ({
+                goal: entry.goal && { ...entry.goal, status: calls === 1 ? "paused" : "complete" },
+              }));
+            }
+            return {
+              payloads: [{ text: "Checkpoint reached." }],
+              meta: {
+                durationMs: 1,
+                stopReason: "end_turn",
+                agentMeta: {
+                  sessionId: params.sessionId,
+                  provider: "test",
+                  model: "test",
+                  agentHarnessId: "codex",
+                  usage: { input: 2, output: 1 },
+                  lastCallUsage: { input: calls * 10, output: 1 },
+                },
+              },
+            };
           },
+          undefined,
+          params.preparedRunAdmission?.assertSourceCurrent,
         );
-        if (calls === 1 || calls === 4 || mode === "preparation-failed") {
-          await patchSessionEntryCore(scope(), (entry) => ({
-            goal: entry.goal && { ...entry.goal, status: calls === 1 ? "paused" : "complete" },
-          }));
-        }
-        return {
-          payloads: [{ text: "Checkpoint reached." }],
-          meta: {
-            durationMs: 1,
-            stopReason: "end_turn",
-            agentMeta: {
-              sessionId: params.sessionId,
-              provider: "test",
-              model: "test",
-              agentHarnessId: "codex",
-              usage: { input: 2, output: 1 },
-              lastCallUsage: { input: calls * 10, output: 1 },
-            },
-          },
-        };
       });
       const starting = rpc("chat.send", request, undefined, operator);
       try {
@@ -201,6 +317,15 @@ export function registerWorkerGoalChatCases(
           await waitForDispatchEnd();
           expect(loadSessionEntry(scope())?.goal).toBeUndefined();
           expect(userMessages()).toEqual([]);
+          if (mode === "claim-revoked" || mode === "claim-reassigned") {
+            expect(claimChangedAtCommit).toBe(true);
+            expect(revokedClaim).toBeDefined();
+            expect(revokedClaim && placements.validateTurnClaim(revokedClaim)).toBe(false);
+            expect(modelExecuted).not.toHaveBeenCalled();
+            if (mode === "claim-reassigned") {
+              expect(replacementClaim && placements.validateTurnClaim(replacementClaim)).toBe(true);
+            }
+          }
           if (mode === "preparation-failed") {
             const changed = await rpc(
               "chat.send",
@@ -277,6 +402,7 @@ export function registerWorkerGoalChatCases(
         });
         expect(loadSessionEntry(scope())?.goal?.tokensUsed).toBeGreaterThan(0);
         expect(runEmbeddedAgent).toHaveBeenCalledTimes(4);
+        expect(modelExecuted).toHaveBeenCalledTimes(4);
         expect(userMessages()).toHaveLength(2);
         context.dedupe.clear();
         const replay = await rpc("chat.send", request, undefined, operator);
@@ -285,13 +411,40 @@ export function registerWorkerGoalChatCases(
       } finally {
         promote.resolve();
         await starting;
+        await waitForDispatchEnd();
+        commitAdmission.mockRestore();
         releasePlacement();
         loadNative.mockRestore();
-        await placements.retireSessionPlacementAsync({
-          sessionId,
-          expectedState: "requested",
-          expectedGeneration: placement.generation,
-        });
+        if (replacementClaim && placements.validateTurnClaim(replacementClaim)) {
+          await placements.releaseTurn(replacementClaim);
+        }
+        const active = await placements.getAsync(sessionId);
+        expect(active?.state).toBe("active");
+        if (active?.state === "active") {
+          const draining = await placements.startDrain({
+            sessionId,
+            environmentId: environment.environmentId,
+            ownerEpoch: environment.ownerEpoch,
+            expectedGeneration: active.generation,
+          });
+          const reconciling = await placements.startReconcile({
+            sessionId,
+            environmentId: environment.environmentId,
+            ownerEpoch: environment.ownerEpoch,
+            expectedGeneration: draining.generation,
+          });
+          const reclaimed = await placements.transition({
+            sessionId,
+            from: "reconciling",
+            to: "reclaimed",
+            expectedGeneration: reconciling.generation,
+          });
+          await placements.retireSessionPlacementAsync({
+            sessionId,
+            expectedState: "reclaimed",
+            expectedGeneration: reclaimed.generation,
+          });
+        }
       }
     },
   );

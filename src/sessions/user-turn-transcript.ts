@@ -527,6 +527,7 @@ export function createUserTurnTranscriptRecorder(
             ...options,
             requestFingerprint: params.pendingInputRequestFingerprint,
             trackCompletion: params.trackInputCompletion,
+            retryInterrupted: params.sessionTurnMutation?.kind === "goal",
             replaySourceSessionKeys: params.pendingInputReplaySourceSessionKeys,
             message: candidate,
             onCommitted: (receipt) => {

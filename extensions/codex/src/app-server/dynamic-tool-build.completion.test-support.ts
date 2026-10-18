@@ -61,6 +61,25 @@ export function registerCodexCompletionCommandTest() {
                   ? { deny: ["update_goal"] }
                   : undefined,
         };
+        const configuredPolicy = structuredClone(params.config.tools);
+        const existingGoal =
+          policy === "default"
+            ? undefined
+            : {
+                schemaVersion: 1 as const,
+                id: "existing-session-goal",
+                objective: "Preserve the saved checkpoint",
+                status: "paused" as const,
+                createdAt: 1000,
+                updatedAt: 1200,
+                pausedAt: 1200,
+                tokenStart: 12,
+                tokenStartFresh: true,
+                tokensUsed: 3,
+                tokenBudget: 50,
+                continuationTurns: 5,
+                lastStatusNote: "Keep the existing progress",
+              };
         const closers: Array<() => void> = [];
         const previousConfig = getRuntimeConfigSnapshot();
         const previousSource = getRuntimeConfigSourceSnapshot();
@@ -69,7 +88,7 @@ export function registerCodexCompletionCommandTest() {
           await upsertSessionEntry({
             agentId: "main",
             sessionKey: expectDefined(params.sessionKey, "Goal session key"),
-            entry: { sessionId: params.sessionId, updatedAt: Date.now() },
+            entry: { sessionId: params.sessionId, updatedAt: Date.now(), goal: existingGoal },
           });
           const sandboxPolicy = await resolveSandboxRuntimeStatusAsync({
             cfg: params.config,
@@ -110,25 +129,6 @@ export function registerCodexCompletionCommandTest() {
               expect.objectContaining({ type: "function", name }),
             );
           }
-          if (policy !== "default") {
-            expect(registeredNames).not.toContain("update_goal");
-            expect(
-              await bridge.handleToolCall({
-                threadId: "core-goal-thread",
-                turnId: "core-goal-turn",
-                callId: "denied-update",
-                tool: "update_goal",
-                arguments: { status: "complete" },
-              }),
-            ).toMatchObject({ success: false });
-            return;
-          }
-          expect(bridge.specs).toContainEqual(
-            expect.objectContaining({
-              type: "function",
-              name: "update_goal",
-            }),
-          );
           const call = (tool: string, args: JsonObject) =>
             bridge.handleToolCall({
               threadId: "core-goal-thread",
@@ -137,6 +137,29 @@ export function registerCodexCompletionCommandTest() {
               tool,
               arguments: args,
             });
+          if (policy !== "default") {
+            expect(registeredNames).not.toContain("update_goal");
+            expect(await call("update_goal", { status: "complete" })).toMatchObject({
+              success: false,
+            });
+            expect(await call("get_goal", {})).toMatchObject({ success: true });
+            expect(
+              (
+                await getSessionEntryAsync({
+                  sessionKey: expectDefined(params.sessionKey, "Goal session key"),
+                  agentId: "main",
+                })
+              )?.goal,
+            ).toEqual(existingGoal);
+            expect(params.config.tools).toEqual(configuredPolicy);
+            return;
+          }
+          expect(bridge.specs).toContainEqual(
+            expect.objectContaining({
+              type: "function",
+              name: "update_goal",
+            }),
+          );
           expect(
             await call("create_goal", { objective: "Verify the synthetic fixture" }),
           ).toMatchObject({ success: true });
