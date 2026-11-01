@@ -13,7 +13,6 @@ import { persistSubagentSessionTiming } from "../agents/subagents/registry/subag
 import { getSubagentRunsForChildSession } from "../agents/subagents/registry/subagent-registry-memory.js";
 import * as spawnRuntime from "../agents/subagents/spawn/subagent-spawn.runtime.js";
 import { createSessionsSpawnTool } from "../agents/tools/sessions-spawn-tool.js";
-import * as repositoryPaths from "../agents/worktrees/repository-paths.js";
 import { managedWorktrees, ManagedWorktreeService } from "../agents/worktrees/service.js";
 import {
   loadSessionEntry,
@@ -42,6 +41,7 @@ import { createDirectChatContext } from "./server-chat.agent-events.test-helpers
 import { createGatewayInstanceRuntime } from "./server-instance-runtime.js";
 import { createRequestGatewayMethodRegistry } from "./server-methods.js";
 import { disposeSessionReadContexts } from "./server-methods/sessions-read-cache.test-support.js";
+import { registerWorkspaceSourceSpawnTests } from "./server.sessions.create-workspace-sources.suite.js";
 import { createWorktreeSpawnRepositoryFixture } from "./server.sessions.create-worktree-spawn.test-support.js";
 import {
   controlUiClient,
@@ -665,50 +665,6 @@ test("worktree spawns do not inherit an unregistered parent working directory", 
   await expectCreationError(requestChild({}, created.key), "agent workspace is not a git checkout");
 });
 
-test.each(["empty metadata", "missing worktree target", "partial metadata"])(
-  "child sessions preserve %s without inventing a checkout",
-  async (damage) => {
-    const workspace = path.join(state.root, "non-git-workspace");
-    const metadata = path.join(workspace, ".git");
-    const contents = "gitdir: missing-worktree\n";
-    if (damage === "missing worktree target") {
-      await fs.writeFile(metadata, contents);
-    } else {
-      await fs.mkdir(damage === "partial metadata" ? path.join(metadata, "objects") : metadata, {
-        recursive: true,
-      });
-    }
-    await createSession({ key: parentKey });
-    if (damage === "empty metadata") {
-      const child = await createChild({ worktree: false });
-      expect(child.entry.worktree).toBeUndefined();
-      const stored = readEntry(child.key);
-      expect(stored).toMatchObject({ parentSessionKey: parentKey });
-      expect(stored?.pendingWorktree).toBeUndefined();
-      expect(await fs.readdir(metadata)).toEqual([]);
-      await expect(repositoryPaths.resolveRepositoryPaths(workspace)).rejects.toThrow(
-        "not a git checkout",
-      );
-      await expectCreationError(
-        requestChild(),
-        "agent workspace is not a git checkout",
-        "INVALID_REQUEST",
-      );
-      return;
-    }
-    await expectCreationError(
-      requestChild(),
-      expect.stringContaining("checkout preserved"),
-      "UNAVAILABLE",
-    );
-    if (damage === "missing worktree target") {
-      expect(await fs.readFile(metadata, "utf8")).toBe(contents);
-    } else {
-      expect(await fs.readdir(metadata)).toEqual(["objects"]);
-    }
-  },
-);
-
 test("keyed worktree creation reuses its recorded base after reopening the registry", async () => {
   await git("branch", "selected-base");
   const params = {
@@ -1032,4 +988,16 @@ test("an existing child row does not replace an unaccepted parent project source
     sessionId: child.sessionId,
   });
   expect(readEntry(key)?.worktree).toBeUndefined();
+});
+
+registerWorkspaceSourceSpawnTests({
+  parentKey,
+  getStateRoot: () => state.root,
+  createSession,
+  createChild,
+  requestChild,
+  readEntry,
+  expectCreationError,
+  assertNoProjectClone: () =>
+    expect(projectCloneMocks.materializeProjectClone).not.toHaveBeenCalled(),
 });
