@@ -80,6 +80,12 @@ export const SCHEMA_MIGRATION_BACKUP_TABLES: Record<
       "local_workspace_tree_packs",
       "local_workspace_source_path_sets",
     ],
+    37: [
+      "worker_environments",
+      "worker_session_placements",
+      "session_repository_workspaces",
+      "worker_workspace_pending_results",
+    ],
     36: [
       "claw_installs",
       "template_installs",

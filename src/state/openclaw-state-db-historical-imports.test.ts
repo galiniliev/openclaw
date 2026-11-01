@@ -75,17 +75,18 @@ it.each([
       expect(after).toEqual({ ...before, placements: expect.any(Array) });
       expect(after.placements).toHaveLength(before.placements.length);
       for (const [index, row] of before.placements.entries()) {
-        expect(after.placements[index]).toEqual(
-          row.repository_preparation === "pending"
+        expect(after.placements[index]).toEqual({
+          ...row,
+          confirmed_loss_recovery_json: null,
+          ...(row.repository_preparation === "pending"
             ? {
-                ...row,
                 state: "failed",
                 recovery_error: expect.stringContaining(
                   "Historical repository preparation pending",
                 ),
               }
-            : row,
-        );
+            : {}),
+        });
       }
       expect(db.prepare("PRAGMA user_version").get()?.user_version).toBe(
         OPENCLAW_STATE_SCHEMA_VERSION,

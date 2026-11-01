@@ -91,12 +91,11 @@ function fixture(provenance = true, refusePublication = false) {
 }
 
 function expectCanonical(db: EngineConnection) {
-  expect(OPENCLAW_STATE_SCHEMA_VERSION).toBe(36);
-  expect(db.prepare("PRAGMA user_version").get()?.user_version).toBe(36);
+  expect(db.prepare("PRAGMA user_version").get()?.user_version).toBe(OPENCLAW_STATE_SCHEMA_VERSION);
   expect(
     db.prepare("SELECT schema_version FROM schema_meta WHERE meta_key = 'primary'").get(),
-  ).toEqual({ schema_version: 36 });
-  expect(readStateSchemaContentVersion(db)).toBe(36);
+  ).toEqual({ schema_version: OPENCLAW_STATE_SCHEMA_VERSION });
+  expect(readStateSchemaContentVersion(db)).toBe(OPENCLAW_STATE_SCHEMA_VERSION);
   expect(
     db
       .prepare(
@@ -148,18 +147,20 @@ it("creates fresh shared state directly at the canonical Template version", () =
 it("adds credential fixture tables without downgrading an already current Template schema", () => {
   using db = new DatabaseSync(":memory:");
   db.exec(OPENCLAW_STATE_SCHEMA_SQL);
-  db.exec(`PRAGMA user_version = 36;
-    INSERT INTO schema_meta VALUES ('primary', 'global', 36, NULL, 'current-fixture', 100, 100);`);
+  db.exec(`PRAGMA user_version = ${OPENCLAW_STATE_SCHEMA_VERSION};
+    INSERT INTO schema_meta VALUES ('primary', 'global', ${OPENCLAW_STATE_SCHEMA_VERSION}, NULL, 'current-fixture', 100, 100);`);
   const schema = db.prepare(
     "SELECT name, sql FROM sqlite_schema WHERE name GLOB 'template_*' ORDER BY name",
   );
   const before = schema.all();
   addPreCutoverClientCredentialTablesForTest(db);
   expect(schema.all()).toEqual(before);
-  expect(db.prepare("PRAGMA user_version").get()).toEqual({ user_version: 36 });
+  expect(db.prepare("PRAGMA user_version").get()).toEqual({
+    user_version: OPENCLAW_STATE_SCHEMA_VERSION,
+  });
   expect(
     db.prepare("SELECT schema_version FROM schema_meta WHERE meta_key = 'primary'").get(),
-  ).toEqual({ schema_version: 36 });
+  ).toEqual({ schema_version: OPENCLAW_STATE_SCHEMA_VERSION });
   expect(db.prepare("SELECT name FROM sqlite_schema WHERE name GLOB 'claw_*'").all()).toEqual([]);
 });
 

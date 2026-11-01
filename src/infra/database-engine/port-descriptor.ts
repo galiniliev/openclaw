@@ -16,11 +16,19 @@ export type { PortDescriptor, PortEndpoint, PortRow, PortTable } from "./port-ty
 
 export { DatabasePortDataError };
 
+/** Expected schema identity cannot admit, inspect, migrate, or operate on a store. */
+export type DatabasePortDescriptorIdentity = Pick<
+  PortDescriptor,
+  "id" | "version" | "tables" | "expectedCatalog" | "fragments"
+>;
+
 export type DatabasePortProvider = {
   id: string;
   minimumPostgresVersion: number;
   /** Resolve the selected installation before loading its public port artifact. */
   requiresPluginOwner?: true;
+  /** Host-pinned expected schema facts are independent of executable plugin availability. */
+  loadIdentity?: () => Promise<DatabasePortDescriptorIdentity>;
   resolveRoots(context: {
     config: OpenClawConfig;
     stateDir: string;
@@ -133,6 +141,7 @@ export function inspectSqlitePortSchema(
   db: DatabaseSync,
   baseDescriptor: PortDescriptor,
   pendingColumns: Readonly<Record<string, readonly string[]>> = {},
+  pendingTables: readonly string[] = [],
 ): PortDescriptor {
   assertSqliteIntegrity(db, "Port SQLite source");
   admitSqliteSchema(db);
@@ -180,6 +189,9 @@ export function inspectSqlitePortSchema(
   }
   for (const table of descriptor.tables) {
     const columns = readTableColumns(db, table.name);
+    if (!columns.size && pendingTables.includes(table.name)) {
+      continue;
+    }
     const expected = new Set(table.columns.map((column) => column.name));
     const pending = pendingColumns[table.name] ?? [];
     if (
@@ -192,7 +204,11 @@ export function inspectSqlitePortSchema(
       );
     }
   }
-  if (descriptor.triggers?.some((trigger) => !facts.triggers.has(trigger.name))) {
+  if (
+    descriptor.triggers?.some(
+      (trigger) => !facts.triggers.has(trigger.name) && !pendingTables.includes(trigger.table),
+    )
+  ) {
     throw new DatabasePortDataError("Missing canonical SQLite trigger");
   }
   return {

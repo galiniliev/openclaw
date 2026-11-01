@@ -12,6 +12,8 @@ CREATE TABLE "session_repository_workspaces" (
   "branch" text COLLATE "C" NOT NULL,
   "checkpoint_ref" text COLLATE "C",
   "manifest_hash" text COLLATE "C",
+  "recovery_json" text COLLATE "C",
+  "disk_authority_json" text COLLATE "C",
   "revision" bigint NOT NULL,
   "created_at_ms" bigint NOT NULL,
   "updated_at_ms" bigint NOT NULL,

@@ -7,6 +7,7 @@ import {
 } from "../../packages/memory-host-sdk/src/host/memory-schema.js";
 import type { SqliteSchemaCompatibility } from "../infra/sqlite-schema-contract.js";
 import { CONTEXT_ENGINE_TURN_OUTBOX_TABLE } from "./openclaw-agent-context-engine-turn-outbox-schema.js";
+import { SESSION_CREATION_OPERATIONS_TABLE } from "./openclaw-agent-creation-operations-schema.js";
 import {
   FIRST_USE_ADDITIVE_AGENT_COLUMN_DEFINITIONS,
   STARTUP_ADDITIVE_AGENT_COLUMN_DEFINITIONS,
@@ -36,6 +37,7 @@ export const AGENT_SCHEMA_COMPATIBILITY = {
     CONTEXT_ENGINE_TURN_OUTBOX_TABLE,
     "message_tool_run_outcomes",
     SESSION_GOAL_OPERATIONS_TABLE,
+    SESSION_CREATION_OPERATIONS_TABLE,
     SESSION_PENDING_INPUTS_TABLE,
     SESSION_INPUT_COMPLETIONS_TABLE,
     SESSION_PARTICIPANTS_TABLE,

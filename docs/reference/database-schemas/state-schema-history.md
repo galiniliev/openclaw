@@ -59,10 +59,23 @@ Doctor completes recognized schema-1 databases that predate the audit ledger bef
 | 35      | Content-addressed local workspace directory packs and source path sets, with compact per-projection file fingerprints                                                                                                                                                                                                                          | Unreleased          |
 
 | 36 | Starter install tables, record versions, and provenance use canonical Template names; unrelated data and absent optional provenance stay unchanged | Unreleased |
+| 37 | Session-private worker disk retention, confirmed-loss recovery, and workspace result disk authority | Unreleased |
 
 Earlier beta releases first included schema 1 in `v2026.5.30-beta.1`, schema 2
 in `v2026.7.2-beta.1`, schema 3 in `v2026.7.2-beta.2`, schema 5 in
 `v2026.7.2-beta.4`, and schema 6 in `v2026.7.2-beta.5`.
+
+### State schema 37
+
+Schema 37 adds nullable JSON columns for session-private worker disk retention,
+confirmed-loss recovery, and workspace result disk authority. Existing rows retain
+their identities, leases, claims, and payloads. The existing schema transaction and
+backup owners apply the additive change to SQLite and PostgreSQL. Older binaries
+refuse schema 37; rollback restores the verified predecessor tables.
+
+Each SQLite `ALTER TABLE` may validate its existing STRICT table. The migration
+adds five columns across four worker tables, with no row payload rewrite or index
+rebuild. Deployment-scale migration timing remains a required validation step.
 
 ### State schema 36
 

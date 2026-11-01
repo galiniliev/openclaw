@@ -78,6 +78,7 @@ type ReplacementProjectionOptions = {
   withCommit?: SessionEntryCreateWithTranscriptOptions["withCommit"];
   ownerAssignment?: SessionEntryReplacementCommit["ownerAssignment"];
   labelClaim?: SessionEntryReplacementCommit["labelClaim"];
+  creationOperation?: SessionEntryReplacementCommit["creationOperation"];
   preparedTranscript?: SessionEntryReplacementCommit["preparedTranscript"];
   checkPendingArchiveRecovery?: boolean;
   onLifecycleCommitted?: (pendingArchiveRecovery: boolean) => void;
@@ -512,6 +513,7 @@ async function applySqliteSessionEntryReplacementProjection<T, TReplacement>(
               consumePendingReset: params.consumePendingReset,
               ownerAssignment: params.ownerAssignment,
               labelClaim: params.labelClaim,
+              creationOperation: params.creationOperation,
               preparedTranscript: params.preparedTranscript,
               maintenance,
             };

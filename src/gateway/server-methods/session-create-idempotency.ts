@@ -1,16 +1,36 @@
 import { stableStringify } from "@openclaw/normalization-core";
 import { sha256Hex } from "@openclaw/normalization-core/node-crypto";
+import { err, ok, type Result } from "@openclaw/normalization-core/result";
 import {
   ErrorCodes,
   SESSION_CREATE_IDEMPOTENCY_RETENTION_MS,
   errorShape,
   missingScopeErrorShape,
+  type SessionsCreateParams,
+  type ErrorShape,
 } from "../../../packages/gateway-protocol/src/index.js";
+import {
+  prepareSessionCreationOperation,
+  SessionCreationOperationError,
+  readSessionCreationOperationError,
+} from "../../config/sessions/session-creation-operation.js";
+import { sessionEntryForkedFromParent } from "../../config/sessions/session-entry-lineage.js";
+import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { formatErrorMessage } from "../../infra/errors.js";
+import { normalizeAgentId } from "../../routing/session-key.js";
 import { getOrCreateWeakOwnerMap } from "../../shared/weak-owner-map.js";
 import { DEDUPE_MAX } from "../server-constants.js";
+import type {
+  CreateGatewaySessionResult,
+  PreparedGatewaySessionLifecycle,
+} from "../session-create-service.types.js";
 import { projectSessionFastModeEntryResult } from "../session-fast-mode-presentation.js";
+import { resolveSessionCreateAgentId } from "../session-request-agent.js";
+import { gatewayClientUploadPolicyError } from "../upload-policy.js";
 import type { GatewayInflightResult } from "./inflight.js";
 import { respondError } from "./response.js";
+import { isFreshChatSendStarted } from "./session-create-initial-turn.js";
+import { prepareRequiredWorkerSessionCreate } from "./session-create-required-worker.js";
 import { bindGatewayRequestHandlerMutationAuthority } from "./session-mutation-guards.js";
 import type { GatewayRequestContext, GatewayRequestHandler, RespondFn } from "./types.js";
 
@@ -29,6 +49,100 @@ const sessionCreatesByContext = new WeakMap<
   Map<string, Map<string, SessionCreateEntry>>
 >();
 
+/** Pin immutable intent before applying the required placement and physical creation key. */
+export function prepareSessionCreateRequest(
+  params: SessionsCreateParams,
+  caller: Pick<Parameters<GatewayRequestHandler>[0], "client" | "context">,
+): Result<
+  {
+    params: SessionsCreateParams;
+    requiredProfile?: string;
+    automaticEmptyWorkspace: boolean;
+    creationOperation?: ReturnType<typeof prepareSessionCreationOperation>;
+  },
+  ErrorShape
+> {
+  const uploadError = gatewayClientUploadPolicyError({
+    method: "sessions.create",
+    requestParams: params,
+    client: caller.client,
+    context: caller.context,
+  });
+  if (uploadError) {
+    return err(uploadError);
+  }
+  const profileId = caller.client?.authenticatedUserProfile?.profileId;
+  const config = caller.context.getRuntimeConfig();
+  const mutable = structuredClone(params);
+  const placement = prepareRequiredWorkerSessionCreate(mutable, config);
+  if (placement.error) {
+    return err(placement.error);
+  }
+  const { requiredProfile, automaticEmptyWorkspace } = placement;
+  const request = { params: mutable, requiredProfile, automaticEmptyWorkspace };
+  if (
+    params.purpose &&
+    (!params.creationOperationId ||
+      !params.sessionId ||
+      Boolean(params.repository) !== (params.purpose === "coding") ||
+      !requiredProfile ||
+      !config.cloudWorkers?.profiles?.[requiredProfile])
+  ) {
+    return err(
+      errorShape(
+        ErrorCodes.INVALID_REQUEST,
+        "Worker creation requires a durable operation, physical UUID, and configured required worker profile; coding requires repository and investigation requires an empty workspace.",
+      ),
+    );
+  }
+  if (params.creationOperationId === undefined && params.sessionId === undefined) {
+    return ok(request);
+  }
+  const allowed = new Set([
+    "creationOperationId",
+    "sessionId",
+    "agentId",
+    "label",
+    "idempotencyKey",
+    "purpose",
+    "repository",
+  ]);
+  if (
+    Object.keys(params).some((key) => !allowed.has(key)) ||
+    !params.creationOperationId ||
+    !params.sessionId ||
+    !profileId ||
+    Boolean(params.repository) !== (params.purpose === "coding")
+  ) {
+    return err(
+      errorShape(
+        ErrorCodes.INVALID_REQUEST,
+        "Durable creation requires a verified profile, operation ID and physical UUID, with empty-session arguments or a worker purpose and its repository selection only.",
+      ),
+    );
+  }
+  try {
+    const { idempotencyKey: _transportId, ...immutable } = params;
+    const creationOperation = prepareSessionCreationOperation(
+      profileId,
+      params.creationOperationId,
+      params.sessionId,
+      immutable,
+      Date.now(),
+    );
+    // A caller-selected physical UUID identifies a target; it never grants authority.
+    mutable.key = `dashboard:${creationOperation.sessionId}`;
+    return ok({ ...request, creationOperation });
+  } catch (error) {
+    if (!(error instanceof SessionCreationOperationError)) {
+      throw error;
+    }
+    return err(
+      errorShape(ErrorCodes.INVALID_REQUEST, error.message, { details: { reason: error.reason } }),
+    );
+  }
+}
+
 export function idempotentSessionCreate(handler: GatewayRequestHandler): GatewayRequestHandler {
   return async (request) => {
     const respond: RespondFn = (...args) => {
@@ -37,6 +151,29 @@ export function idempotentSessionCreate(handler: GatewayRequestHandler): Gateway
       }
       request.respond(...args);
     };
+    if (typeof request.params.creationOperationId === "string") {
+      try {
+        prepareSessionCreationOperation(
+          request.client?.authenticatedUserProfile?.profileId ?? "",
+          request.params.creationOperationId,
+          typeof request.params.sessionId === "string" ? request.params.sessionId : "",
+          request.params,
+          Date.now(),
+        );
+      } catch (error) {
+        if (!(error instanceof SessionCreationOperationError)) {
+          throw error;
+        }
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.INVALID_REQUEST, error.message, {
+            details: { reason: error.reason },
+          }),
+        );
+        return;
+      }
+    }
     const idempotencyKey = request.params.idempotencyKey;
     if (typeof idempotencyKey !== "string" || !idempotencyKey) {
       await handler(
@@ -150,8 +287,8 @@ export function idempotentSessionCreate(handler: GatewayRequestHandler): Gateway
             request,
             {
               ...request,
-              respond: (ok, payload, error, meta) => {
-                result = { ok, payload, error, meta };
+              respond: (accepted, payload, error, meta) => {
+                result = { ok: accepted, payload, error, meta };
               },
             },
             undefined,
@@ -182,5 +319,78 @@ export function idempotentSessionCreate(handler: GatewayRequestHandler): Gateway
     entries.set(idempotencyKey, entry);
     const result = await work;
     respond(result.ok, result.payload, result.error, result.meta);
+  };
+}
+
+export function durableSessionCreateAgentError(
+  params: SessionsCreateParams,
+  config: OpenClawConfig,
+): ErrorShape | undefined {
+  const selected = resolveSessionCreateAgentId(config, {});
+  return !selected.ok ||
+    (params.agentId !== undefined && normalizeAgentId(params.agentId) !== selected.agentId)
+    ? errorShape(
+        ErrorCodes.INVALID_REQUEST,
+        "Durable creation is restricted to the configured default agent.",
+      )
+    : undefined;
+}
+
+export function sessionCreationOperationErrorShape(error: unknown): ErrorShape | undefined {
+  const failure = readSessionCreationOperationError(error);
+  return failure
+    ? errorShape(ErrorCodes.INVALID_REQUEST, failure.message, {
+        details: { reason: failure.reason },
+      })
+    : undefined;
+}
+
+/** Transport presentation combines committed session facts with its initial-turn outcome. */
+export function projectSessionCreateResponse(
+  created: Extract<CreateGatewaySessionResult, { ok: true }>,
+  params: {
+    lifecycle?: PreparedGatewaySessionLifecycle;
+    runPayload?: Record<string, unknown>;
+    runError: unknown;
+    runMeta?: Record<string, unknown>;
+    publicRead: boolean;
+    creationOperationId?: string;
+    creationReplayed: boolean;
+  },
+) {
+  const worktree = params.lifecycle?.worktree
+    ? {
+        id: params.lifecycle.worktree.id,
+        path: params.lifecycle.sessionRoot,
+        branch: params.lifecycle.worktree.branch,
+      }
+    : undefined;
+  const runError =
+    created.postCommit.status === "failed"
+      ? errorShape(ErrorCodes.UNAVAILABLE, formatErrorMessage(created.postCommit.error))
+      : params.runError;
+  const entry = sessionEntryForkedFromParent(created.entry)
+    ? { ...created.entry, forkedFromParent: true as const }
+    : created.entry;
+  const runStarted =
+    !created.resetExisting &&
+    isFreshChatSendStarted({ payload: params.runPayload, cached: params.runMeta?.cached === true });
+  return {
+    ok: true,
+    key: created.key,
+    sessionId: created.entry.sessionId,
+    ...(params.creationOperationId
+      ? {
+          creationOperationId: params.creationOperationId,
+          creationReplayed: params.creationReplayed,
+        }
+      : {}),
+    entry,
+    runStarted,
+    publicRead: params.publicRead,
+    ...(!created.resetExisting && params.runPayload ? params.runPayload : {}),
+    ...(!created.resetExisting && runError ? { runError } : {}),
+    resolved: created.resolved,
+    ...(worktree ? { worktree } : {}),
   };
 }

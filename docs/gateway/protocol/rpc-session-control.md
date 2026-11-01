@@ -140,6 +140,30 @@ a terminal result no longer blocks a new request.
 
 - `sessions.create.surface` optionally accepts `"plugin-dock"` for an operator-created conversation owned by a plugin dock. It persists the immutable `createdSurface` marker; `createdVia`, the authenticated human creator, sharing, and sandbox policies retain their ordinary operator behavior. Omitting it keeps the existing creation behavior. Trusted spawn and other internal creation contracts cannot be replaced by this option. Adopting an existing session preserves its original creation surface and provenance.
 
+### Durable session creation
+
+Native SQLite sessions can bind creation to a caller-owned `creationOperationId`
+and physical `sessionId`. Use `v1:<issuedAtMs>:<32-lowercase-hex-nonce>` for the
+operation ID and a canonical UUIDv7 carrying the same issuance timestamp for
+`sessionId`. Operations expire after 30 days; issuance may be at most 60 seconds
+in the future. The caller must have a verified user profile and target the
+configured default agent.
+
+This form accepts only those two identifiers, optional `agentId`, `label`, and
+transport `idempotencyKey`, plus `purpose` and `repository` for worker creation.
+`purpose: "coding"` requires a repository; `purpose: "investigation"` uses an
+empty workspace. Both worker purposes require a configured
+`cloudWorkers.requiredProfile`. Creation does not start a turn; send the task
+separately after the returned session is ready.
+
+The receipt and session commit together. Retrying the same operation and arguments
+returns the original session with `creationReplayed: true`, without repeating
+workspace preparation or changing saved session settings. The result echoes
+`creationOperationId`. Changed arguments, another caller, expiration, or a deleted
+or replaced original session are rejected; a new explicit creation intent needs
+new identifiers. PostgreSQL-backed sessions do not support this native receipt
+contract.
+
 ### Existing folders on paired devices
 
 `sessions.create` accepts `deviceFolder: { deviceId, path }` with `operator.write`.

@@ -63,6 +63,7 @@ export function readWorkerPlacementEnvironmentOwnerInDatabase(
 
 type ProjectionSchema = {
   repositoryWorkspace: boolean;
+  diskAuthority: boolean;
   moves?: { machineClass: boolean; os: boolean; abandonSource: boolean };
 };
 
@@ -85,6 +86,7 @@ function readProjectionSchema(db: EngineConnection): ProjectionSchema {
       : undefined;
     projectionSchema = {
       repositoryWorkspace: pendingColumns.has("repository_workspace_id"),
+      diskAuthority: pendingColumns.has("disk_authority_json"),
       ...(moveColumns
         ? {
             moves: {
@@ -154,6 +156,11 @@ function readProjectionRows(
         "repository_workspace_id",
       ),
     )
+    .select((eb) =>
+      (schema.diskAuthority ? eb.ref("disk_authority_json") : eb.val(null)).as(
+        "disk_authority_json",
+      ),
+    )
     .where("session_id", "in", ids)
     .$assertType<StateDatabase["worker_workspace_pending_results"]>();
   const journals = query
@@ -168,6 +175,7 @@ function readProjectionRows(
       "provider_id",
       "profile_id",
       "profile_snapshot_json",
+      "session_retention_json",
       "preparation_consumed_at_ms",
       "preparation_demand_at_ms",
       "preparation_expires_at_ms",

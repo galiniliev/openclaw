@@ -37,3 +37,21 @@ export function withLegacyPublicationDraft(schema: string): string {
     "$1",
   );
 }
+
+/** Historical publication rows retain unknown requesters; first use still owns absent tables. */
+export function migrateGitHubPublicationRequesterAuthority(
+  db: DatabaseSync,
+  previousVersion: number,
+): boolean {
+  if (previousVersion >= 18) {
+    return false;
+  }
+  let changed = false;
+  for (const table of [
+    "github_publication_session_lifecycles",
+    "github_repository_publication_requests",
+  ]) {
+    changed = ensureColumn(db, table, "requester_authority_json TEXT") || changed;
+  }
+  return changed;
+}

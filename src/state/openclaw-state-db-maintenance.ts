@@ -68,6 +68,7 @@ import {
 import {
   needsPublicationDraftMigration,
   statePublicationDraftMigration,
+  migrateGitHubPublicationRequesterAuthority,
 } from "./openclaw-state-db-schema-v28-publication.js";
 import {
   stateLocalWorkspaceManifestMigration,
@@ -82,6 +83,10 @@ import {
   withLegacyTemplateStateSchema,
   withLegacyTemplateStateCompatibility,
 } from "./openclaw-state-db-schema-v36-template-names.js";
+import {
+  stateWorkerRetentionMigration,
+  withLegacyWorkerRetention,
+} from "./openclaw-state-db-schema-v37-worker-retention.js";
 import {
   assertSupportedStateSchemaVersion,
   readStateSchemaContentVersion,
@@ -428,24 +433,6 @@ function migratePreparedWorkerOwnership(db: DatabaseSync, previousVersion: numbe
   return changed;
 }
 
-/** Historical publication rows retain unknown requesters; first use still owns absent tables. */
-function migrateGitHubPublicationRequesterAuthority(
-  db: DatabaseSync,
-  previousVersion: number,
-): boolean {
-  if (previousVersion >= 18) {
-    return false;
-  }
-  let changed = false;
-  for (const table of [
-    "github_publication_session_lifecycles",
-    "github_repository_publication_requests",
-  ]) {
-    changed = ensureColumn(db, table, "requester_authority_json TEXT") || changed;
-  }
-  return changed;
-}
-
 const statePortableIdentityMigration = {
   version: 22,
   tables: ["acp_sessions", ...STATE_CURSOR_TABLES_V22],
@@ -546,6 +533,7 @@ export const versionedStateMigrations = [
   cronIdentity.stateCronIdentityMigration,
   stateLocalWorkspaceCasMigration,
   stateTemplateNamesMigration,
+  stateWorkerRetentionMigration,
 ] as const;
 
 /** Recent version migrations own only their tables; Doctor owns unrelated historical repair. */
@@ -570,6 +558,7 @@ export function migrateBoundedStateSchema(
     cronIdentity.stateCronIdentityMigration,
     stateLocalWorkspaceCasMigration,
     stateTemplateNamesMigration,
+    stateWorkerRetentionMigration,
   ];
   const pending = migrations.filter(({ version }) => version > previousVersion);
   // An undeclared destination keeps the legacy full runner and full-backup requirement.
@@ -583,10 +572,11 @@ export function migrateBoundedStateSchema(
   const indexes = getCanonicalSqliteNamedIndexContracts(OPENCLAW_STATE_SCHEMA_SQL).filter((index) =>
     tables.has(index.tableName),
   );
+  const retentionSourceSchema = withLegacyWorkerRetention(OPENCLAW_STATE_SCHEMA_SQL);
   const predecessorSchema =
     previousVersion < 36
-      ? withLegacyTemplateStateSchema(OPENCLAW_STATE_SCHEMA_SQL)
-      : OPENCLAW_STATE_SCHEMA_SQL;
+      ? withLegacyTemplateStateSchema(retentionSourceSchema)
+      : retentionSourceSchema;
   const casSourceSchema =
     previousVersion < 35 ? withLegacyLocalWorkspaceCas(predecessorSchema) : predecessorSchema;
   const manifestSourceSchema =

@@ -10,6 +10,7 @@ import type {
   SessionEntryReplacement,
   TranscriptEvent,
 } from "./session-accessor.types.js";
+import type { SessionCreationOperation } from "./session-creation-operation.js";
 import type { SessionOwnerAssignment } from "./session-entry-provenance.js";
 import type { SessionEntrySnapshotField } from "./session-entry-snapshot-values.js";
 import type { SessionNativeBindingParticipants } from "./session-native-binding.types.js";
@@ -26,6 +27,7 @@ export type SessionEntryReplacementCommit = {
     guardFields: readonly (keyof SessionEntry)[];
     snapshotFields?: readonly SessionEntrySnapshotField[];
   };
+  creationOperation?: SessionCreationOperation;
   sources?: SessionSourcePredicate[];
   nativeBindings?: SessionNativeBindingParticipants;
   expectedRows: Map<string, ResolvedSessionEntryRow>;

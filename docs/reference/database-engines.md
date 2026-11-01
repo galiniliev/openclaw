@@ -888,6 +888,11 @@ separate signed-Mac/Parallels proof. See the
 [qualification cells and run IDs](/gateway/postgresql#published-stable-upgrade-qualification).
 See [Update admission](/cli/update#candidate-owned-admission).
 
+Database porting runs migration and SQL against a private local working
+copy, while its verified durable image and journal remain the recovery authority.
+Legal first-use SQLite tables are completed only in that copy before PostgreSQL
+materialization. Historical recovery envelopes remain in the verified original.
+
 ## Limits and recovery
 
 Startup checks the fixed `recovery/database-port/manifest.json` under the selected

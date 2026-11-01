@@ -2001,6 +2001,7 @@ CREATE TABLE IF NOT EXISTS worker_environments (
   idle_since_at_ms INTEGER,
   destroy_requested_at_ms INTEGER,
   last_error TEXT,
+  session_retention_json TEXT,
   shared_host INTEGER
 ) STRICT;
 
@@ -2081,6 +2082,8 @@ CREATE TABLE IF NOT EXISTS session_repository_workspaces (
   branch TEXT NOT NULL CHECK (length(branch) BETWEEN 1 AND 256),
   checkpoint_ref TEXT,
   manifest_hash TEXT,
+  recovery_json TEXT,
+  disk_authority_json TEXT,
   revision INTEGER NOT NULL CHECK (revision >= 0),
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL,
@@ -2172,6 +2175,7 @@ CREATE TABLE IF NOT EXISTS worker_session_placements (
   transition_generation INTEGER NOT NULL DEFAULT 0 CHECK (transition_generation >= 0),
   active_owner_epoch INTEGER CHECK (active_owner_epoch IS NULL OR active_owner_epoch >= 1),
   workspace_base_manifest_ref TEXT,
+  confirmed_loss_recovery_json TEXT,
   remote_workspace_dir TEXT,
   worker_bundle_hash TEXT,
   last_transcript_ack_cursor INTEGER CHECK (
@@ -2430,6 +2434,7 @@ CREATE TABLE IF NOT EXISTS worker_workspace_pending_results (
   workspace_accepted_at_ms INTEGER,
   staged_result_ref TEXT,
   repository_workspace_id TEXT,
+  disk_authority_json TEXT,
   created_at_ms INTEGER NOT NULL,
   FOREIGN KEY (session_id) REFERENCES worker_session_placements(session_id) ON DELETE CASCADE
 ) STRICT;

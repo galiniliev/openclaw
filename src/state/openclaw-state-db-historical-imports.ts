@@ -10,6 +10,7 @@ import {
   migratePredicateColumnsV21,
   statePredicateColumnMigration,
 } from "./openclaw-state-db-schema-v21-columns.js";
+import { withLegacyWorkerRetention } from "./openclaw-state-db-schema-v37-worker-retention.js";
 import { OPENCLAW_STATE_SCHEMA_SQL } from "./openclaw-state-schema.js";
 
 const table = "worker_session_placements";
@@ -31,15 +32,17 @@ function migrateHistoricalRepositoryPreparation(db: DatabaseSync): boolean {
     "  " + archivalColumn + ",\n  remote_workspace_dir TEXT,",
   );
   const actual = createSqliteTableContractReader(db)(table);
+  const predecessor = withLegacyWorkerRetention(canonical);
   const target = parseSqliteTableDefinition(canonical, table);
   if (
     actual?.strict === 1 &&
     actual.withoutRowid === 0 &&
-    isDeepStrictEqual(actual.definition, target)
+    (isDeepStrictEqual(actual.definition, target) ||
+      isDeepStrictEqual(actual.definition, parseSqliteTableDefinition(predecessor, table)))
   ) {
     return false;
   }
-  const historical = canonical
+  const historical = predecessor
     .replace(
       archivalColumn + ",",
       archivalColumn + " CHECK (repository_preparation IN ('pending', 'ready', 'failed')),",

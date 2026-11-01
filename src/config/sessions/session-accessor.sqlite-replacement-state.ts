@@ -39,6 +39,7 @@ import type {
 import { appendTranscriptEventsInTransaction } from "./session-accessor.sqlite-transcript-store.js";
 import { readSessionTranscriptWatermarkInDatabase } from "./session-accessor.sqlite-transcript-watermark.js";
 import { readSessionActorTransactionState } from "./session-actor-transaction.js";
+import { commitSessionCreationReceipt } from "./session-creation-receipts.js";
 import {
   captureSessionEntryPublicationSource,
   discardSessionEntryPublicationSource,
@@ -274,6 +275,30 @@ export function commitSessionEntryReplacementsInDatabase(
       if (window !== undefined) {
         windows.set(transactionRow.entry.sessionId, window);
       }
+    }
+  }
+  if (input.creationOperation) {
+    const replacement = input.replacements[0];
+    if (
+      input.replacements.length !== 1 ||
+      !replacement ||
+      replacement.entry.sessionId !== input.creationOperation.sessionId
+    ) {
+      throw new Error("Creation receipt requires its exact single physical target");
+    }
+    if (commitSessionCreationReceipt(database, replacement.sessionKey, input.creationOperation)) {
+      beforeReplacements();
+      const entry = transactionRows.get(replacement.sessionKey)?.entry;
+      if (!entry) {
+        throw new Error("Creation replay lost its original session");
+      }
+      return {
+        pendingArchiveRecovery: false,
+        previous: new Map([[replacement.sessionKey, entry]]),
+        current: new Map([[replacement.sessionKey, entry]]),
+        maintenancePlans: [],
+        membershipInvalidatedKeys: [],
+      };
     }
   }
   beforeReplacements();
