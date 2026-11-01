@@ -36,6 +36,8 @@ export async function runCronSessionTurn(
     cfg: OpenClawConfig;
     agentId: string;
     sessionKey: string;
+    /** Gateway-selected partition; session storage is a separate owner. */
+    cronStorePath?: string;
   },
 ): ReturnType<SessionRun> {
   const { job } = params;
@@ -167,7 +169,7 @@ export async function runCronSessionTurn(
       params.sessionPreparation?.scratch ??
       (
         await readCronScratchSnapshot(
-          await resolveCronJobsStorePathFromConfigAsync(params.cfg),
+          params.cronStorePath ?? (await resolveCronJobsStorePathFromConfigAsync(params.cfg)),
           { kind: "job", jobId: job.id, createdAtMsFallback: job.createdAtMs },
           {},
           { assertCurrent, signal: params.abortSignal },

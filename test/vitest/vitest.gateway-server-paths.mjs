@@ -16,6 +16,7 @@ export const gatewayDatabaseWorkerTestFiles = [
   "src/gateway/worker-environments/retained-workspace-resume.test.ts",
   "src/gateway/worker-environments/retained-workspace-cleanup.test.ts",
   "src/gateway/worker-environments/retained-workspace-runtime.test.ts",
+  "src/gateway/worker-environments/worker-turn-pg-boundary.test.ts",
   "src/gateway/worker-environments/placement-disk-pause.test.ts",
   "src/gateway/worker-environments/placement-dispatch-retained.test.ts",
   "src/gateway/worker-environments/placement-dispatch-retained-recovery.test.ts",
