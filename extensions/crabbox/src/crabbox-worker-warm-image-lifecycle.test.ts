@@ -274,7 +274,7 @@ it("recovers an abandoned empty reservation explicitly", async () => {
   await initial.capture();
   const image = initial.entry();
   initial.store.register(image.key, {
-    version: 3,
+    version: 4,
     allocations: {},
     operation: captureOperation("migrated-capture", {
       phase: "uncertain",

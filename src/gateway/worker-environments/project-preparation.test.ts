@@ -276,25 +276,6 @@ printf 'setup\\n' >> "$HOME/count"
     expect(manifest.entries.some((entry) => entry.path.startsWith("build/"))).toBe(false);
     const second = await f.preparedOperation();
     f.runScript.mockClear();
-    const slowVerification = vi.fn<Parameters<typeof runProjectScriptWithGitProbe>[2]>(
-      (args, options) => {
-        if (args[2] === "fsck" && (options.timeout ?? Infinity) < 45_000) {
-          return {
-            pid: 0,
-            output: [],
-            stdout: "",
-            stderr: "",
-            status: null,
-            signal: "SIGTERM" as const,
-            error: Object.assign(new Error("spawnSync git ETIMEDOUT"), { code: "ETIMEDOUT" }),
-          };
-        }
-        return undefined;
-      },
-    );
-    f.runScript.mockImplementationOnce((script) =>
-      runProjectScriptWithGitProbe(script, f.home, slowVerification),
-    );
     expect(result.captureRequired).toBe(true);
     const reused = await second.project.prepare(f);
     expect(reused).toEqual({
@@ -305,7 +286,6 @@ printf 'setup\\n' >> "$HOME/count"
     expect(reused.captureRequired).toBeUndefined();
     second.close();
     expect(f.runScript).toHaveBeenCalledTimes(1);
-    expect(slowVerification.mock.calls.some(([args]) => args[2] === "fsck")).toBe(true);
     expect(await readText(prepared.homeDir, "count")).toBe("setup\n");
     expect(f.upload).toHaveBeenCalledTimes(1);
     await fs.writeFile(path.join(prepared.workspaceDir, "linked-input"), "session edit\n");
@@ -344,7 +324,9 @@ printf 'setup\\n' >> "$HOME/count"
             : undefined,
         ),
       );
-      await expect(operation.project.prepare(f)).rejects.toThrow(
+      await expect(
+        operation.project.inspectPreparedWorkspace!({ snapshot: true, runScript: f.runScript }),
+      ).rejects.toThrow(
         new Error(`Prepared project Git verification failed (git fsck: ${detail})`),
       );
       expect(operation.getPreparedWorkspace()).toBeUndefined();
@@ -353,7 +335,7 @@ printf 'setup\\n' >> "$HOME/count"
     expect(f.upload).toHaveBeenCalledTimes(1);
   });
 
-  it("inspects enrolled completion without repeating setup, transfer, or blessing later edits", async () => {
+  it("reuses installed setup without rescanning or overwriting later edits", async () => {
     const f = await fixture('#!/bin/sh\nprintf "setup\\n" >> "$HOME/count"\n');
     const completed = (await prepare(f)).preparedWorkspace!;
     const replay = await f.preparedOperation();
@@ -366,13 +348,37 @@ printf 'setup\\n' >> "$HOME/count"
     replay.close();
     await fs.writeFile(path.join(completed.workspaceDir, "input.txt"), "later session edit\n");
     const changed = await f.preparedOperation();
+    const commands: string[] = [];
+    f.runScript.mockImplementation((script) =>
+      runProjectScriptWithGitProbe(script, f.home, (args) => {
+        commands.push(args[2]!);
+        return undefined;
+      }),
+    );
+    await changed.project.inspectPreparedWorkspace!({ runScript: f.runScript });
+    expect(changed.getPreparedWorkspace()).toEqual(completed);
+    expect((await changed.project.prepare(f)).cacheHit).toBe(true);
+    expect(commands).toEqual(["rev-parse", "rev-parse"]);
+    // An installed-setup receipt does not attest unchanged content for publication.
     await expect(
-      changed.project.inspectPreparedWorkspace!({ runScript: f.runScript }),
+      changed.project.inspectPreparedWorkspace!({ snapshot: true, runScript: f.runScript }),
     ).rejects.toThrow("completed workspace changed");
-    expect(changed.getPreparedWorkspace()).toBeUndefined();
     expect(await readText(completed.workspaceDir, "input.txt")).toBe("later session edit\n");
     expect(await readText(completed.homeDir, "count")).toBe("setup\n");
     changed.close();
+    await fs.writeFile(path.join(f.repository, "input.txt"), "next revision\n");
+    await requireGit(f.repository, ["commit", "--quiet", "-am", "next revision"]);
+    const refresh = await f.preparedOperation(undefined, {
+      project: await snapshot(f.repository),
+      key: "b".repeat(64),
+    });
+    try {
+      await expect(refresh.project.prepare(f)).rejects.toThrow("completed workspace changed");
+      expect(await readText(completed.workspaceDir, "input.txt")).toBe("later session edit\n");
+      expect(await readText(completed.homeDir, "count")).toBe("setup\n");
+    } finally {
+      refresh.close();
+    }
   });
 
   it("verifies a skipped executable recipe without running it or sharing its build cache", async () => {
@@ -394,9 +400,9 @@ printf 'setup\\n' >> "$HOME/count"
         createProjectSetupScript({ ...input, runSetupScript: false, setupRecipe: "f".repeat(40) }),
       ),
     ).rejects.toThrow("Prepared project setup recipe differs from its admission");
-    const skipped = JSON.parse(
-      await f.runScript(createProjectSetupScript({ ...input, runSetupScript: false })),
-    ) as { homeDir: string; workspaceDir: string; sourceManifestRef: string };
+    const skipOperation = await f.preparedOperation(undefined, { runSetupScript: false });
+    const skipped = (await skipOperation.project.prepare(f)).preparedWorkspace!;
+    skipOperation.close();
     expect(skipped.sourceManifestRef).toMatch(/^sha256:[a-f0-9]{64}$/u);
     expect(
       await fs.stat(path.join(skipped.homeDir, "setup-ran")).catch(() => undefined),
@@ -671,21 +677,24 @@ printf '%s' "$!" > "$HOME/setup-child"
     }
   });
 
-  it.each(["completion", "workspace", "seed"])(
-    "rejects a completed preparation with changed %s without rerunning setup",
+  it.each(["missing", "changed"])(
+    "rejects a %s completion receipt without rerunning setup",
     async (changed) => {
       const f = await fixture('#!/bin/sh\nprintf "setup\\n" >> "$HOME/count"\n');
       const prepared = (await prepare(f)).preparedWorkspace!;
-      const target =
-        changed === "completion"
-          ? path.join(
-              prepared.homeDir,
-              ".openclaw-worker",
-              "manifests",
-              `${prepared.sourceManifestRef.slice(7)}.json`,
-            )
-          : path.join(changed === "workspace" ? prepared.workspaceDir : f.seed, "input.txt");
-      await fs.writeFile(target, "changed\n");
+      const receipt = path.join(
+        prepared.homeDir,
+        ".openclaw-worker",
+        "manifests",
+        "prepared",
+        prepared.sourceManifestRef.slice(7),
+        `${prepared.preparedManifestRef.slice(7)}.json`,
+      );
+      if (changed === "missing") {
+        await fs.unlink(receipt);
+      } else {
+        await fs.writeFile(receipt, "changed\n");
+      }
       const second = await f.preparedOperation();
       await expect(second.project.prepare(f)).rejects.toThrow();
       expect(second.getPreparedWorkspace()).toBeUndefined();
@@ -695,24 +704,29 @@ printf '%s' "$!" > "$HOME/setup-child"
   );
 
   it.each([
-    ...[0, Number.NaN, Infinity, 2_147_483_648].map((timeoutMs) => ({
+    // Verification consumes budget before command admission; keep this invalid
+    // value well above the timer ceiling instead of racing one millisecond of work.
+    ...[0, Number.NaN, Infinity, Number.MAX_SAFE_INTEGER].map((timeoutMs) => ({
       timeoutMs,
+      label: "invalid budget",
       action: "true",
       error: "command budget exhausted",
       started: false,
     })),
     {
       timeoutMs: 1_000,
+      label: "timeout",
       action:
         "node -e 'setTimeout(() => {}, 2000)' &\nprintf '%s' \"$!\" > \"$HOME/setup-child\"\nwait",
-      error: /timed out|command budget exhausted/u,
+      error: /Prepared project setup failed: timeout:|command budget exhausted/u,
       // The command includes verification: exhausted-before-spawn is valid under load.
       started: undefined,
     },
     ...["SIGTERM", "SIGINT"].map((signal) => ({
       timeoutMs: 30_000,
+      label: signal,
       action: `kill -${signal.slice(3)} "$PPID"\nsleep 2`,
-      error: `interrupted by ${signal}`,
+      error: /Prepared project setup failed: interrupted:/u,
       started: true,
     })),
     ...[
@@ -720,7 +734,7 @@ printf '%s' "$!" > "$HOME/setup-child"
       { action: "printf '#' >> .openclaw/worktree-setup.sh", error: "recipe changed during setup" },
     ].map(({ action, error }) => ({ action, error, timeoutMs: 30_000, started: true })),
   ])(
-    "retains incomplete setup with budget $timeoutMs after $error",
+    "retains incomplete setup with budget $timeoutMs after $label",
     async ({ timeoutMs, action, error, started }) => {
       const f = await fixture(`#!/bin/sh
 printf '%s' "$$" > "$HOME/setup-pid"

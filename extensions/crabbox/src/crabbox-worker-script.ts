@@ -2,6 +2,28 @@ import type { CrabboxOperatingSystem } from "./crabbox-worker-profile.js";
 
 export const CRABBOX_RUNTIME_NODE_PATH = 'export PATH="$HOME/.openclaw-worker/runtime-node:$PATH"';
 
+export const CLOUD_SETUP_CODE_ENV = "CRABBOX_WORKER_SETUP_CODE";
+export const CLOUD_BOOTSTRAP_TOKEN_ENV = "CRABBOX_WORKER_BOOTSTRAP_TOKEN";
+export const CLOUD_WORKER_CODEX_ENV = "CRABBOX_WORKER_CODEX_CONFIG";
+
+// A snapshot fork skips profile setup, but its provider may inject fresh platform CAs.
+// Refresh OS trust per idempotent Linux enrollment attempt, with no bootstrap credentials.
+export const CRABBOX_LINUX_PLATFORM_TRUST_SETUP = `set -eu
+if [ -x /usr/sbin/update-ca-certificates ]; then
+  (
+    unset ${CLOUD_SETUP_CODE_ENV} ${CLOUD_BOOTSTRAP_TOKEN_ENV} ${CLOUD_WORKER_CODEX_ENV}
+    if [ "$(id -u)" = 0 ]; then
+      /usr/sbin/update-ca-certificates
+    else
+      sudo -n -- /usr/sbin/update-ca-certificates
+    fi
+  ) || {
+    echo 'Cloud worker platform trust registration failed; repair system certificate setup before enrollment' >&2
+    exit 1
+  }
+fi
+`;
+
 /** Guest expression evaluated with fs, path, and the canonical home directory. */
 export function createCrabboxWorkerStateDirScript(leaseId: string): string {
   return `(() => {

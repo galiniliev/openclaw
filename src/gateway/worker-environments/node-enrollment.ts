@@ -34,6 +34,7 @@ import {
   DEFAULT_NODE_TOOLCHAIN_SETUP_SH,
   BUNDLE_NODE_TOOLCHAIN_SETUP_SH,
 } from "./node-toolchain.js";
+import { measureWorkerProvisionPhase } from "./provision-timing.js";
 import type { WorkerEnvironmentRecord, WorkerEnvironmentStore } from "./store.js";
 import type { WorkerBootstrapArtifactTransferService } from "./worker-bootstrap-artifact-transfer-service.js";
 
@@ -229,7 +230,7 @@ export function createWorkerNodeEnrollmentManager(options: WorkerNodeEnrollmentM
 
   const prepareRuntime = async (
     record: WorkerEnvironmentRecord,
-    bundle: TransferArtifact,
+    bundle: TransferArtifact & { bundleHash?: string; protocolFeatures?: readonly string[] },
     operationSignal?: AbortSignal,
   ): Promise<WorkerNodeRuntimePreparation> => {
     await options.store.ready();
@@ -250,6 +251,8 @@ export function createWorkerNodeEnrollmentManager(options: WorkerNodeEnrollmentM
         workerBundle: {
           ...grantArtifact(prepared, bundle, enrollmentSignal, isAuthorized, transferBytes),
           packageRelativePath: workerBundleArchiveRelativePath(bundle.tarballSha256),
+          ...(bundle.bundleHash ? { bundleHash: bundle.bundleHash } : {}),
+          ...(bundle.protocolFeatures ? { protocolFeatures: bundle.protocolFeatures } : {}),
         },
       };
       enrollmentClosers.set(runtime, binding.close);
@@ -358,30 +361,32 @@ export function createWorkerNodeEnrollmentManager(options: WorkerNodeEnrollmentM
         ),
         openclawVersion: prepared.artifact.openclawVersion,
         displayName: truncateUtf16Safe(`Cloud worker ${owner.profileId}`, 64),
+        ...(workerCodex ? { workerCodex } : {}),
         signal: enrollmentSignal,
-        waitForDeviceId: async () => {
-          const deadline = Date.now() + NODE_ENROLLMENT_TIMEOUT_MS;
-          while (Date.now() < deadline) {
-            enrollmentSignal.throwIfAborted();
-            const live = options.store.get(owner.environmentId);
-            if (
-              !isProvisioningOwner(live, owner) ||
-              live.nodeSetupId !== owner.nodeSetupId ||
-              active.get(owner.environmentId) !== binding
-            ) {
-              throw new Error("Worker node enrollment is no longer current");
-            }
-            if (live.nodeDeviceId) {
-              const availability = await options.resolveAvailability(live.nodeDeviceId);
+        waitForDeviceId: () =>
+          measureWorkerProvisionPhase(owner, "node.connection", async () => {
+            const deadline = Date.now() + NODE_ENROLLMENT_TIMEOUT_MS;
+            while (Date.now() < deadline) {
               enrollmentSignal.throwIfAborted();
-              if (availability.available) {
-                return live.nodeDeviceId;
+              const live = options.store.get(owner.environmentId);
+              if (
+                !isProvisioningOwner(live, owner) ||
+                live.nodeSetupId !== owner.nodeSetupId ||
+                active.get(owner.environmentId) !== binding
+              ) {
+                throw new Error("Worker node enrollment is no longer current");
               }
+              if (live.nodeDeviceId) {
+                const availability = await options.resolveAvailability(live.nodeDeviceId);
+                enrollmentSignal.throwIfAborted();
+                if (availability.available) {
+                  return live.nodeDeviceId;
+                }
+              }
+              await sleep(NODE_ENROLLMENT_POLL_MS, undefined, { signal: enrollmentSignal });
             }
-            await sleep(NODE_ENROLLMENT_POLL_MS, undefined, { signal: enrollmentSignal });
-          }
-          throw new Error("Worker node did not connect before the enrollment deadline");
-        },
+            throw new Error("Worker node did not connect before the enrollment deadline");
+          }),
       };
       enrollmentClosers.set(enrollment, binding.close);
       return enrollment;

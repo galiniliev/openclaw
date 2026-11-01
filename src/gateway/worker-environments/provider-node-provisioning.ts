@@ -18,6 +18,8 @@ import type { createWorkerProjectPreparation } from "./project-preparation.js";
 import type { WorkerProviderLifecycleOptions } from "./provider-lifecycle.types.js";
 import type { createWorkerProviderOwnerLifecycle } from "./provider-owner-lifecycle.js";
 import type { createWorkerProvisionCancellation } from "./provider-provisioning-cancellation.js";
+import { measureWorkerProvisionPhase } from "./provision-timing.js";
+import type { createWorkerRetainedLeaseLifecycle } from "./retained-lease-lifecycle.js";
 import type { WorkerEnvironmentRecord } from "./store.js";
 import { boundedWorkerError as boundedError } from "./worker-error.js";
 
@@ -39,7 +41,8 @@ type WorkerNodeProvisioningOptions = Pick<
   | "move"
   | "saveError"
 > &
-  Pick<ReturnType<typeof createWorkerProviderOwnerLifecycle>, "failBootstrap"> & {
+  Pick<ReturnType<typeof createWorkerProviderOwnerLifecycle>, "failBootstrap"> &
+  Pick<ReturnType<typeof createWorkerRetainedLeaseLifecycle>, "acceptInitial"> & {
     ownerSignal: AbortSignal;
     commitReady: WorkerCredentialBroker["commitReady"];
   };
@@ -92,7 +95,9 @@ export function createWorkerNodeProvisioning(options: WorkerNodeProvisioningOpti
       }
       const nodeBootstrapSha256 = bootstrapResult.value;
       installation = installationResult.value;
-      const preparation = readWorkerPreparation(record.profileSnapshot);
+      const preparation = record.retention?.receipt
+        ? undefined
+        : readWorkerPreparation(record.profileSnapshot);
       if (
         preparation &&
         (preparation.artifacts.nodeBootstrapSha256 !== nodeBootstrapSha256 ||
@@ -167,6 +172,7 @@ export function createWorkerNodeProvisioning(options: WorkerNodeProvisioningOpti
     const prepareInstallation = () =>
       (pendingInstallation ??= prepareBundle(preparedInstallation, signal));
     let enrollment: WorkerNodeEnrollment | undefined;
+    let connectedOwner: { nodeDeviceId: string; nodeSetupId: string | null } | undefined;
     let pending: Promise<WorkerNodeEnrollment> | undefined;
     const close = () => {
       if (!open) {
@@ -217,6 +223,25 @@ export function createWorkerNodeProvisioning(options: WorkerNodeProvisioningOpti
       }
     };
     return {
+      current(
+        owner: WorkerEnvironmentRecord,
+        requireCurrentOwner: (owner: WorkerEnvironmentRecord) => WorkerEnvironmentRecord,
+      ) {
+        // Pairing binds the node before the provider returns its lease. Only this
+        // setup's completed device may replace the original unbound identity.
+        const current = requireCurrentOwner(
+          owner.nodeDeviceId === null && connectedOwner
+            ? { ...owner, nodeDeviceId: connectedOwner.nodeDeviceId }
+            : owner,
+        );
+        if (
+          current.provisionOperationId !== owner.provisionOperationId ||
+          (connectedOwner && current.nodeSetupId !== connectedOwner.nodeSetupId)
+        ) {
+          throw new Error("Worker provisioning operation is closed");
+        }
+        return current;
+      },
       get installation() {
         return pendingInstallation ?? preparedInstallation;
       },
@@ -259,7 +284,17 @@ export function createWorkerNodeProvisioning(options: WorkerNodeProvisioningOpti
             throw error;
           }
           enrollment = prepared;
-          return prepared;
+          const nodeSetupId = options.store.get(record.environmentId)?.nodeSetupId ?? null;
+          return {
+            ...prepared,
+            waitForDeviceId: async () => {
+              const nodeDeviceId = await prepared.waitForDeviceId();
+              assertCurrent();
+              // Carry only the device proven by this setup's completed enrollment.
+              connectedOwner = { nodeDeviceId, nodeSetupId };
+              return nodeDeviceId;
+            },
+          };
         });
         const prepared = await pending;
         assertCurrent();
@@ -270,7 +305,7 @@ export function createWorkerNodeProvisioning(options: WorkerNodeProvisioningOpti
   };
 
   const finish = async (
-    record: WorkerEnvironmentRecord,
+    initialRecord: WorkerEnvironmentRecord,
     lease: NodeLease,
     provider: WorkerProvider,
     workSignal: AbortSignal,
@@ -282,12 +317,15 @@ export function createWorkerNodeProvisioning(options: WorkerNodeProvisioningOpti
     >,
     beforeProvision?: () => void,
   ): Promise<WorkerEnvironmentRecord> => {
+    let record = initialRecord;
     const nodePatch = {
       ...patch,
       nodeDeviceId: lease.node.deviceId,
       sshEndpoint: null,
     };
-    const preparation = readWorkerPreparation(record.profileSnapshot);
+    const preparation = record.retention?.receipt
+      ? undefined
+      : readWorkerPreparation(record.profileSnapshot);
     const projectPreparation = readWorkerProjectPreparation(record.profileSnapshot.project);
     const enrollmentOwner = options.store.get(record.environmentId);
     const assertCurrent = () => {
@@ -300,6 +338,9 @@ export function createWorkerNodeProvisioning(options: WorkerNodeProvisioningOpti
         current.state !== record.state ||
         current.provisionOperationId !== record.provisionOperationId ||
         current.ownerEpoch !== record.ownerEpoch ||
+        current.leaseId !== record.leaseId ||
+        current.retention?.ownerBinding !== record.retention?.ownerBinding ||
+        (current.nodeDeviceId !== null && current.nodeDeviceId !== lease.node.deviceId) ||
         (preparation !== undefined &&
           (!enrollmentOwner?.nodeSetupId ||
             current.nodeSetupId !== enrollmentOwner.nodeSetupId ||
@@ -308,11 +349,16 @@ export function createWorkerNodeProvisioning(options: WorkerNodeProvisioningOpti
       ) {
         throw new Error("Prepared worker provisioning owner is no longer current");
       }
+      return current;
     };
     let nodeBuild: WorkerAdmissionHandshake;
     try {
-      assertCurrent();
-      if (!options.ensureNodeWorkerBundle) {
+      // Pairing can publish this operation's node while the provider is awaited.
+      // Adopt that checked owner before the receipt writer compares node identity.
+      record = assertCurrent();
+      record = await options.acceptInitial(record, lease, assertCurrent);
+      const ensureNodeWorkerBundle = options.ensureNodeWorkerBundle;
+      if (!ensureNodeWorkerBundle) {
         throw new Error("Device worker bundle installer is unavailable");
       }
       const artifact = await prepareBundle(await preparedInstallation, workSignal);
@@ -325,15 +371,17 @@ export function createWorkerNodeProvisioning(options: WorkerNodeProvisioningOpti
         record.profileSnapshot.executionMode !== "remote-exec" &&
         !(await options.store.hasSessionAttachment(record.environmentId));
       assertCurrent();
-      nodeBuild = await options.ensureNodeWorkerBundle({
-        reason: "provision",
-        environmentId: record.environmentId,
-        deviceId: lease.node.deviceId,
-        artifact,
-        prewarm,
-        signal: workSignal,
-        assertCurrent,
-      });
+      nodeBuild = await measureWorkerProvisionPhase(record, "runtime.installation", () =>
+        ensureNodeWorkerBundle({
+          reason: "provision",
+          environmentId: record.environmentId,
+          deviceId: lease.node.deviceId,
+          artifact,
+          prewarm,
+          signal: workSignal,
+          assertCurrent,
+        }),
+      );
       assertCurrent();
       if (preparation && lease.sharedHost !== false) {
         throw new Error("Prepared worker requires a dedicated environment");
@@ -364,11 +412,13 @@ export function createWorkerNodeProvisioning(options: WorkerNodeProvisioningOpti
       }
       return await options.failBootstrap(record, lease.leaseId, provider, error, nodePatch);
     }
-    return options.commitReady(
-      record,
-      { ...nodeBuild, installKind: "bundle" },
-      nodePatch,
-      assertCurrent,
+    return measureWorkerProvisionPhase(record, "readiness.commit", () =>
+      options.commitReady(
+        record,
+        { ...nodeBuild, installKind: "bundle" },
+        nodePatch,
+        assertCurrent,
+      ),
     );
   };
 

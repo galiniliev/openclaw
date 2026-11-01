@@ -5,7 +5,7 @@ const MAX_DETAILS = 512;
 const TRUNCATED = "...[truncated]";
 
 describe("agent cleanup timeout", () => {
-  const log = { warn: vi.fn() };
+  const log = { warn: vi.fn(), info: vi.fn() };
   const runCleanup = (options: Partial<Parameters<typeof runAgentCleanupStep>[0]> = {}) =>
     runAgentCleanupStep({
       runId: "run-trajectory",
@@ -30,9 +30,50 @@ describe("agent cleanup timeout", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     log.warn.mockClear();
+    log.info.mockClear();
   });
 
   afterEach(() => vi.useRealTimers());
+
+  it.each(["done", "failed", "timeout"] as const)(
+    "reports awaited cleanup timing without changing %s settlement",
+    async (outcome) => {
+      vi.setSystemTime(1_000);
+      const scope = createAgentCleanupScope();
+      const operation = scope.run(() =>
+        runAgentCleanupStep({
+          runId: "run-timing",
+          sessionId: "session-timing",
+          step: "codex-route-release",
+          log,
+          timeoutMs: 50,
+          cleanup: () =>
+            new Promise<void>((resolve, reject) => {
+              if (outcome !== "timeout") {
+                setTimeout(
+                  () => (outcome === "failed" ? reject(new Error("synthetic failure")) : resolve()),
+                  40,
+                );
+              }
+            }),
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(39);
+      expect(log.info).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(outcome === "timeout" ? 11 : 1);
+      await expect(operation).resolves.toBeUndefined();
+      expect(log.info).toHaveBeenCalledExactlyOnceWith("Agent cleanup phase", {
+        runId: "run-timing",
+        sessionId: "session-timing",
+        phase: "codex-route-release",
+        startedAt: 1_000,
+        endedAt: outcome === "timeout" ? 1_050 : 1_040,
+        durationMs: outcome === "timeout" ? 50 : 40,
+        outcome,
+      });
+      expect(scope.outcome).toBe(outcome === "done" ? "closed" : "uncertain");
+    },
+  );
 
   it("bounds stalled cleanup with the trajectory environment override", async () => {
     const result = runCleanup({

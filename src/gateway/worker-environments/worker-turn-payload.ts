@@ -126,16 +126,13 @@ export function captureWorkerTurnInputAuthority(params: {
     },
   );
   const transcriptSource = captureWorkerTurnTranscriptSource(params.transcriptTarget);
+  const assertSourceCurrent = composeSessionSourceAssertion([assertInputCurrent, transcriptSource]);
   return {
     assertTurnInputCurrent: assertInputCurrent,
-    assertSourceCurrent: composeSessionSourceAssertion([assertInputCurrent, transcriptSource]),
-    assertContextCurrent: () => {
-      assertInputCurrent();
-      resolveWorkerTurnTranscriptTarget({
-        ...params.transcriptTarget,
-        sessionTarget: params.transcriptTarget,
-      });
-    },
+    assertSourceCurrent,
+    // Retained tool callbacks run in the incoming RPC scope, outside launch ALS.
+    // The captured source keeps the exact transcript identity and prepared lifetime.
+    assertContextCurrent: assertSourceCurrent,
   };
 }
 

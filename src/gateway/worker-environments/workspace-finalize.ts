@@ -2,6 +2,7 @@ import type {
   WorkerWorkspaceQuiescence,
   WorkerWorkspaceReconcileResult,
 } from "./tunnel-contract.js";
+import { measureReconcileStep } from "./workspace-reconcile-timing.js";
 import type { WorkerWorkspaceApplyResult } from "./workspace-reconcile.js";
 
 export class WorkerWorkspaceFinalFenceError extends Error {
@@ -30,24 +31,37 @@ export async function verifyReconciledWorkspaceFinal(
   };
   try {
     // A late writer can mutate before renewal enrolls and SIGSTOPs it.
-    await fence(() => quiescence.assertActive());
-    await fence(() => reconciliation.verifyStable());
+    await fence(() => measureReconcileStep("quiescence-renew", () => quiescence.assertActive()));
+    await fence(() =>
+      measureReconcileStep("remote-stability-check", () => reconciliation.verifyStable()),
+    );
     if (acceptUnchanged) {
-      await fence(acceptUnchanged);
+      await fence(() => measureReconcileStep("unchanged-result-accept", acceptUnchanged));
     } else {
-      await reconciliation.applyPreparedStagedResult?.();
-      await reconciliation.verifyLocalStable();
+      if (reconciliation.applyPreparedStagedResult) {
+        await measureReconcileStep(
+          "staged-result-apply",
+          async () => await reconciliation.applyPreparedStagedResult?.(),
+        );
+      }
+      await measureReconcileStep("local-stability-check", () => reconciliation.verifyLocalStable());
       // Applied results must survive a lost lease or final verification failure.
       disposition = "preserve-result";
-      await fence(() => quiescence.assertActive());
-      await fence(() => reconciliation.verifyStable());
-      await fence(() => reconciliation.verifyLocalStable());
+      await fence(() => measureReconcileStep("quiescence-renew", () => quiescence.assertActive()));
+      await fence(() =>
+        measureReconcileStep("remote-stability-check", () => reconciliation.verifyStable()),
+      );
+      await fence(() =>
+        measureReconcileStep("local-stability-check", () => reconciliation.verifyLocalStable()),
+      );
     }
-    await reconciliation.publishStagedResult();
+    await measureReconcileStep("staged-result-publish", () => reconciliation.publishStagedResult());
     const applied = reconciliation.getAppliedWorkspaceResult?.();
     return applied;
   } catch (error) {
-    await reconciliation.discardPreparedStagedResult().catch(() => undefined);
+    await measureReconcileStep("candidate-discard", () =>
+      reconciliation.discardPreparedStagedResult(),
+    ).catch(() => undefined);
     throw error;
   }
 }

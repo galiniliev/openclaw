@@ -248,6 +248,16 @@ export async function prepareSessionLifecycleDrain(
     const controllerDrain = prepared.controllerDrain();
     void controllerDrain.catch(() => {});
 
+    // A retained result owner is cleanup work, not active inference. Destructive
+    // retirement settles it through its journal without booting the worker to export.
+    if (prepared.workerStop.retireBeforeResultDrain) {
+      if (workerDrained) {
+        await withTimeout(workerDrained, timeoutMs, "worker inference lifecycle drain");
+      }
+      await prepared.workerStop.stop();
+      reclaimed = Promise.resolve();
+    }
+
     // Early reclaim owns dispatch cancellation and settlement. Join its writes before
     // capturing runtime authority, or our own cleanup can invalidate that snapshot.
     await reclaimed;

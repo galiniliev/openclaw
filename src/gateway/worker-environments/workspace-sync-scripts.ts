@@ -568,3 +568,19 @@ main().catch(reportFailure);`;
 }
 
 export const REMOTE_WORKSPACE_MANIFEST_JS = createRemoteWorkspaceManifestScript();
+
+/** Run the repository-owned setup script on the remote workspace. */
+export const REMOTE_WORKSPACE_SETUP_JS = String.raw`const fs = require("node:fs");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+const root = process.cwd();
+const script = path.join(root, ".openclaw", "worktree-setup.sh");
+const stat = fs.statSync(script, { throwIfNoEntry: false });
+if (stat?.isFile() && (stat.mode & 0o111)) {
+  const run = spawnSync(script, [], {
+    cwd: root,
+    env: { ...process.env, OPENCLAW_SOURCE_TREE_PATH: root, OPENCLAW_WORKTREE_PATH: root },
+    stdio: "inherit",
+  });
+  process.exitCode = run.status ?? 1;
+}`;

@@ -1,6 +1,7 @@
 import type { NodeWorkerWorkspaceExecResult } from "../../worker/node-workspace-protocol.js";
 import type { NodeWorkerWorkspaceTransferInput } from "../../worker/node-workspace-transfer-protocol.js";
 import type { WorkerWorkspaceCommand } from "./tunnel-contract.js";
+import { measureReconcileStep } from "./workspace-reconcile-timing.js";
 
 /** Keep transfer budgets and result validation independent of optional caller guards. */
 export function createNodeWorkspaceTransferCommand(
@@ -10,26 +11,30 @@ export function createNodeWorkspaceTransferCommand(
     input: NodeWorkerWorkspaceTransferInput,
     failure: string,
     command: Pick<WorkerWorkspaceCommand, "timeoutMs" | "assertCurrent" | "signal"> = {},
-  ) => {
-    const result = await exec({
-      ...command,
-      timeoutMs: command.timeoutMs ?? 10 * 60_000,
-      argv: ["openclaw-internal-workspace-transfer"],
-      transfer: input,
-      transportRetry: "never",
-    });
-    const acknowledgement =
-      input.direction === "download" && input.checkpointGitHistory && result.code === 0
-        ? JSON.parse(result.stdout).manifestRef
-        : result.stdout.trim();
-    if (
-      result.termination !== "exit" ||
-      result.code !== 0 ||
-      (input.direction === "download" && acknowledgement !== input.manifestRef)
-    ) {
-      throw new Error(failure);
-    }
-    command.assertCurrent?.();
-    return result;
-  };
+  ) =>
+    measureReconcileStep(
+      input.direction === "upload" ? "node-upload" : "node-download",
+      async () => {
+        const result = await exec({
+          ...command,
+          timeoutMs: command.timeoutMs ?? 10 * 60_000,
+          argv: ["openclaw-internal-workspace-transfer"],
+          transfer: input,
+          transportRetry: "never",
+        });
+        const acknowledgement =
+          input.direction === "download" && input.checkpointGitHistory && result.code === 0
+            ? JSON.parse(result.stdout).manifestRef
+            : result.stdout.trim();
+        if (
+          result.termination !== "exit" ||
+          result.code !== 0 ||
+          (input.direction === "download" && acknowledgement !== input.manifestRef)
+        ) {
+          throw new Error(failure);
+        }
+        command.assertCurrent?.();
+        return result;
+      },
+    );
 }

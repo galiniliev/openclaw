@@ -238,7 +238,9 @@ describe("node workspace credential revocation", () => {
       ]) {
         expect(operation).toThrow("context is unavailable");
       }
-      await expect(service.prepareAttachments(preparation)).rejects.toThrow("authority closed");
+      await expect(
+        service.prepareAttachments({ ...preparation, owner: preparation }),
+      ).rejects.toThrow("authority closed");
       release.resolve();
       await uploadFailure;
       expect(stagingRoot).toBeDefined();

@@ -5,7 +5,11 @@ import {
   WorkerMachineOptionsSchema,
   WorkerOperatingSystemSchema,
 } from "../../../packages/gateway-protocol/src/schema/environments.js";
-import { validateProviderSettings } from "../../config/provider-settings.js";
+import {
+  WORKER_PROFILE_SETTINGS_JSON_LIMITS,
+  validateProviderSettings,
+} from "../../config/provider-settings.js";
+import type { OpenClawConfig, CloudWorkerProfileConfig } from "../../config/types.js";
 import { normalizeCapabilityProviderId } from "../../plugins/provider-registry-shared.js";
 import {
   WorkerProviderError,
@@ -26,7 +30,11 @@ import { normalizeWorkerSshEndpoint } from "./store-validation.js";
 import type { WorkerEnvironmentRecord } from "./store.js";
 
 export function requireWorkerProfile(value: unknown): WorkerProfile {
-  const error = validateProviderSettings(value, "Worker profile");
+  const error = validateProviderSettings(
+    value,
+    "Worker profile",
+    WORKER_PROFILE_SETTINGS_JSON_LIMITS,
+  );
   if (error) {
     throw serviceError("invalid_profile", error);
   }
@@ -206,7 +214,7 @@ export function requireWorkerAllocation(
   return { leaseId: value.leaseId.trim(), sharedHost: value.sharedHost };
 }
 
-export function requireWorkerLease(value: unknown): WorkerLease {
+export function requireWorkerLease(value: WorkerLease): WorkerLease {
   const hasSsh = isRecord(value) && Object.hasOwn(value, "ssh");
   const hasNode = isRecord(value) && Object.hasOwn(value, "node");
   if (
@@ -222,6 +230,7 @@ export function requireWorkerLease(value: unknown): WorkerLease {
   }
   const common = {
     leaseId: value.leaseId.trim(),
+    ...(value.retainedLease ? { retainedLease: value.retainedLease } : {}),
     ...(value.sharedHost === undefined ? {} : { sharedHost: value.sharedHost }),
     ...(value.desktop === undefined
       ? {}
@@ -248,4 +257,24 @@ export function requireInstall(
     throw serviceError("invalid_profile", "Worker profile has an invalid install method");
   }
   return install ?? "bundle";
+}
+
+export function usesRepositoryRefWorkerRecovery(
+  config: OpenClawConfig,
+  environment: Pick<WorkerEnvironmentRecord, "profileId" | "providerId">,
+): boolean {
+  const profile = config.cloudWorkers?.profiles?.[environment.profileId];
+  return (
+    profile?.lostWorkerRecovery === "repository-ref" &&
+    normalizeCapabilityProviderId(profile.provider) === environment.providerId
+  );
+}
+
+export function configuredWorkerProfileSnapshot(profile: CloudWorkerProfileConfig): WorkerProfile {
+  return {
+    install: profile.install ?? "bundle",
+    settings: requireWorkerProfile(profile.settings ?? {}),
+    ...(profile.retention ? { retention: profile.retention } : {}),
+    ...(profile.runSetupScript === undefined ? {} : { runSetupScript: profile.runSetupScript }),
+  };
 }

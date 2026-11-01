@@ -4,7 +4,10 @@ import {
   WorkerProviderError,
   type WorkerDesktopEndpoint,
   type WorkerProvider,
+  type WorkerProfile,
+  type WorkerSessionDiskRetention,
 } from "openclaw/plugin-sdk/plugin-entry";
+import { reportCrabboxProvisionTiming } from "./crabbox-provision-timing.js";
 import {
   crabboxCommandError,
   crabboxCommandOutput,
@@ -22,10 +25,21 @@ import {
 } from "./crabbox-worker-desktop-setup.js";
 import { withCrabboxWorkerEnvProfile } from "./crabbox-worker-env-profile.js";
 import { parseInspectJson, type ParsedInspect } from "./crabbox-worker-inspect.js";
-import { buildCrabboxAllocationArgs, type parseCrabboxProfile } from "./crabbox-worker-profile.js";
+import {
+  buildCrabboxAllocationArgs,
+  resolveCrabboxProvisionProfile,
+  supportsCrabboxProjectPreparation,
+  type parseCrabboxProfile,
+} from "./crabbox-worker-profile.js";
 import { runCrabboxSetupEgress } from "./crabbox-worker-setup-egress.js";
 import {
+  CrabboxSnapshotBindingRejectedError,
+  isCrabboxSnapshotBindingRejection,
+} from "./crabbox-worker-snapshot-rejection.js";
+import {
   CRABBOX_LIFECYCLE_TIMEOUT_MS,
+  CRABBOX_DESKTOP_WARMUP_TIMEOUT_MS,
+  CRABBOX_WARMUP_TIMEOUT_MS,
   CRABBOX_MACHINE0_READY_WAIT_TIMEOUT,
   CRABBOX_SETUP_TIMEOUT_MS,
   resolveCrabboxLifecycleTimeoutMs,
@@ -55,6 +69,7 @@ export function createCrabboxProvisionAuthority(
   return { signal, assertCurrent };
 }
 type ProvisionInspectContext = Omit<LeaseCommandContext, "id"> & {
+  timingIdentity?: { operationId: string; environmentId?: string };
   deadline: number;
   inspect: ParsedInspect;
   profile: ReturnType<typeof parseCrabboxProfile>;
@@ -104,6 +119,7 @@ export async function inspectWithContext(
       "--json",
     ],
     binary: params.binary,
+    providerEnv: params.providerEnv,
     signal: params.signal,
     timeoutMs: params.timeoutMs ?? resolveCrabboxLifecycleTimeoutMs(params.provider),
   });
@@ -166,18 +182,52 @@ export async function runProvisionWarmup(
   params: LeaseCommandContext & {
     profile: ReturnType<typeof parseCrabboxProfile>;
     slug: string;
+    timingIdentity?: { operationId: string; environmentId?: string };
+    retention?: WorkerSessionDiskRetention;
     timeoutMs: () => number;
     signal?: AbortSignal;
   },
-): Promise<void> {
+): Promise<{ kind: "cold" }> {
+  if (
+    params.retention &&
+    (params.profile.provider !== "azure-sandbox" || params.profile.target !== "linux")
+  ) {
+    throw new Error("Session disk retention requires Linux Azure Sandbox");
+  }
   const result = await runCrabboxCommand({
     ...params,
     action: "warmup",
-    args: ["warmup", ...buildCrabboxAllocationArgs(params.profile, params.id, params.slug)],
+    args: [
+      "warmup",
+      ...buildCrabboxAllocationArgs(
+        params.retention
+          ? { ...params.profile, ttl: `${params.retention.policy.computeWindowSeconds}s` }
+          : params.profile,
+        params.id,
+        params.slug,
+      ),
+      ...(params.retention
+        ? [
+            "--azure-sandbox-retention",
+            "session-disk",
+            "--azure-sandbox-owner-binding",
+            params.retention.ownerBinding,
+          ]
+        : []),
+      "--timing-json",
+    ],
+    observeResult: (observed) => {
+      if (params.timingIdentity) {
+        reportCrabboxProvisionTiming(observed, params.timingIdentity);
+      }
+    },
     timeoutMs: params.timeoutMs(),
   });
   if (result.termination === "exit" && result.code === 0) {
-    return;
+    return { kind: "cold" };
+  }
+  if (params.profile.azureSandboxSnapshotId && isCrabboxSnapshotBindingRejection(result)) {
+    throw new CrabboxSnapshotBindingRejectedError();
   }
   // Crabbox internal/cli/run.go rejects this capability before Warmup/Acquire.
   if (isFixedLeaseIdUnsupported(result, params.provider)) {
@@ -282,7 +332,8 @@ export async function runProvisionSetup(
     forwardedEnv?: Record<string, string>;
     assertCurrent?: () => void;
   },
-): Promise<void> {
+): Promise<string> {
+  let output: string;
   try {
     const run =
       params.phase === "profile setup" ||
@@ -312,8 +363,14 @@ export async function runProvisionSetup(
         : await withCrabboxWorkerEnvProfile(params.forwardedEnv, (names, profilePath, childEnv) =>
             run({
               action: params.phase,
+              observeResult: (observed) => {
+                if (params.timingIdentity) {
+                  reportCrabboxProvisionTiming(observed, params.timingIdentity);
+                }
+              },
               args: leaseRunArgs({ ...params, id: params.inspect.id }, names, profilePath),
               binary: params.binary,
+              providerEnv: params.providerEnv,
               env: childEnv,
               input: params.setup,
               signal: params.signal,
@@ -323,14 +380,8 @@ export async function runProvisionSetup(
               ),
             }),
           );
-    crabboxCommandOutput(params.phase, result);
-    const output = `${result.stdout}\n${result.stderr}`;
-    for (const match of output.matchAll(
-      /^CRABBOX_TIMING:(openclaw-bootstrap-[a-z-]+):(\d+)\r?$/gmu,
-    )) {
-      bootstrapLog.info(`Cloud worker ${params.inspect.id}: ${match[1]} ${match[2]}ms`);
-    }
-    for (const match of output.matchAll(
+    output = crabboxCommandOutput(params.phase, result);
+    for (const match of `${result.stdout}\n${result.stderr}`.matchAll(
       /^CRABBOX_WARNING:openclaw-bootstrap-unlocked-install:([a-zA-Z0-9 _-]+)\r?$/gmu,
     )) {
       bootstrapLog.warn(
@@ -342,6 +393,7 @@ export async function runProvisionSetup(
     return await failProvisionAfterCleanup({ ...params, id: params.inspect.id }, error);
   }
   params.signal?.throwIfAborted();
+  return output;
 }
 
 export async function prepareProvisionDesktop(
@@ -377,13 +429,75 @@ export async function prepareProvisionDesktop(
 }
 
 export async function failProvisionAfterCleanup(
-  params: LeaseCommandContext & { stopLease: (context: LeaseCommandContext) => Promise<void> },
+  params: LeaseCommandContext & {
+    stopLease: (context: LeaseCommandContext) => Promise<void>;
+    preserveRetainedLease?: boolean;
+  },
   provisionError: unknown,
 ): Promise<never> {
+  if (params.preserveRetainedLease) {
+    throw provisionError;
+  }
   try {
     await params.stopLease(params);
   } catch (cleanupError) {
     throw WorkerProviderError.cleanupIndeterminate(params.id, provisionError, cleanupError);
   }
   throw WorkerProviderError.cleanupComplete(params.id, provisionError);
+}
+
+/** Resolve one provision's profile and cancellation scopes before provider preparation starts. */
+export function prepareCrabboxProvisionProfile(
+  profile: WorkerProfile,
+  options: Parameters<WorkerProvider["provision"]>[2],
+  providerSignal: AbortSignal,
+) {
+  const signal = options?.signal;
+  const executionMode: unknown = options?.executionMode;
+  if (
+    executionMode !== undefined &&
+    executionMode !== "worker-turn" &&
+    executionMode !== "remote-exec"
+  ) {
+    throw new WorkerProviderError("Crabbox execution mode is unsupported");
+  }
+  const { profile: parsed } = resolveCrabboxProvisionProfile(
+    profile,
+    options?.machineClass,
+    options?.os,
+  );
+  if (options?.retention && !parsed.sdkPython) {
+    parsed.warmImage = false;
+  }
+  const nodeRuntimeIdentity = options?.nodeRuntimeIdentity;
+  if (parsed.warmImage && !nodeRuntimeIdentity) {
+    throw new WorkerProviderError("Crabbox warm images require a prepared node runtime identity");
+  }
+  const warmupTimeoutMs = parsed.desktop
+    ? CRABBOX_DESKTOP_WARMUP_TIMEOUT_MS
+    : CRABBOX_WARMUP_TIMEOUT_MS;
+  const protectedSetup = Object.keys(parsed.setupSecrets ?? {}).length > 0;
+  const project = supportsCrabboxProjectPreparation(profile, options?.machineClass, options?.os)
+    ? options?.project
+    : undefined;
+  const projectImage = project ?? options?.projectImage;
+  if (options?.project?.preparation && !project) {
+    throw new WorkerProviderError(
+      "Crabbox prepared workers require warm images, protected setup, or a configured Linux Sandbox disk",
+    );
+  }
+  const preparationSignal = AbortSignal.any([
+    providerSignal,
+    ...(signal ? [signal] : []),
+    ...(project?.signal ? [project.signal] : []),
+  ]);
+  return {
+    parsed,
+    nodeRuntimeIdentity,
+    warmupTimeoutMs,
+    protectedSetup,
+    project,
+    projectImage,
+    preparationSignal,
+  };
 }

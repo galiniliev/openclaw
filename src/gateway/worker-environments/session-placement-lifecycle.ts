@@ -9,6 +9,7 @@ import type {
   WorkerSessionPlacementStore,
 } from "./placement-store.js";
 import {
+  isCompletedInitialRetainedWorkerCleanup,
   isCurrentActiveWorkerEnvironment,
   isFailedWorkerPlacementEnvironmentGone,
   matchesWorkerPlacementTarget,
@@ -83,6 +84,11 @@ export function canRedispatchFailedWorkerPlacement(
   environment: WorkerEnvironmentPlacementFacts | undefined,
 ): boolean {
   return Boolean(
+    (!environment?.retention ||
+      (environment.providerId !== DEVICE_WORKER_PROVIDER_ID &&
+        environment.retention.owner.sessionId === placement.sessionId &&
+        environment.retention.owner.sessionKey === placement.sessionKey &&
+        environment.retention.owner.agentId === placement.agentId)) &&
     placement.activeOwnerEpoch !== null &&
     !placement.turnClaim &&
     environment &&
@@ -99,6 +105,19 @@ function isWorkerPlacementSafeForMutation(
   context: SessionWorkerPlacementContext,
   placement: Placement,
 ): placement is RetirablePlacement {
+  if (
+    placement.state !== "local" &&
+    placement.state !== "reclaimed" &&
+    placement.state !== "failed"
+  ) {
+    return false;
+  }
+  const environment = placement.environmentId
+    ? context.workerEnvironmentService?.get(placement.environmentId)
+    : undefined;
+  if (environment?.retention && environment.state !== "destroyed") {
+    return false;
+  }
   if (placement.state === "failed") {
     return isFailedWorkerPlacementEnvironmentGone({
       environmentService: context.workerEnvironmentService,
@@ -357,7 +376,11 @@ export async function prepareSessionWorkerPlacementStop(params: {
   sessionId?: string;
   sessionKey: string;
   sessionKeys?: readonly string[];
-}): Promise<{ stop: () => Promise<void>; startBeforeDrain: boolean }> {
+}): Promise<{
+  stop: () => Promise<void>;
+  startBeforeDrain: boolean;
+  retireBeforeResultDrain?: true;
+}> {
   const { agentId, context, sessionId, sessionKey } = params;
   const expected = await readSessionWorkerPlacementAsync(params);
   // Cron run aliases share their base's physical session, even after session-id adoption.
@@ -392,12 +415,21 @@ export async function prepareSessionWorkerPlacementStop(params: {
       throw new Error(`Session ${sessionKey} cloud worker placement identity changed.`);
     }
   };
+  const retainedRetirement =
+    params.action !== "recover" &&
+    expected?.activeOwnerEpoch !== null &&
+    (expected?.state === "active" ||
+      expected?.state === "draining" ||
+      expected?.state === "failed") &&
+    Boolean(context.workerEnvironmentService?.get(expected.environmentId ?? "")?.retention);
   const stop = async () => {
     beforeDrain();
     if (
       !expected ||
-      (params.action === "archive" && expected.state === "failed") ||
-      isWorkerPlacementSafeForMutation(context, expected) ||
+      (params.action === "archive" &&
+        expected.state === "failed" &&
+        !context.workerEnvironmentService?.get(expected.environmentId ?? "")?.retention) ||
+      (!retainedRetirement && isWorkerPlacementSafeForMutation(context, expected)) ||
       !sessionId
     ) {
       return;
@@ -405,10 +437,15 @@ export async function prepareSessionWorkerPlacementStop(params: {
     if (!context.workerPlacementDispatchService?.reclaim) {
       throw new Error(`Session ${sessionKey} cloud worker reclaim is unavailable.`);
     }
-    // The dispatch owner rechecks source eligibility before its own drain, and
-    // caller authority throughout reconciliation. Never force-abandon unsynced work.
+    // Normal reclaim preserves work. Only server-owned delete/archive can
+    // discard an exact retained resource through its durable retirement owner.
     const reclaimed = await context.workerPlacementDispatchService.reclaim(
-      { agentId, sessionId, sessionKey: expected.sessionKey },
+      {
+        agentId,
+        sessionId,
+        sessionKey: expected.sessionKey,
+        ...(retainedRetirement ? { retireRetainedWorkspace: true as const } : {}),
+      },
       params.authorize,
       beforeDrain,
     );
@@ -424,6 +461,7 @@ export async function prepareSessionWorkerPlacementStop(params: {
   };
   return {
     stop,
+    ...(retainedRetirement ? { retireBeforeResultDrain: true as const } : {}),
     startBeforeDrain:
       expected?.state === "requested" ||
       expected?.state === "provisioning" ||
@@ -536,6 +574,20 @@ export async function ensureWorkerSessionPlacement(params: {
         return true;
       }
       const placement = read();
+      const environment = placement?.environmentId
+        ? params.environments.get(placement.environmentId)
+        : undefined;
+      if (
+        (placement?.state === "failed" || placement?.state === "reclaimed") &&
+        environment?.retention &&
+        (placement.state !== "failed" ||
+          (!canRedispatchFailedWorkerPlacement(placement, environment) &&
+            !isCompletedInitialRetainedWorkerCleanup(placement, environment)))
+      ) {
+        throw new Error(
+          "Retained session disk was retired or is unavailable; empty replacement is refused. Create a new session to start again.",
+        );
+      }
       if (!placement || canStartDispatch(placement)) {
         return false;
       }
@@ -576,6 +628,9 @@ export async function ensureWorkerSessionPlacement(params: {
         : undefined;
     const dispatchRequest = {
       ...request,
+      ...(placement && isCompletedInitialRetainedWorkerCleanup(placement, previousEnvironment)
+        ? { expectedPlacement: placement }
+        : {}),
       ...(previousEnvironment
         ? {
             inheritedProfile: {

@@ -2,6 +2,7 @@ import type { AnyAgentTool } from "../../agents/tools/common.js";
 import type { CloudWorkerSetupMutationAdmission } from "../../infra/device-bootstrap.worker-types.js";
 import type { GatewayScheduler } from "../../infra/gateway-scheduler.js";
 import type { WorkerExecutionMode, WorkerProfile } from "../../plugins/types.js";
+import type { RetainedWorkspaceAuthority } from "../../state/retained-workspace-authority.js";
 import type { WorkerConnectionIdentity } from "./connection-identity.js";
 import type { WorkerEnvironmentNodeTunnel } from "./environment-access.js";
 import type { WorkerInferenceStore } from "./inference-store.js";
@@ -17,6 +18,9 @@ import type { WorkerTunnelManager } from "./tunnel.js";
 
 export type WorkerEnvironmentCreateRequest = {
   profileId: string;
+  retentionOwner?: { sessionId: string; sessionKey: string; agentId: string };
+  /** Internal same-disk recovery; never supplied by a wire profile selector. */
+  retainedWorkspaceAuthority?: RetainedWorkspaceAuthority;
   idempotencyKey: string;
   machineClass?: string;
   executionMode?: WorkerExecutionMode;

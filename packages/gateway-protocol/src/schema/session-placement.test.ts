@@ -92,15 +92,18 @@ describe("session dispatch protocol schemas", () => {
     );
   });
 
-  it("accepts exactly the reclaim owner's terminal outcomes", () => {
+  it("accepts reclaim, retained pause, and Gateway recovery outcomes", () => {
     const result = (value: unknown) => ({
       ok: true,
       key,
       sessionId: "session-1",
       placement: value,
     });
-    reclaimed.accepts(...["local", "reclaimed"].map((state) => result(placed(state, {}))));
-    reclaimed.rejects(result(placed("requested", {})), result(placed("active", workerOwnedFields)));
+    reclaimed.accepts(
+      ...["local", "reclaimed"].map((state) => result(placed(state, {}))),
+      result(placed("active", workerOwnedFields)),
+    );
+    reclaimed.rejects(result(placed("requested", {})), result(placed("active", environmentFields)));
   });
 
   it("keeps placement states closed", () => {

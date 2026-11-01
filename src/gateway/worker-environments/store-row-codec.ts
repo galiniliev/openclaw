@@ -6,6 +6,7 @@ import {
 } from "../../infra/kysely-sync.js";
 import type { EngineConnection } from "../../infra/sql-connection.js";
 import type { WorkerProfile, WorkerSshEndpoint } from "../../plugins/capability-provider.types.js";
+import type { WorkerSessionDiskRetention } from "../../plugins/worker-retention.types.js";
 import type {
   DB as StateDatabase,
   WorkerEnvironmentCredentials,
@@ -101,6 +102,10 @@ export function decodeWorkerEnvironmentRow(
     profileId: row.profile_id,
     // SAFETY: this store writes profile_snapshot_json from its typed profile snapshot.
     profileSnapshot: JSON.parse(row.profile_snapshot_json) as WorkerProfile,
+    retention:
+      row.session_retention_json === null
+        ? null
+        : (JSON.parse(row.session_retention_json) as WorkerSessionDiskRetention),
     preparation: readWorkerEnvironmentPreparation(row),
     provisionOperationId: row.provision_operation_id,
     nodeSetupId: row.node_setup_id,

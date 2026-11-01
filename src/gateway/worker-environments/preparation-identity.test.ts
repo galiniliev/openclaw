@@ -129,6 +129,27 @@ it("uses the provider disk fingerprint independently of lease and runtime policy
   ).not.toBe(disk.cacheKey);
 });
 
+it("shares clean retained project caches across commits while keeping ready workers revision-bound", () => {
+  const retained = {
+    ...input,
+    profileSnapshot: {
+      ...input.profileSnapshot,
+      retention: { mode: "session-disk" as const, computeWindowSeconds: 14400 },
+    },
+  };
+  const identity = createWorkerPreparationIdentity(retained);
+  expect(
+    createWorkerPreparationIdentity({ ...retained, profileId: "another-profile" }).cacheKey,
+  ).toBe(identity.cacheKey);
+  const changed = createWorkerPreparationIdentity({
+    ...retained,
+    project: { ...retained.project, baseCommit: "1".repeat(40) },
+  });
+  expect(changed.cacheKey).toBe(identity.cacheKey);
+  expect(changed.key).not.toBe(identity.key);
+  expect(identity.cacheKey).toBe(createWorkerPreparationIdentity(input).cacheKey);
+});
+
 it.each<[string, InputChange, boolean?]>([
   ["namespace", { namespace: "gateway-two" }],
   ["provider", { providerId: "another-provider" }],

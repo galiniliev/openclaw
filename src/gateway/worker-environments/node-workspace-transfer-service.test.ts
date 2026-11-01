@@ -336,7 +336,12 @@ describe("node workspace transfer service", () => {
       await fs.writeFile(path.join(attachmentsRoot, attachmentPath), "new attachment");
       let attachmentTurnCurrent = true;
       const attachments = await service.prepareAttachments({
-        environmentId: "environment-1",
+        owner: {
+          environmentId: "environment-1",
+          ownerEpoch: credential.ownerEpoch,
+          sessionId: "session-1",
+          isAuthorized: () => true,
+        },
         localPath: attachmentsRoot,
         isAuthorized: () => attachmentTurnCurrent,
         signal: new AbortController().signal,

@@ -1,5 +1,4 @@
 import type { WorkerEnvironmentStartStatus } from "../../../packages/gateway-protocol/src/schema/environments.js";
-import type { WorkerAdmissionHandshake } from "../../../packages/gateway-protocol/src/schema/worker-admission.js";
 import {
   WorkerProviderError,
   type WorkerExecutionMode,
@@ -8,6 +7,7 @@ import {
   type WorkerProvider,
 } from "../../plugins/types.js";
 import { sessionChanges } from "../../sessions/session-row-changes.js";
+import type { RetainedWorkspaceAuthority } from "../../state/retained-workspace-authority.js";
 import { sameWorkerBuild } from "../../worker/worker-build-identity.js";
 import { SessionMutationAuthorizationChangedError } from "../session-mutation-authorization-error.js";
 import { MAX_NODE_BOOTSTRAP_TIMEOUT_MS } from "./bootstrap-timeouts.js";
@@ -21,16 +21,20 @@ import { createWorkerReconcileTrace } from "./environment-operation.js";
 import { readWorkerPreparation } from "./preparation-identity.schema.js";
 import { readWorkerProjectSnapshot } from "./project-preparation.js";
 import { createWorkerProviderIntent, failUnallocatedImageIntent } from "./provider-intent.js";
+import { createWorkerLeaseInspection } from "./provider-lease-inspection.js";
 import type { WorkerProviderLifecycleOptions } from "./provider-lifecycle.types.js";
 import { createWorkerMachineCatalog } from "./provider-machine-catalog.js";
 import { createWorkerNodeProvisioning } from "./provider-node-provisioning.js";
 import { createWorkerProviderOwnerLifecycle } from "./provider-owner-lifecycle.js";
 import {
   prepareWorkerProviderProject,
+  retainedWorkerProjectImage,
   type WorkerProviderRepositorySource,
 } from "./provider-project-preparation.js";
 import { createWorkerProvisionCancellation } from "./provider-provisioning-cancellation.js";
 import { createWorkerRuntimeRefresher } from "./provider-runtime-refresh.js";
+import { measureWorkerProvisionPhase } from "./provision-timing.js";
+import { createWorkerRetainedLeaseLifecycle } from "./retained-lease-lifecycle.js";
 import {
   requireProviderOperationTimeoutMs,
   requireWorkerLease,
@@ -46,7 +50,7 @@ const ORPHANED_LEASE_ERROR = "Worker provider no longer recognizes the lease";
 export function createWorkerProviderLifecycle(
   options: WorkerProviderLifecycleOptions & { ownerSignal: AbortSignal },
 ) {
-  const { store, callBootstrap, callProvider, move, saveError, now = Date.now } = options;
+  const { store, callProvider, move, saveError, now = Date.now } = options;
   const startStatuses = new Map<
     string,
     { ownerEpoch: number; status: WorkerEnvironmentStartStatus }
@@ -64,6 +68,12 @@ export function createWorkerProviderLifecycle(
     throw serviceError("provider_not_found", `Worker provider is unavailable: ${providerId}`);
   };
 
+  const retained = createWorkerRetainedLeaseLifecycle({
+    ...options,
+    providerFor,
+    signal: options.ownerSignal,
+    now,
+  });
   const {
     identityResolverFor,
     requireCurrentOwner,
@@ -73,6 +83,7 @@ export function createWorkerProviderLifecycle(
     lifecycleLease,
     finishDestroy,
     failBootstrap,
+    finishBootstrap,
     finishConfirmedProvisionCleanup,
     preserveIndeterminateProvisionCleanup,
     destroy,
@@ -82,6 +93,17 @@ export function createWorkerProviderLifecycle(
     ...options,
     providerFor,
     onOwnerStopped: dedicatedLeases.retire,
+  });
+
+  const { settleLostLease, inspectTurnLease } = createWorkerLeaseInspection({
+    ...options,
+    providerFor,
+    inspect: dedicatedLeases.inspect,
+    lifecycleLease,
+    stopOwner,
+    beginDrain,
+    finishProvenDestroy,
+    finishDestroy,
   });
 
   const machineCatalog = createWorkerMachineCatalog(options);
@@ -100,56 +122,16 @@ export function createWorkerProviderLifecycle(
     ...options,
     commitReady,
     failBootstrap,
+    acceptInitial: retained.acceptInitial,
   });
 
   const runtimeRefresher = createWorkerRuntimeRefresher({
     ...options,
+    providerFor,
     requireCurrentOwner,
     stopOwner,
     identityResolverFor,
   });
-
-  const finishBootstrap = async (
-    record: WorkerEnvironmentRecord,
-    provider: WorkerProvider,
-    installation: WorkerInstallationArtifact,
-    cancellation?: ReturnType<typeof createWorkerProvisionCancellation>,
-  ) => {
-    if (record.state !== "bootstrapping" || !record.leaseId || !record.sshEndpoint) {
-      throw serviceError("invalid_state", "Worker bootstrap requires a provisioned SSH lease");
-    }
-    const { leaseId, sshEndpoint } = record;
-    let receipt: WorkerAdmissionHandshake;
-    try {
-      receipt = await callBootstrap(installation, (signal) =>
-        options.bootstrapWorker({
-          operationId: record.provisionOperationId,
-          sshEndpoint,
-          installation,
-          resolveIdentity: identityResolverFor(record, provider, leaseId),
-          signal: cancellation ? AbortSignal.any([signal, cancellation.signal]) : signal,
-        }),
-      );
-      cancellation?.assertActive();
-      if (!sameWorkerBuild(receipt, installation)) {
-        throw new Error("Worker bootstrap receipt does not match the expected build identity");
-      }
-    } catch (error) {
-      await cancellation?.settleStopIntent();
-      if (options.ownerSignal.aborted) {
-        // Owner shutdown leaves this allocation for restart recovery.
-        throw error;
-      }
-      return await failBootstrap(record, leaseId, provider, error);
-    }
-    return commitReady(record, { ...receipt, installKind: "bundle" }, {}, () => {
-      cancellation?.assertActive();
-      const current = requireCurrentOwner(record);
-      if (current.destroyRequestedAtMs !== null) {
-        throw serviceError("invalid_state", "Worker bootstrap owner is stopping");
-      }
-    });
-  };
 
   const finishProvision = async (
     initialRecord: WorkerEnvironmentRecord,
@@ -221,14 +203,24 @@ export function createWorkerProviderLifecycle(
           throw closedAttempt;
         }
         beforeProvision?.();
-        const current = requireCurrentOwner(record);
+        const current =
+          enrollmentOperation?.current(record, requireCurrentOwner) ?? requireCurrentOwner(record);
         if (current.destroyRequestedAtMs !== null) {
           throw new Error("Worker provisioning operation is closed");
         }
         return current;
       };
       const project = readWorkerProjectSnapshot(record.profileSnapshot.project);
-      if (project) {
+      const projectImage = retainedWorkerProjectImage(
+        record,
+        provider,
+        profile,
+        project,
+        preparation,
+        machineClass,
+        os,
+      );
+      if (project && (!record.retention || projectImage.projectImage)) {
         if (
           !provider.supportsProjectPreparation?.(profile, machineClass, os) ||
           !options.projectNamespace
@@ -247,6 +239,8 @@ export function createWorkerProviderLifecycle(
         });
       }
       const provisionOptions = {
+        environmentId: record.environmentId,
+        ...(record.retention ? { retention: record.retention } : {}),
         nodeBootstrapTimeoutMs,
         profileId: record.profileId,
         assertCurrent,
@@ -267,38 +261,38 @@ export function createWorkerProviderLifecycle(
           : {}),
         signal: workSignal,
         ...(projectOperation ? { project: projectOperation.project } : {}),
-      } satisfies NonNullable<Parameters<WorkerProvider["provision"]>[2]> & {
-        assertCurrent: () => void;
-      };
+        ...projectImage,
+      } satisfies NonNullable<Parameters<WorkerProvider["provision"]>[2]>;
       cancellation?.assertActive();
-      const provision = async () => {
-        assertCurrent();
-        const preparedProvision = await provider.prepareProvision?.(
-          profile,
-          record.provisionOperationId,
-          provisionOptions,
-        );
-        const current = assertCurrent();
-        if (provider.prepareProvision && typeof preparedProvision !== "function") {
-          throw new Error("Worker provider preparation must return an allocation operation");
-        }
-        // Preparation and allocation share one timeout and settlement owner. Only a
-        // fresh requested row proves there was no earlier allocation to clean up.
-        record =
-          current.state === "requested"
-            ? await (provisioningTransition = move(
-                current,
-                "provisioning",
-                undefined,
-                assertCurrent,
-              ))
-            : current;
-        assertCurrent();
-        preparationComplete = true;
-        return preparedProvision
-          ? preparedProvision()
-          : provider.provision(profile, record.provisionOperationId, provisionOptions);
-      };
+      const provision = () =>
+        measureWorkerProvisionPhase(record, "provider.request", async () => {
+          assertCurrent();
+          const preparedProvision = await provider.prepareProvision?.(
+            profile,
+            record.provisionOperationId,
+            provisionOptions,
+          );
+          const current = assertCurrent();
+          if (provider.prepareProvision && typeof preparedProvision !== "function") {
+            throw new Error("Worker provider preparation must return an allocation operation");
+          }
+          // Preparation and allocation share one timeout and settlement owner. Only a
+          // fresh requested row proves there was no earlier allocation to clean up.
+          record =
+            current.state === "requested"
+              ? await (provisioningTransition = move(
+                  current,
+                  "provisioning",
+                  undefined,
+                  assertCurrent,
+                ))
+              : current;
+          assertCurrent();
+          preparationComplete = true;
+          return preparedProvision
+            ? preparedProvision()
+            : provider.provision(profile, record.provisionOperationId, provisionOptions);
+        });
       lease = requireWorkerLease(
         await callProvider(
           record.environmentId,
@@ -337,8 +331,9 @@ export function createWorkerProviderLifecycle(
         (error instanceof WorkerEnvironmentServiceError && error.code === "invalid_profile");
       // A current refusal cannot disprove allocation by an earlier attempt.
       const terminalFailure =
-        record.state === "requested" ||
-        (provisioningTransition !== undefined && preparationComplete && permanent);
+        !record.retention?.receipt &&
+        (record.state === "requested" ||
+          (provisioningTransition !== undefined && preparationComplete && permanent));
       await (terminalFailure
         ? move(record, "failed", { lastError: detail })
         : saveError(record, error));
@@ -357,6 +352,13 @@ export function createWorkerProviderLifecycle(
       }
       projectOperation?.close();
       enrollmentOperation?.close();
+    }
+    if (!lease.node) {
+      record = await retained.acceptInitial(record, lease, () => {
+        cancellation?.assertActive();
+        beforeProvision?.();
+        requireCurrentOwner(record);
+      });
     }
     // A timeout can happen after allocation; retain the same operation id for safe replay.
     const patch = {
@@ -426,11 +428,12 @@ export function createWorkerProviderLifecycle(
     retainProviderSettlement?: (settled: Promise<void>) => void,
     beforeProvision?: () => void,
     repositorySource?: WorkerProviderRepositorySource,
+    originalDisk?: RetainedWorkspaceAuthority,
   ) => {
     const workSignal = signal
       ? AbortSignal.any([options.ownerSignal, signal])
       : options.ownerSignal;
-    const pending = await expirePrepared(record);
+    let pending = await expirePrepared(record);
     if (pending.destroyRequestedAtMs !== null) {
       return finishDestroy(pending, provider);
     }
@@ -443,8 +446,15 @@ export function createWorkerProviderLifecycle(
     }
     try {
       beforeProvision?.();
+      if (originalDisk) {
+        pending = await retained.resumeForProvision(pending, originalDisk, workSignal, () => {
+          cancellation?.assertActive();
+          beforeProvision?.();
+          requireCurrentOwner(pending);
+        });
+      }
       const preparedNode = await nodeProvisioning.prepare(
-        record,
+        pending,
         provider,
         workSignal,
         beforeProvision,
@@ -496,6 +506,7 @@ export function createWorkerProviderLifecycle(
     signal?: AbortSignal,
     retainProviderSettlement?: (settled: Promise<void>) => void,
     beforeProvision?: () => void,
+    repositorySource?: WorkerProviderRepositorySource,
   ): Promise<void> => {
     const step = createWorkerReconcileTrace(initialRecord);
     const workSignal = signal
@@ -506,6 +517,14 @@ export function createWorkerProviderLifecycle(
     if (record.state === "requested" && record.destroyRequestedAtMs !== null) {
       return void (await finishDestroy(record));
     }
+    const retainedRecord = await retained.reconcile(record, workSignal, () => {
+      workSignal.throwIfAborted();
+      beforeProvision?.();
+    });
+    if (!retainedRecord) {
+      return;
+    }
+    record = retainedRecord;
     let currentBundle: WorkerInstallationArtifact | undefined;
     if (
       record.destroyRequestedAtMs === null &&
@@ -539,7 +558,14 @@ export function createWorkerProviderLifecycle(
       await (
         record.destroyRequestedAtMs !== null
           ? finishDestroy(record, provider, workSignal)
-          : resumeProvision(record, provider, signal, retainProviderSettlement, beforeProvision)
+          : resumeProvision(
+              record,
+              provider,
+              signal,
+              retainProviderSettlement,
+              beforeProvision,
+              repositorySource,
+            )
       ).catch(() => undefined);
       return;
     }
@@ -553,39 +579,8 @@ export function createWorkerProviderLifecycle(
     }
     const { status } = inspection;
     const teardownExpected = record.destroyRequestedAtMs !== null || record.state === "destroying";
-    if (status === "destroyed") {
-      const requested =
-        record.destroyRequestedAtMs === null
-          ? await store.requestDestroy({
-              environmentId: record.environmentId,
-              state: record.state,
-              ...(!teardownExpected
-                ? {
-                    terminalState: "failed",
-                    lastError: "Worker environment disappeared before teardown was requested",
-                  }
-                : {}),
-            })
-          : record;
-      const stopped = await stopOwner(requested, "provider-destroyed");
-      const draining = await beginDrain(stopped);
-      await finishProvenDestroy(draining).catch(async (error: unknown) => {
-        await saveError(draining, error);
-      });
-      return;
-    }
-    if (status === "unknown") {
-      // Provider loss fences placement authority before remote cleanup, which may remain
-      // unreachable after node revocation. Preserve its exact attachment until stop is proven.
-      const requested = teardownExpected
-        ? record
-        : await store.requestDestroy({
-            environmentId: record.environmentId,
-            state: record.state,
-            terminalState: "failed",
-            lastError: ORPHANED_LEASE_ERROR,
-          });
-      await finishDestroy(requested, provider).catch(() => undefined);
+    if (status === "destroyed" || status === "unknown") {
+      await settleLostLease(record, provider, status);
       return;
     }
     if (status === "dormant") {
@@ -682,12 +677,11 @@ export function createWorkerProviderLifecycle(
     }
   };
 
-  const { createWithProfile, prepareIntent, prepareRetention, assertPreparedIntentCurrent } =
-    createWorkerProviderIntent({
-      ...options,
-      providerFor,
-      resumeProvision,
-    });
+  const intentOwner = createWorkerProviderIntent({
+    ...options,
+    providerFor,
+    resumeProvision,
+  });
 
   return {
     readStartStatus: (record: WorkerEnvironmentRecord) => {
@@ -698,14 +692,12 @@ export function createWorkerProviderLifecycle(
     },
     getDedicatedNodeLeaseSignal: dedicatedLeases.signal,
     clearDedicatedNodeLeases: () => dedicatedLeases.clear(),
-    createWithProfile,
-    prepareIntent,
-    prepareRetention,
-    assertPreparedIntentCurrent,
+    ...intentOwner,
     resumePrepared: (
       record: WorkerEnvironmentRecord,
       signal?: AbortSignal,
       beforeReconcile?: () => void,
+      repositorySource?: WorkerProviderRepositorySource,
     ) =>
       options.withLock(record.environmentId, async () => {
         signal?.throwIfAborted();
@@ -726,6 +718,7 @@ export function createWorkerProviderLifecycle(
             signal ?? new AbortController().signal,
             (settled) => providerSettlements.push(settled),
             beforeReconcile,
+            repositorySource,
           );
         } finally {
           await Promise.all(providerSettlements);
@@ -738,6 +731,11 @@ export function createWorkerProviderLifecycle(
     ...machineCatalog,
     providerFor,
     reconcileRecord,
+    inspectTurnLease: (request: Parameters<typeof inspectTurnLease>[0]) =>
+      retained.inspectForTurn(request, inspectTurnLease),
+    pauseRetained: (request: Parameters<typeof retained.pauseCurrent>[0]) =>
+      options.withLock(request.environmentId, () => retained.pauseCurrent(request)),
+    resumeNode: runtimeRefresher.resumeCurrentNode,
     readRuntimeRefresh: runtimeRefresher.read,
   };
 }

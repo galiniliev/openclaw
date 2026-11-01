@@ -312,7 +312,7 @@ export function createPreparedPoolPresence(options: PreparedPoolPresenceOptions)
       throw new Error("Human-presence worker profile changed during preparation");
     }
     const limits = {
-      target: profile.readyWorkers ?? 1,
+      target: profile.retention ? 0 : (profile.readyWorkers ?? 1),
       maxTotal: config?.preparedPool?.maxTotal ?? 4,
     };
     const previous = state;

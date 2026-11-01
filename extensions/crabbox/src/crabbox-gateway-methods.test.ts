@@ -230,7 +230,7 @@ describe("Crabbox snapshots Gateway methods", () => {
       provider: "hetzner",
       message: "Native checkpoints are unsupported for this coordinator target.",
     };
-    store.register("older", { version: 3, allocations: {}, captureUnsupported });
+    store.register("older", { version: 4, allocations: {}, captureUnsupported });
     const respond = await list();
 
     expect(respond).toHaveBeenCalledWith(true, {

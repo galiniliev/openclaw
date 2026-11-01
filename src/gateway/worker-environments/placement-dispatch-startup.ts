@@ -10,6 +10,7 @@ import {
   DevicePlacementUnavailableError,
   resolveDevicePlacementEligibility,
   type WorkerNodePlacementAuthority,
+  type WorkerDevicePlacementRequirementResolver,
 } from "./device-placement-eligibility.js";
 import { composePlacementAuthorization } from "./placement-authorization.js";
 import type {
@@ -26,20 +27,17 @@ import { readWorkerProjectPreparation } from "./preparation-identity.schema.js";
 import { readWorkerProjectSnapshot } from "./project-preparation.js";
 import { runWorkerProjectLifecycle } from "./project-setup-script.js";
 import { syncSessionRepositoryWorkspace } from "./repository-workspace-startup.js";
+import { retainedRepositoryDisk } from "./retained-workspace.js";
 import type {
   WorkerPlacementAuthorization,
   WorkerPlacementDispatchRequest,
 } from "./service-contract.js";
 import type { WorkerEnvironmentService } from "./service.js";
+import { prepareCheckpointRecovery } from "./session-repository-checkpoint-owner.js";
 import type { WorkerSessionWorkspace } from "./session-workspace.js";
 import { AcceptedWorkspacePublicationIndeterminateError } from "./workspace-accepted-publication.js";
 
-export type WorkerDevicePlacementRequirementResolver = (
-  identity: Pick<
-    WorkerPlacementDispatchRequest,
-    "sessionId" | "sessionKey" | "agentId" | "executionMode"
-  >,
-) => Promise<DevicePlacementRequirement>;
+export type { WorkerDevicePlacementRequirementResolver } from "./device-placement-eligibility.js";
 
 type WorkerNodePlacementAdmission = {
   node: NodeWorkerSupervisorNodeProof;
@@ -106,8 +104,7 @@ export function createWorkerPlacementDispatchStartup(options: {
     if (!eligibility.ok) {
       throw new DevicePlacementUnavailableError(deviceId, eligibility.error);
     }
-    // Workspace preparation consumes no worker slot. Keep identity and commands live;
-    // the node's launch owner admits the eventual turn against physical capacity.
+    // Workspace preparation consumes no slot; launch admits turns against live node capacity.
     return {
       node: eligibility.node,
       requirement: { ...requirement, consumesWorkerSlot: false },
@@ -274,7 +271,7 @@ export function createWorkerPlacementDispatchStartup(options: {
       }
     };
     assertAttachmentCurrent();
-    const credential = await environments.attachSession({
+    const { ownerEpoch } = await environments.attachSession({
       environmentId: provisioned.environmentId,
       ownerEpoch: provisioned.ownerEpoch,
       sessionId: request.sessionId,
@@ -295,7 +292,6 @@ export function createWorkerPlacementDispatchStartup(options: {
     });
     params.signal?.throwIfAborted();
     params.authorize?.();
-    const ownerEpoch = credential.ownerEpoch;
     let activated = false;
     let activationIndeterminate = false;
     let stoppingTunnel: Promise<void> | undefined;
@@ -335,7 +331,10 @@ export function createWorkerPlacementDispatchStartup(options: {
         assertAttachmentCurrent();
         requireAttachedEnvironment();
       };
-      const preparation = readWorkerProjectPreparation(params.environment.profileSnapshot.project);
+      const preparation =
+        params.workspace.kind === "repository" && params.workspace.repository.diskAuthority
+          ? undefined
+          : readWorkerProjectPreparation(params.environment.profileSnapshot.project);
       let lifecycleHomeDir: string | undefined;
       let assertPreparedBindingCurrent: (() => void) | undefined;
       let preparedRepository: Parameters<
@@ -392,6 +391,8 @@ export function createWorkerPlacementDispatchStartup(options: {
             ? await syncSessionRepositoryWorkspace({
                 markPhase: params.markPhase,
                 repository: params.workspace.repository,
+                retainedDisk: (workspaceDir) =>
+                  retainedRepositoryDisk(requireAttachedEnvironment(), request, workspaceDir),
                 preparedRepository,
                 readNativeCredential: request.readNativeCredential,
                 retainCredentialCleanup: params.retainCredentialCleanup,
@@ -403,6 +404,8 @@ export function createWorkerPlacementDispatchStartup(options: {
                 gitAuthor,
                 runSetupScript: request.runSetupScript,
                 assertCurrent: assertWorkspaceCurrent,
+                prepareCheckpointRecovery: () =>
+                  prepareCheckpointRecovery(placements, syncingPlacement, assertSyncOwner),
               })
             : await tunnel.syncWorkspace({
                 source: {
@@ -437,8 +440,7 @@ export function createWorkerPlacementDispatchStartup(options: {
             ? (command) =>
                 runProjectLifecycleCommand(provisioned.environmentId, ownerEpoch, command)
             : undefined,
-          // A completed activation is the existing durable witness. An interrupted
-          // first binding retries declared setup; commands should be idempotent.
+          // Retry setup only before first activation; declared commands must be idempotent.
           postCreate: params.environment.lastActivatedAtMs === null,
           assertCurrent: assertWorkspaceCurrent,
           signal: params.signal,

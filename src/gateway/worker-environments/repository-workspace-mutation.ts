@@ -8,6 +8,7 @@ import { withSessionEntryReadOnlyInWorker } from "../../config/sessions/session-
 import { captureSessionEntryMetadataRead } from "../../config/sessions/session-entry-source-authority.js";
 import { resolveSessionStorePathForScope } from "../../config/sessions/session-store-path.js";
 import { registerOpenClawAgentDatabaseAsyncResource } from "../../state/openclaw-agent-db-resources.js";
+import { getSessionRepositoryWorkspaceStore } from "../../state/session-repository-workspaces.js";
 import {
   placementTurnOwner,
   type WorkerSessionPlacementIdentity,
@@ -16,7 +17,12 @@ import {
 import type { WorkerSessionPlacementStore } from "./placement-store.js";
 import { isCurrentActiveWorkerEnvironment } from "./placement-target.js";
 import type { PlacementTurnClaimCurrentCheck } from "./placement-turn-claims.types.js";
+import {
+  assertRetainedWorkspaceDisk,
+  prepareRetainedWorkspaceTransfer,
+} from "./retained-workspace.js";
 import type { WorkerEnvironmentService } from "./service.js";
+import { stageSessionRepositoryCheckpoint } from "./session-repository-checkpoints.js";
 import {
   createWorkerWorkspaceReconcileRequest,
   type WorkerSessionWorkspace,
@@ -31,12 +37,96 @@ import { workerWorkspaceResultRef } from "./workspace-result-staging.js";
 
 export function createRepositoryWorkspaceMutationService(options: {
   placements: WorkerSessionPlacementStore;
-  environments: Pick<WorkerEnvironmentService, "get" | "startTunnel">;
+  environments: Pick<WorkerEnvironmentService, "get" | "startTunnel"> &
+    Partial<Pick<WorkerEnvironmentService, "inspectTurnLease">>;
   workspaceOperations: WorkerWorkspaceOperationCoordinator;
   resolveWorkspace: (identity: WorkerSessionPlacementIdentity) => Promise<WorkerSessionWorkspace>;
 }) {
   const { placements, environments } = options;
   return {
+    async captureCheckpoint(
+      identity: WorkerSessionPlacementIdentity,
+      assertCallerCurrent: () => void,
+    ): Promise<void> {
+      assertCallerCurrent();
+      const workspace = await options.resolveWorkspace(identity);
+      assertCallerCurrent();
+      if (workspace.kind !== "repository" || !workspace.repository.diskAuthority) {
+        return;
+      }
+      const placement = await placements.getAsync(identity.sessionId);
+      if (placement?.state !== "active") {
+        throw new Error("Retained repository publication requires its original active disk");
+      }
+      const disk = workspace.repository.diskAuthority;
+      const assertSourceCurrent = () => {
+        assertCallerCurrent();
+        const current = placements.get(identity.sessionId);
+        if (
+          current?.state !== "active" ||
+          current.generation !== placement.generation ||
+          current.sessionKey !== identity.sessionKey ||
+          current.agentId !== identity.agentId
+        ) {
+          throw new Error("Repository publication lost its exact placement owner");
+        }
+      };
+      const assertCurrent = () => {
+        assertSourceCurrent();
+        assertRetainedWorkspaceDisk(disk, environments.get(placement.environmentId), placement);
+      };
+      await options.workspaceOperations.run(placement.environmentId, async () => {
+        await prepareRetainedWorkspaceTransfer({
+          authority: disk,
+          placement,
+          environments,
+          assertCurrent: assertSourceCurrent,
+        });
+        assertCurrent();
+        const repository = await getSessionRepositoryWorkspaceStore().get(
+          workspace.repository.workspaceId,
+        );
+        assertCurrent();
+        if (!repository?.baseManifestHash) {
+          throw new Error("Repository publication has no admitted source baseline");
+        }
+        const tunnel = await environments.startTunnel({
+          environmentId: placement.environmentId,
+          ownerEpoch: placement.activeOwnerEpoch,
+        });
+        assertCurrent();
+        const quiescence = await tunnel.quiesceWorkspace(placement.remoteWorkspaceDir);
+        let result: Awaited<ReturnType<typeof tunnel.reconcileWorkspace>> | undefined;
+        try {
+          assertCurrent();
+          result = await tunnel.reconcileWorkspace({
+            remoteWorkspaceDir: placement.remoteWorkspaceDir,
+            baseManifestRef: repository.baseManifestHash,
+            source: {
+              kind: "repository",
+              authorize: assertCurrent,
+              referenceManifestRef: repository.manifestHash ?? repository.baseManifestHash,
+              acceptedManifestRef: repository.manifestHash ?? repository.baseManifestHash,
+              prepareCheckpoint: (payload) =>
+                stageSessionRepositoryCheckpoint({
+                  ...payload,
+                  workspaceId: repository.workspaceId,
+                  expectedRevision: repository.revision,
+                  assertCurrent,
+                }),
+            },
+          });
+          await verifyReconciledWorkspaceFinal(result, quiescence);
+          assertCurrent();
+        } finally {
+          try {
+            await result?.discardPreparedStagedResult();
+          } finally {
+            await quiescence.resume();
+          }
+        }
+      });
+    },
     async mutate<T>(
       params: WorkerSessionPlacementIdentity & {
         assertCurrent: () => void;

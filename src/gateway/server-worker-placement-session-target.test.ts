@@ -387,6 +387,7 @@ test("reclaim retains session generation through its workspace metadata commit",
       placements: {
         get: () => placement,
         getAsync: async () => placement,
+        listPendingWorkspaceResultsAsync: async () => [],
         waitForTurnClaimRelease: async () => {},
       },
       loadSessionRuntime: async () => sessionRuntime(),

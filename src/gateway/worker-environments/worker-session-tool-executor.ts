@@ -29,6 +29,7 @@ import { sha256Base64Url, sha256HexPrefixCore } from "../../infra/crypto-digest.
 import { normalizeAgentId } from "../../routing/session-key.js";
 import type { GatewayContextResolver } from "../server-methods/types.js";
 import type { WorkerConnectionIdentity } from "./connection-identity.js";
+import { resolveWorkerPlacementDestination } from "./placement-destination.js";
 import type { coordinateWorkerPlacementDispatch } from "./placement-dispatch-coordinator.js";
 import type { WorkerSessionPlacementStore } from "./placement-store.js";
 import {
@@ -42,6 +43,7 @@ import {
   type WorkerPortalToolExecutorDependencies,
 } from "./worker-portal-tool-executor.js";
 import {
+  createWorkerWorkshopCallRetention,
   serializeWorkerSessionToolError as serializeError,
   executeWorkerSessionToolWithReplay,
   serializeWorkerSessionToolResult as serializeResult,
@@ -289,6 +291,8 @@ export function createWorkerSessionToolExecutor(
           ...(operation.signal ? { signal: operation.signal } : {}),
           run: async () => {
             await assertChild();
+            // Recovery trusts this child's admitted placement, never the parent's old settings.
+            let childOwner: { environmentId: string; ownerEpoch: number } | undefined;
             const assertActiveChildPlacement = () => {
               const placement = params.placements.get(childSessionId);
               if (
@@ -303,16 +307,29 @@ export function createWorkerSessionToolExecutor(
                 environment.ownerEpoch !== placement.activeOwnerEpoch ||
                 environment.attachedSessionIds.length !== 1 ||
                 environment.attachedSessionIds[0] !== childSessionId ||
-                environment.profileId !== sourceEnvironment.profileId ||
-                environment.providerId !== sourceEnvironment.providerId ||
-                !isDeepStrictEqual(environment.profileSnapshot, sourceEnvironment.profileSnapshot)
+                (childOwner &&
+                  (placement.environmentId !== childOwner.environmentId ||
+                    environment.ownerEpoch !== childOwner.ownerEpoch))
               ) {
-                throw new Error("Cloud child placement does not match its parent profile");
+                throw new Error("Cloud child placement does not match its admitted worker owner");
               }
+              childOwner ??= {
+                environmentId: placement.environmentId,
+                ownerEpoch: environment.ownerEpoch,
+              };
             };
             const childPlacement = await params.placements.getAsync(childSessionId);
             assertSource();
             if (childPlacement?.state !== "active") {
+              const currentConfig = getRuntimeConfig();
+              const destination = resolveWorkerPlacementDestination({
+                cfg: currentConfig,
+                profileId:
+                  currentConfig.cloudWorkers?.requiredProfile ?? sourceEnvironment.profileId,
+              });
+              if (!destination.ok || !destination.value) {
+                throw new Error("Cloud child requires a configured worker profile");
+              }
               try {
                 if (
                   childPlacement &&
@@ -328,12 +345,8 @@ export function createWorkerSessionToolExecutor(
                       sessionId: childSessionId,
                       sessionKey: operation.childSessionKey,
                       agentId: targetAgentId,
-                      profileId: sourceEnvironment.profileId,
+                      ...destination.value,
                       executionMode: "worker-turn",
-                      inheritedProfile: {
-                        providerId: sourceEnvironment.providerId,
-                        profileSnapshot: sourceEnvironment.profileSnapshot,
-                      },
                     },
                     undefined,
                     assertSource,
@@ -580,27 +593,6 @@ export function createWorkerSessionToolExecutor(
     } finally {
       inFlight.delete(inFlightKey);
     }
-  };
-}
-
-export function createWorkerWorkshopCallRetention() {
-  const calls = new Map<string, { digest: string; result: ReturnType<AnyAgentTool["execute"]> }>();
-  return (
-    toolCallId: string,
-    args: unknown,
-    execute: () => ReturnType<AnyAgentTool["execute"]>,
-  ) => {
-    const digest = JSON.stringify(args);
-    const prior = calls.get(toolCallId);
-    if (prior && prior.digest !== digest) {
-      throw new Error("Workshop tool call id was reused with different arguments.");
-    }
-    if (!prior && calls.size >= 64) {
-      throw new Error("This turn reached its Workshop operation limit. Continue in a fresh turn.");
-    }
-    const result = prior?.result ?? execute();
-    calls.set(toolCallId, { digest, result });
-    return result;
   };
 }
 

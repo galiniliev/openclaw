@@ -441,6 +441,8 @@ export async function createWorkerEnvironmentStore(
         revocationSubscriptions.delete(unsubscribe);
       };
     },
+    recordRetention: (input: Input<"recordRetention">, assertCurrent?: () => void) =>
+      mutate("workerEnvironments.recordRetention", { input }, assertCurrent),
     createIntent: (input: Input<"createIntent">, assertCurrent?: () => void) =>
       mutate("workerEnvironments.createIntent", { input }, assertCurrent),
     ensureNodeEnrollment: (input: string) =>
@@ -469,6 +471,16 @@ export async function createWorkerEnvironmentStore(
       mutate("workerEnvironments.adoptProvisionCleanupFailure", { input }),
     requestDestroy({ assertCurrent, ...input }: Input<"requestDestroy">) {
       return mutate("workerEnvironments.requestDestroy", { input }, assertCurrent);
+    },
+    resumeParkedRetainedWorkspaceOwner({
+      assertCurrent,
+      ...input
+    }: Input<"resumeParkedRetainedWorkspaceOwner">) {
+      return mutate(
+        "workerEnvironments.resumeParkedRetainedWorkspaceOwner",
+        { input },
+        assertCurrent,
+      );
     },
     refreshBootstrapReceipt({ assertCurrent, ...input }: Input<"refreshBootstrapReceipt">) {
       return mutate("workerEnvironments.refreshBootstrapReceipt", { input }, assertCurrent);

@@ -1,4 +1,5 @@
 import type { Selectable } from "kysely";
+import { NativeWorkerLossRecoverySchema } from "../../agents/harness/native-session/worker-placement.js";
 import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
@@ -169,6 +170,13 @@ export function fromRow(row: PlacementRow): WorkerSessionPlacementRecord {
     turnClaim,
     ...parsed,
     recoveryError,
+    ...(row.confirmed_loss_recovery_json
+      ? {
+          confirmedLossRecovery: NativeWorkerLossRecoverySchema.parse(
+            JSON.parse(row.confirmed_loss_recovery_json),
+          ),
+        }
+      : {}),
   };
   assertRecordShape(record);
   return record;
@@ -361,7 +369,10 @@ export function transitionValues(
     session_key: current.sessionKey,
     execution_mode: current.executionMode,
     state: to,
-    confirmed_loss_recovery_json: null,
+    confirmed_loss_recovery_json:
+      to === "local" || to === "requested" || !current.confirmedLossRecovery
+        ? null
+        : JSON.stringify(current.confirmedLossRecovery),
     environment_id: environmentId,
     transition_generation: generation,
     active_owner_epoch: activeOwnerEpoch,

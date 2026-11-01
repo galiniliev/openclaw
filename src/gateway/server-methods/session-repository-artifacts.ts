@@ -21,6 +21,11 @@ type StoredRepository = Extract<
 
 async function readArtifacts(access: StoredRepository, previewPath?: string, download = false) {
   access.assertCurrent();
+  if (access.repository.diskAuthority) {
+    throw new Error(
+      "Repository files are authoritative on the retained disk; resume the original session to read or export them",
+    );
+  }
   if (!access.repository.checkpointRef) {
     return undefined;
   }

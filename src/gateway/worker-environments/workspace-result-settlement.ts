@@ -14,6 +14,7 @@ import {
   type WorkerWorkspaceConflictReport,
   type WorkerWorkspaceResultConflict,
 } from "./workspace-conflicts.js";
+import { measureReconcileStep } from "./workspace-reconcile-timing.js";
 import {
   adoptStagedWorkerWorkspaceHistory,
   deleteStagedWorkerWorkspaceResult,
@@ -105,26 +106,30 @@ export function createWorkspaceResultJournal(params: {
   return {
     adapter: {
       load: () =>
-        params.placements.loadWorkspaceReconciliation(owner, undefined, params.assertCurrent),
+        measureReconcileStep("journal-load", () =>
+          params.placements.loadWorkspaceReconciliation(owner, undefined, params.assertCurrent),
+        ),
       begin: (next: Parameters<typeof params.placements.beginWorkspaceReconciliation>[1]) => {
         params.assertCurrent?.();
-        return params.placements.beginWorkspaceReconciliation(owner, next, params.assertCurrent);
+        return measureReconcileStep("journal-begin", () =>
+          params.placements.beginWorkspaceReconciliation(owner, next, params.assertCurrent),
+        );
       },
       commit: async (manifestRef: string) => {
         (params.assertCommitCurrent ?? params.assertCurrent)?.();
-        await params.placements.updateWorkspaceBaseManifest(
-          { claim: params.turnClaim, manifestRef },
-          params.assertCurrent,
-          params.current,
+        await measureReconcileStep("journal-commit", () =>
+          params.placements.updateWorkspaceBaseManifest(
+            { claim: params.turnClaim, manifestRef },
+            params.assertCurrent,
+            params.current,
+          ),
         );
         manifestAccepted = true;
       },
       abort: () => {
         params.assertCurrent?.();
-        return params.placements.abortWorkspaceReconciliation(
-          owner,
-          undefined,
-          params.assertCurrent,
+        return measureReconcileStep("journal-abort", () =>
+          params.placements.abortWorkspaceReconciliation(owner, undefined, params.assertCurrent),
         );
       },
     },
@@ -168,11 +173,13 @@ export async function finalizeWorkspaceResultConflicts(params: {
     supersededConflict.stagedResultRef !== params.stagedResultRef
   ) {
     // Delete the inspectable result before replacing its last durable pointer.
-    await deleteStagedWorkerWorkspaceResult({
-      root: sessionWorkspaceRoot(params.workspace),
-      stagedResultRef: supersededConflict.stagedResultRef,
-      assertCurrent: params.assertCurrent,
-    });
+    await measureReconcileStep("staged-cleanup-delete", () =>
+      deleteStagedWorkerWorkspaceResult({
+        root: sessionWorkspaceRoot(params.workspace),
+        stagedResultRef: supersededConflict.stagedResultRef,
+        assertCurrent: params.assertCurrent,
+      }),
+    );
   }
 
   let conflict: Required<WorkerWorkspaceResultConflict> | undefined;
@@ -213,18 +220,23 @@ export async function settleStagedWorkspaceResult(
 ): Promise<WorkerSessionPlacementRecord> {
   params.assertCurrent();
   if (params.turnClaim.owner.kind === "worker" && params.closeToolState !== false) {
-    await params.placements.closeWorkerTurnToolState(params.turnClaim);
+    await measureReconcileStep("turn-tools-close", () =>
+      params.placements.closeWorkerTurnToolState(params.turnClaim),
+    );
     params.assertCurrent();
   }
+  const stagedResultRef = params.stagedResultRef;
   const cleanupRef =
-    params.workspace.kind === "local" && params.stagedResultRef && !params.conflictRetained
-      ? isWorkerWorkspaceResultCleanupRef(params.stagedResultRef)
-        ? params.stagedResultRef
-        : await moveStagedWorkerWorkspaceResultToCleanup({
-            root: sessionWorkspaceRoot(params.workspace),
-            stagedResultRef: params.stagedResultRef,
-            assertCurrent: params.assertCurrent,
-          })
+    params.workspace.kind === "local" && stagedResultRef && !params.conflictRetained
+      ? isWorkerWorkspaceResultCleanupRef(stagedResultRef)
+        ? stagedResultRef
+        : await measureReconcileStep("staged-cleanup-move", () =>
+            moveStagedWorkerWorkspaceResultToCleanup({
+              root: sessionWorkspaceRoot(params.workspace),
+              stagedResultRef,
+              assertCurrent: params.assertCurrent,
+            }),
+          )
       : undefined;
   params.assertCurrent();
   await params.beforeComplete();
@@ -234,17 +246,21 @@ export async function settleStagedWorkspaceResult(
   }
   const completed = params.complete
     ? await params.complete()
-    : await params.placements.completeWorkspaceResultAndReleaseTurn(
-        params.turnClaim,
-        params.assertCurrent,
+    : await measureReconcileStep("claim-release", () =>
+        params.placements.completeWorkspaceResultAndReleaseTurn(
+          params.turnClaim,
+          params.assertCurrent,
+        ),
       );
   await params.afterComplete?.(completed);
   if (cleanupRef) {
     // Cleanup refs remain discoverable after the SQLite fence disappears.
-    await deleteStagedWorkerWorkspaceResult({
-      root: sessionWorkspaceRoot(params.workspace),
-      stagedResultRef: cleanupRef,
-    }).catch(() => undefined);
+    await measureReconcileStep("staged-cleanup-delete", () =>
+      deleteStagedWorkerWorkspaceResult({
+        root: sessionWorkspaceRoot(params.workspace),
+        stagedResultRef: cleanupRef,
+      }),
+    ).catch(() => undefined);
   }
   return completed;
 }

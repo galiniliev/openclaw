@@ -145,8 +145,9 @@ export async function prepareGatewayLifecycle(params: {
     streamBroker: nodeDesktopStreamBroker,
   });
   nodeDesktopServiceRef.current = nodeDesktopService;
-  workerPlacementRuntime?.bindNodeWorkerAvailability((nodeId, options) =>
-    waitForNodeWorkerSupervisor(nodeRegistry, nodeId, options),
+  workerPlacementRuntime?.bindNodeWorkerAvailability(
+    (nodeId, options) => waitForNodeWorkerSupervisor(nodeRegistry, nodeId, options),
+    async (nodeId) => Boolean(await nodeWorkerSupervisorTransport.getCurrentNode(nodeId)),
   );
   bindDeviceNodeControl?.(nodeWorkerSupervisorTransport);
   bindWorkerNodeDesktopControl?.(nodeWorkerSupervisorTransport);

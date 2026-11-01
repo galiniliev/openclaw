@@ -250,13 +250,19 @@ export function createNodeWorkspaceTransferService(options: {
       : route.manifestRef === capability.manifestRef;
   };
 
+  function replaceContext(
+    params: TransferPreparation & { kind: "attachments" },
+  ): Promise<TransferContext>;
   function replaceContext(params: RepositoryPreparation & { kind: "repository" }): Promise<void>;
   function replaceContext(
     params: SyncPreparation & { kind: "sync" },
   ): Promise<{ snapshot: NodeWorkspaceTransferSnapshot; token: string }>;
   async function replaceContext(
-    params: (RepositoryPreparation & { kind: "repository" }) | (SyncPreparation & { kind: "sync" }),
-  ): Promise<void | { snapshot: NodeWorkspaceTransferSnapshot; token: string }> {
+    params:
+      | (RepositoryPreparation & { kind: "repository" })
+      | (SyncPreparation & { kind: "sync" })
+      | (TransferPreparation & { kind: "attachments" }),
+  ): Promise<void | TransferContext | { snapshot: NodeWorkspaceTransferSnapshot; token: string }> {
     const { authorize, ...owner } = params;
     const getOwner = options.getOwner;
     const assertCurrent = () => {
@@ -266,12 +272,27 @@ export function createNodeWorkspaceTransferService(options: {
         !owner.isAuthorized() ||
         !isNodeWorkspaceTransferOwnerCurrent(owner, getOwner(owner.environmentId))
       ) {
-        throw new Error("Node workspace transfer owner is no longer current");
+        throw new Error(
+          params.kind === "attachments"
+            ? "Worker attachment transfer authority closed"
+            : "Node workspace transfer owner is no longer current",
+        );
       }
     };
     return await contextOperations.enqueue(params.environmentId, async () => {
       assertCurrent();
       const previous = contexts.get(params.environmentId);
+      if (params.kind === "attachments" && previous) {
+        if (
+          previous.ownerEpoch !== owner.ownerEpoch ||
+          previous.sessionId !== owner.sessionId ||
+          !isCurrentContext(previous)
+        ) {
+          throw new Error("Worker attachment transfer authority closed");
+        }
+        // Attachments borrow transport custody; never reset a workspace base or an active upload.
+        return previous;
+      }
       if (previous) {
         await closeContext(previous);
         assertCurrent();
@@ -309,14 +330,16 @@ export function createNodeWorkspaceTransferService(options: {
         contexts.set(context.environmentId, context);
         // Only this download retains initiating-turn authority; future workspace
         // operations keep their independent placement owner.
-        return snapshot
-          ? {
-              snapshot,
-              token: mintDownload(context, snapshot.manifestRef, () =>
-                isOperationAuthorized(authorize),
-              ),
-            }
-          : undefined;
+        return params.kind === "attachments"
+          ? context
+          : snapshot
+            ? {
+                snapshot,
+                token: mintDownload(context, snapshot.manifestRef, () =>
+                  isOperationAuthorized(authorize),
+                ),
+              }
+            : undefined;
       } catch (error) {
         await closeContext(context);
         throw error;
@@ -328,14 +351,23 @@ export function createNodeWorkspaceTransferService(options: {
     initialize: ensureTemporaryRoot,
 
     async prepareAttachments(params: {
-      environmentId: string;
+      owner: Omit<TransferPreparation, "authorize">;
       localPath: string;
       isAuthorized: () => boolean;
       signal: AbortSignal;
     }) {
       params.signal.throwIfAborted();
-      const context = contexts.get(params.environmentId);
-      if (!context || !isCurrentContext(context) || !params.isAuthorized()) {
+      const context = await replaceContext({
+        ...params.owner,
+        kind: "attachments",
+        authorize: () => {
+          params.signal.throwIfAborted();
+          if (!params.isAuthorized()) {
+            throw new Error("Worker attachment transfer authority closed");
+          }
+        },
+      });
+      if (!isCurrentContext(context) || !params.isAuthorized()) {
         throw new Error("Worker attachment transfer authority closed");
       }
       const root = await fsp.realpath(params.localPath);

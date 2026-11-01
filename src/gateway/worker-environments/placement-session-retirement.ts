@@ -90,6 +90,16 @@ export function createPlacementSessionRetirement(deps: PlacementSessionRetiremen
     };
   };
   const retireCurrent = async (placement: WorkerSessionPlacementRecord): Promise<boolean> => {
+    const environment = placement.environmentId
+      ? deps.environments.get(placement.environmentId)
+      : undefined;
+    if (
+      environment?.retention &&
+      environment.state !== "destroyed" &&
+      !(environment.state === "failed" && environment.leaseId === null)
+    ) {
+      return false;
+    }
     if (placement.turnClaim) {
       return false;
     }

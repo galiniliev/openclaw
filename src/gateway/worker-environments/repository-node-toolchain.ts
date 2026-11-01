@@ -1,8 +1,9 @@
+import { INSPECT_NODE_TOOLCHAIN_JS } from "./node-toolchain-inspection.js";
 import { NODE_TOOLCHAIN_INSTALL_SH } from "./node-toolchain.js";
 import { REPOSITORY_NODE_REQUIREMENT_SOURCE } from "./repository-node-requirement.generated.js";
 
 /** Runs inside the supported bootstrap Node, before any repository setup command. */
-export const PREPARE_REPOSITORY_NODE_JS = `async (workspaceDir, homeDir, machineHome) => {
+export const PREPARE_REPOSITORY_NODE_JS = `async (workspaceDir, homeDir, machineHome, onVerifiedToolchain) => {
   if (process.platform !== "linux" || !["x64", "arm64"].includes(process.arch)) return;
   const fs = require("node:fs");
   const path = require("node:path");
@@ -19,7 +20,7 @@ export const PREPARE_REPOSITORY_NODE_JS = `async (workspaceDir, homeDir, machine
   const requirement = (${REPOSITORY_NODE_REQUIREMENT_SOURCE})(files);
   const manifest = files["package.json"] ? JSON.parse(files["package.json"]) : {};
   let nodeBin = path.dirname(process.execPath);
-  let semver, version;
+  let semver, version, selectedToolchain;
   const fetchText = async (url) => {
     try {
       const response = await fetch(url, { signal: AbortSignal.timeout(120000), redirect: "error" });
@@ -55,6 +56,11 @@ export const PREPARE_REPOSITORY_NODE_JS = `async (workspaceDir, homeDir, machine
     });
     if (installed.status !== 0) throw new Error("Repository Node installation failed; check nodejs.org access, disk space and image prerequisites, then retry: " + (installed.stderr || installed.error?.message || installed.status));
     nodeBin = installed.stdout.trim();
+    selectedToolchain = { version, platform: "linux", arch: process.arch, archiveSha256: digest };
+    // Legacy caches remain usable for commands, but cannot claim snapshot admission.
+    if (onVerifiedToolchain && fs.existsSync(path.join(nodeBin, "..", ".archive.tgz"))) {
+      onVerifiedToolchain(await (${INSPECT_NODE_TOOLCHAIN_JS})(machineHome, selectedToolchain));
+    }
   }
   const bin = path.join(homeDir, ".local", "bin");
   fs.mkdirSync(bin, { recursive: true, mode: 0o700 });

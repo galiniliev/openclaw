@@ -15,6 +15,13 @@ export function pruneTerminalWorkerEnvironments(
     .select("environment_id")
     .where("environment_id", "in", sqliteStringSet(input.environmentIds))
     .where("state", "in", WORKER_ENVIRONMENT_TERMINAL_STATES)
+    .where((eb) =>
+      eb.or([
+        eb("session_retention_json", "is", null),
+        eb("state", "=", "destroyed"),
+        eb.and([eb("state", "=", "failed"), eb("lease_id", "is", null)]),
+      ]),
+    )
     .where("state_changed_at_ms", "<=", input.cutoffMs)
     .where((eb) => eb.or([eb("state", "!=", "orphaned"), eb("preparation_key", "is", null)]))
     .where((eb) =>

@@ -78,7 +78,10 @@ describe("worker placement idle suspension", () => {
     const idleSweep = createWorkerPlacementIdleSweep({
       placements,
       environments: harness.environments,
-      dispatch: { reclaim: options.reclaim ?? harness.service.reclaim },
+      dispatch: {
+        reclaim: options.reclaim ?? harness.service.reclaim,
+        pause: harness.service.pause,
+      },
       reportChanges: options.reportChanges ?? ((operation) => operation()),
       getConfig: () => ({ cloudWorkers: { profiles: { [REQUEST.profileId]: profile } } }),
       isPlacementOperationInFlight,

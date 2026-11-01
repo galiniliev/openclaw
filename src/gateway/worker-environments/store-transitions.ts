@@ -260,6 +260,14 @@ export function createWorkerEnvironmentTransitionOps(db: EngineConnection, now: 
           : patch.attachedSessionIds === undefined
             ? current.attachedSessionIds
             : normalizeAttachedSessionIds(patch.attachedSessionIds);
+      if (
+        to === "attached" &&
+        current.retention &&
+        (attachedSessionIds.length !== 1 ||
+          attachedSessionIds[0] !== current.retention.owner.sessionId)
+      ) {
+        throw new Error("Retained worker can attach only to its original session owner");
+      }
       assertShape({
         state: to,
         leaseId,

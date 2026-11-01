@@ -1,6 +1,7 @@
 import type {
   PlacementFailureActions,
   WorkerDispatchEnvironmentService,
+  WorkerDispatchPlacement,
   WorkerDispatchPlacementStore,
 } from "./placement-dispatch-failure.js";
 import type { WorkerSessionPlacementProjection } from "./placement-read-projection.types.js";
@@ -16,6 +17,11 @@ export type WorkerPlacementRecoveryAdmission = (
 
 export type PlacementRecoveryDeps = {
   isShuttingDown?: () => boolean;
+  hasCurrentRunner?: (nodeId: string) => boolean;
+  waitForRecoveryNode?: (
+    placement: Extract<WorkerDispatchPlacement, { state: "active" | "draining" }>,
+    assertCurrent: () => void,
+  ) => Promise<void>;
   placements: WorkerDispatchPlacementStore;
   environments: Pick<
     WorkerDispatchEnvironmentService,
@@ -37,6 +43,7 @@ export type PlacementRecoveryDeps = {
     projection: WorkerSessionPlacementProjection,
     environmentId?: string,
   ) => Promise<Set<string>>;
+  needsAcceptedWorkspacePublication?: (claim: WorkerSessionTurnClaim) => Promise<boolean>;
   prepareAcceptedWorkspacePublication?: (claim: WorkerSessionTurnClaim) => Promise<void>;
   publishAcceptedWorkspace?: (claim: WorkerSessionTurnClaim) => Promise<void>;
   prepareGatewayMove?: (

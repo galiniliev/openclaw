@@ -20,6 +20,7 @@ import {
   setRuntimeConfigSnapshot,
 } from "../../config/runtime-snapshot.js";
 import type { SessionEntry } from "../../config/sessions.js";
+import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
   claimAgentRunDelegatedAuthority,
   releaseAgentRunDelegatedAuthority,
@@ -229,7 +230,17 @@ export async function createWorkerSessionToolTestFixture(
     path.join(await fs.realpath(os.tmpdir()), "openclaw-worker-tools-"),
   );
   const database = openOpenClawStateDatabase({ env: { OPENCLAW_STATE_DIR: root } });
-  const cfg = {};
+  const cfg: OpenClawConfig = {
+    cloudWorkers: {
+      profiles: {
+        "cloud-profile": {
+          provider: "latest-provider",
+          install: "bundle",
+          settings: { region: "latest" },
+        },
+      },
+    },
+  };
   setRuntimeConfigSnapshot(cfg);
   const placements = createWorkerSessionPlacementStore({ database });
   await activate(source);
@@ -485,6 +496,7 @@ export async function createWorkerSessionToolTestFixture(
   return {
     root,
     database,
+    cfg,
     placements,
     identity,
     execute,

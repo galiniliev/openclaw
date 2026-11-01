@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import { readRegularFile } from "@openclaw/fs-safe/advanced";
 import { normalizeMimeType } from "@openclaw/media-core/mime";
 import { readNonBlankString } from "@openclaw/normalization-core/string-coerce";
-import type { Command } from "commander";
+import { Option, type Command } from "commander";
 import {
   buildCloudflareAccessHeaders,
   CF_ACCESS_CLIENT_ID_HEADER,
@@ -43,6 +43,7 @@ type ConnectCommandOptions = {
   ephemeral?: boolean;
   sessionHost?: boolean;
   targetFile?: string;
+  freshBootstrap?: boolean;
   displayName?: string;
   commands?: string[];
   allCommands?: boolean;
@@ -238,6 +239,7 @@ export function registerConnectCli(program: Command): void {
       false,
     )
     .option("--target-file <path>", "Read the connect target from a private file and remove it")
+    .addOption(new Option("--fresh-bootstrap").hideHelp())
     .option("--display-name <name>", "Override the node display name")
     .addHelpText(
       "after",
@@ -327,7 +329,7 @@ export function registerConnectCli(program: Command): void {
             : {}),
           // Environment-managed nodes reuse their persisted device token when a provider
           // replays setup after the one-shot bootstrap credential has been consumed.
-          preferGatewayBootstrapToken: opts.ephemeral !== true,
+          preferGatewayBootstrapToken: opts.freshBootstrap === true || opts.ephemeral !== true,
           ...(forceWorkerRuns ? { forceWorkerRuns: true } : {}),
           ...(opts.ephemeral === true ? { ephemeral: true } : {}),
           displayName: opts.displayName,

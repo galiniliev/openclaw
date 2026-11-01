@@ -5,12 +5,20 @@ import { resolveSandboxConfigForAgent } from "../../agents/sandbox/config.js";
 import { createSandboxFsBridge } from "../../agents/sandbox/fs-bridge.js";
 import { createPreprovisionedSshSandboxBackend } from "../../agents/sandbox/ssh-backend.js";
 import type { SandboxConfig, SandboxContext } from "../../agents/sandbox/types.js";
+import type {
+  PreparedSessionPlacementSandbox,
+  SessionPlacementSandboxParams,
+} from "../../agents/session-placement-admission.js";
 import { resolveSessionSkillResourceMounts } from "../../agents/session-placement-skill-resources.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { WorkerSessionPlacementRecord } from "./placement-record.js";
-import { isWorkerEnvironmentAttachedTo } from "./placement-target.js";
+import {
+  assertWorkerSandboxEnvironment,
+  isWorkerEnvironmentAttachedTo,
+} from "./placement-target.js";
 import type { WorkerEnvironmentService } from "./service.js";
 import { resolveWorkerSshSandboxSettings } from "./ssh.js";
+import type { WorkerTurnLauncherOptions } from "./worker-turn-launcher.types.js";
 
 type ActiveRemoteExecPlacement = Extract<WorkerSessionPlacementRecord, { state: "active" }>;
 
@@ -26,6 +34,8 @@ type RemoteExecPlacementSandbox = SandboxContext & {
         placementEnvironmentId: string;
         placementSessionId: string;
         placementOwnerEpoch: number;
+        placementRetainedSession?: true;
+        placementRequireExistingNativeState?: true;
       }
     | {
         backendId: "ssh";
@@ -124,11 +134,32 @@ export async function createRemoteExecPlacementSandbox(params: {
     assertCurrentEnvironment();
     return {
       ...common,
+      nativeWorkerPlacement: {
+        owner: {
+          agentId: placement.agentId,
+          sessionId: placement.sessionId,
+          sessionKey: placement.sessionKey,
+          environmentId: environment.environmentId,
+          ownerEpoch: environment.ownerEpoch,
+          ...(environment.retention
+            ? { retentionOwnerBinding: environment.retention.ownerBinding }
+            : {}),
+        },
+        ...(placement.confirmedLossRecovery ? { recovery: placement.confirmedLossRecovery } : {}),
+      },
       backendId: "node",
       placementNodeId: environment.nodeDeviceId,
       placementEnvironmentId: environment.environmentId,
       placementSessionId: placement.sessionId,
       placementOwnerEpoch: environment.ownerEpoch,
+      ...(environment.retention
+        ? {
+            placementRetainedSession: true as const,
+            ...(environment.retention.receipt?.computeWindow.id !== environment.leaseId
+              ? { placementRequireExistingNativeState: true as const }
+              : {}),
+          }
+        : {}),
     };
   }
   const sshEndpoint = environment.sshEndpoint;
@@ -168,4 +199,48 @@ export async function createRemoteExecPlacementSandbox(params: {
   const sandbox: RemoteExecPlacementSandbox = { ...common, backendId: "ssh", backend };
   sandbox.fsBridge = backend.createFsBridge?.({ sandbox }) ?? createSandboxFsBridge({ sandbox });
   return sandbox;
+}
+
+export async function prepareRemoteExecPlacementSandbox(
+  options: Pick<WorkerTurnLauncherOptions, "placements" | "environments" | "resolveWorkspace">,
+  params: SessionPlacementSandboxParams,
+): Promise<PreparedSessionPlacementSandbox> {
+  using cleanup = new DisposableStack();
+  const prepared = await options.placements.prepareRuntimeRefresh(params.sessionId);
+  cleanup.defer(prepared.release);
+  const retain = (
+    sandbox: SandboxContext | null,
+    assertCurrent = prepared.assertCurrent,
+  ): PreparedSessionPlacementSandbox => {
+    const lifetime = cleanup.move();
+    return { sandbox, assertCurrent, [Symbol.dispose]: () => lifetime.dispose() };
+  };
+  const placement = prepared.placement;
+  if (
+    placement?.state !== "active" ||
+    placement.executionMode !== "remote-exec" ||
+    placement.agentId !== params.agentId ||
+    placement.sessionKey !== params.sessionKey
+  ) {
+    return retain(null);
+  }
+  const workspace = await options.resolveWorkspace({
+    sessionId: placement.sessionId,
+    agentId: placement.agentId,
+    sessionKey: placement.sessionKey,
+  });
+  prepared.assertCurrent();
+  const sandbox = await createRemoteExecPlacementSandbox({
+    config: params.config,
+    environments: options.environments,
+    workspaceDir: workspace.kind === "local" ? workspace.path : placement.remoteWorkspaceDir,
+    placement,
+  });
+  const assertCurrent = () => {
+    prepared.assertCurrent();
+    const environment = options.environments.get(placement.environmentId);
+    assertWorkerSandboxEnvironment(environment, placement, sandbox);
+  };
+  assertCurrent();
+  return retain(sandbox, assertCurrent);
 }

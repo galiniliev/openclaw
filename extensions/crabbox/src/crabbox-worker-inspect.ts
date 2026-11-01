@@ -6,6 +6,7 @@ import {
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import { parseCrabboxJson, sanitizeCrabboxNotice } from "./crabbox-worker-command.js";
 import { parseCrabboxDurationMs } from "./crabbox-worker-profile.js";
+import { parseCrabboxRetention } from "./crabbox-worker-retention.js";
 
 export type CrabboxLeaseLifetime = {
   expiresAtMs?: number;
@@ -91,8 +92,15 @@ export function parseInspectJson(stdout: string) {
   }
 
   const failureError = nonEmptyString(value.failureError);
+  const azureSandboxId =
+    value.provider === "azure-sandbox" ? nonEmptyString(value.serverId) : undefined;
+  if (azureSandboxId && !/^[A-Za-z0-9._()-]{1,256}$/u.test(azureSandboxId)) {
+    throw new Error("Crabbox inspect returned an invalid Sandbox resource identity");
+  }
   const lifetime = parseCrabboxLeaseLifetime(value);
   return {
+    ...(azureSandboxId ? { azureSandboxId } : {}),
+    ...(value.retention === undefined ? {} : { retention: parseCrabboxRetention(value.retention) }),
     id,
     state,
     tailscaleEnabled,

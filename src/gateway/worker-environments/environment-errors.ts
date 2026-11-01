@@ -29,6 +29,14 @@ export class WorkerEnvironmentServiceError extends Error {
 /** Maintenance interruption retains the lease for the next reconciliation. */
 export class WorkerEnvironmentReconcileInterruptedError extends Error {}
 
+/** A provider observation failed without establishing loss of the retained resource. */
+export class WorkerRetainedLeaseInspectionUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super(`Retained worker inspection unavailable: ${boundedWorkerError(cause)}`, { cause });
+    this.name = "WorkerRetainedLeaseInspectionUnavailableError";
+  }
+}
+
 export const workerEnvironmentServiceError = (
   code: WorkerEnvironmentServiceErrorCode,
   message: string,

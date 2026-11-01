@@ -291,7 +291,12 @@ it.each([
   });
   await prepareSync(service, workspaceDir);
   const prepared = await service.prepareAttachments({
-    environmentId: "environment",
+    owner: {
+      environmentId: "environment",
+      ownerEpoch: 1,
+      sessionId: "session",
+      isAuthorized: () => true,
+    },
     localPath: source,
     isAuthorized: () => getAdmittedRunDelegatedAuthority(admitted) !== undefined,
     signal: controller.signal,

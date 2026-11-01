@@ -132,14 +132,6 @@ export async function finishGatewayStartup(params: {
     "gateway.ws-imports",
     () => import("./server/ws-connection.js"),
   );
-  if (workerEnvironmentService) {
-    await startWorkerHumanPresence({
-      clients,
-      service: workerEnvironmentService,
-      log,
-      registerSidecar: registerGatewayLifetimeSidecars,
-    });
-  }
   await startupTrace.measure("gateway.ws-attach", () =>
     attachGatewayWsConnectionHandler({
       wss: runtime.wss,
@@ -308,6 +300,15 @@ export async function finishGatewayStartup(params: {
               prepared.publish();
               startupState.pendingReason = "startup-sidecars";
               prepared.afterCommit();
+              // Presence reconciliation consumes executable plugin policy before worker recovery.
+              if (workerEnvironmentService) {
+                await startWorkerHumanPresence({
+                  clients,
+                  service: workerEnvironmentService,
+                  log,
+                  registerSidecar: registerGatewayLifetimeSidecars,
+                });
+              }
               // Nodes can finish their handshake before deferred plugins attach.
               const nodeCapabilitySurfaces = indexPluginNodeCapabilitySurfaces(
                 getPluginNodeCapabilities(),

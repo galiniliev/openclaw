@@ -58,7 +58,10 @@ async function runConnect(args: string[]) {
 }
 
 describe("connect setup-code replay", () => {
-  it("reconnects an ephemeral node with its saved token without sending expired bootstrap auth", async () => {
+  it.each([
+    { name: "saved device token", fresh: false },
+    { name: "fresh bootstrap ticket", fresh: true },
+  ])("reconnects an ephemeral node with its $name", async ({ fresh }) => {
     await withOpenClawTestState({ label: "connect-replay" }, async (state) => {
       const claim = await acquireTestPortBlock({ offsets: [0] });
       const server = new WebSocketServer({ host: "127.0.0.1", port: claim.port });
@@ -90,8 +93,8 @@ describe("connect setup-code replay", () => {
         process.env.OPENCLAW_GATEWAY_TOKEN = "synthetic-unrelated-gateway-token";
         const code = encodePairingSetupCode({
           url: `ws://127.0.0.1:${claim.port}`,
-          bootstrapToken: "synthetic-expired-bootstrap",
-          expiresAtMs: 1,
+          bootstrapToken: fresh ? "synthetic-fresh-bootstrap" : "synthetic-expired-bootstrap",
+          expiresAtMs: fresh ? Date.now() + 60_000 : 1,
         });
         const targetFile = state.path("setup-code");
         await fs.writeFile(targetFile, code, { mode: 0o600 });
@@ -114,7 +117,12 @@ describe("connect setup-code replay", () => {
             );
           });
         });
-        running = runConnect(["--target-file", targetFile, "--ephemeral"]);
+        running = runConnect([
+          "--target-file",
+          targetFile,
+          "--ephemeral",
+          ...(fresh ? ["--fresh-bootstrap"] : []),
+        ]);
         await Promise.race([
           connected.promise,
           running.then(() => {
@@ -132,9 +140,12 @@ describe("connect setup-code replay", () => {
           role: "node",
           device: { id: identity.deviceId },
         });
-        expect(connect?.params).toHaveProperty("auth", {
-          deviceToken: "synthetic-paired-node-token",
-        });
+        expect(connect?.params).toHaveProperty(
+          "auth",
+          fresh
+            ? { bootstrapToken: "synthetic-fresh-bootstrap" }
+            : { deviceToken: "synthetic-paired-node-token" },
+        );
         await expect(fs.stat(targetFile)).rejects.toMatchObject({ code: "ENOENT" });
       } finally {
         stop();

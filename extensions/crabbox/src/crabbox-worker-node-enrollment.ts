@@ -13,30 +13,14 @@ import {
 } from "./crabbox-worker-runtime-verification.js";
 import {
   createCrabboxWorkerStateDirScript,
+  CLOUD_SETUP_CODE_ENV,
+  CLOUD_BOOTSTRAP_TOKEN_ENV,
+  CLOUD_WORKER_CODEX_ENV,
+  CRABBOX_LINUX_PLATFORM_TRUST_SETUP,
   wrapCrabboxNodeScript,
 } from "./crabbox-worker-script.js";
 import { CRABBOX_SETUP_TIMEOUT_MS } from "./crabbox-worker-timeouts.js";
 
-const CLOUD_SETUP_CODE_ENV = "CRABBOX_WORKER_SETUP_CODE";
-const CLOUD_BOOTSTRAP_TOKEN_ENV = "CRABBOX_WORKER_BOOTSTRAP_TOKEN";
-const CLOUD_WORKER_CODEX_ENV = "CRABBOX_WORKER_CODEX_CONFIG";
-
-// Snapshot forks skip profile setup, but providers can inject fresh platform certificates.
-const LINUX_PLATFORM_TRUST_SETUP = `set -eu
-if [ -x /usr/sbin/update-ca-certificates ]; then
-  (
-    unset ${CLOUD_SETUP_CODE_ENV} ${CLOUD_BOOTSTRAP_TOKEN_ENV} ${CLOUD_WORKER_CODEX_ENV}
-    if [ "$(id -u)" = 0 ]; then
-      /usr/sbin/update-ca-certificates
-    else
-      sudo -n -- /usr/sbin/update-ca-certificates
-    fi
-  ) || {
-    echo 'Cloud worker platform trust registration failed; repair system certificate setup before enrollment' >&2
-    exit 1
-  }
-fi
-`;
 // Tolerate brief network pauses while resuming stalls well before the command deadline.
 const CLOUD_BOOTSTRAP_DOWNLOAD_IDLE_TIMEOUT_MS = 2 * 60_000;
 
@@ -172,6 +156,18 @@ delete process.env.${CLOUD_WORKER_CODEX_ENV};
 if (process.platform !== "win32") process.umask(0o077);
 let phase;
 let phaseStarted = performance.now();
+const bootstrapTimings = [];
+let activationStarted;
+const timed = async (name, work, overlapping = false) => {
+  const started = performance.now();
+  try { return await work(); }
+  finally { bootstrapTimings.push({ name, ms: performance.now() - started, ...(overlapping ? { overlapping: true } : {}) }); }
+};
+const reportTiming = () => {
+  if (activationStarted !== undefined) bootstrapTimings.push({ name: "bootstrap.activation", ms: performance.now() - activationStarted });
+  // Fixed phase names and numeric observations only; never script output or authority.
+  console.error(JSON.stringify({ runnerPhases: bootstrapTimings }));
+};
 const failureMessage = (artifact, failedPhase, code, origin) => "Cloud worker " + artifact + " " + failedPhase + " failed" + (code ? " (" + code + ")" : "") + (origin ? " from " + origin : "");
 const setPhase = (next) => {
   if (phase === next) return;
@@ -447,8 +443,8 @@ setPhase("preparation");
   };
   // Verify before state creation, archive pruning/publication or runtime binding.
   if (${Boolean(params.verifyOnly)}) {
-    await verifyRuntime(runtimeDir);
-    if (!await verifyWorkerArchive(runtimeDir)) throw new Error("Cloud worker prepared archive is missing");
+    await timed("bootstrap.verification", () => verifyRuntime(runtimeDir));
+    if (!await timed("bootstrap.worker.verification", () => verifyWorkerArchive(runtimeDir))) throw new Error("Cloud worker prepared archive is missing");
     reportRuntimeInstallation("existing-verified");
     setPhase("complete");
     return;
@@ -468,16 +464,12 @@ setPhase("preparation");
   // Lease-private settings are never part of runtime-only preparation or its captured image.
   if (mode) stageWorkerCodex();
   if (desktopTarget === "macos") finishDesktopSetup();
-  if (mode && reuseNodeProcess()) {
-    if (desktopTarget !== "macos") finishDesktopSetup();
-    setPhase("complete");
-    return;
-  }
   const downloadAbort = new AbortController();
+  const prepareRuntime = async () => {
   fs.mkdirSync(runtimeRoot, { recursive: true, ...directoryOptions });
   const existingRuntime = fs.existsSync(runtimeDir);
-  if (existingRuntime) await verifyRuntime(runtimeDir);
-  const reusedRuntime = existingRuntime && (!workerBundle || await verifyWorkerArchive(runtimeDir));
+  if (existingRuntime) await timed("bootstrap.verification", () => verifyRuntime(runtimeDir));
+  const reusedRuntime = existingRuntime && (!workerBundle || await timed("bootstrap.worker.verification", () => verifyWorkerArchive(runtimeDir)));
   if (reusedRuntime) {
     publishWorkerArchive(runtimeDir);
   } else {
@@ -491,7 +483,7 @@ setPhase("preparation");
     await Promise.allSettled([
       (async () => {
         if (existingRuntime) return;
-        await downloadArchive(bootstrap, tokens.nodeBootstrap, archive);
+        await timed("bootstrap.runtime.transfer", () => downloadArchive(bootstrap, tokens.nodeBootstrap, archive), Boolean(overlap));
         downloadAbort.signal.throwIfAborted();
         fs.mkdirSync(installDir, directoryOptions);
         if (bootstrap.install === "npm") {
@@ -609,6 +601,7 @@ setPhase("preparation");
         // Only regular producer-owned files/directories enter the private staging tree.
         // Listing before extraction prevents tar from following archive links or escaping package/.
         setPhase("extraction");
+        await timed("bootstrap.extraction", async () => {
         const names = (await runTar(["-tzf", archive])).trimEnd().split("\\n");
         const seen = new Set();
         if (names.length > 250000) throw new Error("Cloud worker runtime archive exceeds its entry limit");
@@ -620,14 +613,15 @@ setPhase("preparation");
         const types = (await runTar(["-tvzf", archive])).trimEnd().split("\\n");
         if (types.some((entry) => !["-", "d"].includes(entry[0]))) throw new Error("Cloud worker runtime archive contains an unsafe entry type");
         await runTar(["-xzf", archive, "--strip-components=1", "--no-same-owner", "--no-same-permissions", "-C", packageRoot]);
+        });
         }
-        await verifyRuntime(installDir, true);
+        await timed("bootstrap.verification", () => verifyRuntime(installDir, true));
       })().catch((error) => {
         if (!downloadAbort.signal.aborted) downloadAbort.abort(Object.assign(error, { downloadPhase: phase }));
         throw downloadAbort.signal.reason;
       }),
       // The runtime branch owns the overlap marker; downloadArchive retains the worker's error phase.
-      downloadedWorker ? downloadArchive(workerBundle, tokens.workerBundle, downloadedWorker, overlap ? () => {} : setPhase) : undefined,
+      downloadedWorker ? timed("bootstrap.worker.transfer", () => downloadArchive(workerBundle, tokens.workerBundle, downloadedWorker, overlap ? () => {} : setPhase), Boolean(overlap)) : undefined,
     ]);
     // A started npm child must close before either branch can release its staging files.
     if (downloadAbort.signal.aborted) throw downloadAbort.signal.reason;
@@ -637,13 +631,20 @@ setPhase("preparation");
   } finally { fs.rmSync(stage, { recursive: true, force: true }); }
   }
   installRuntimePrefetch();
-  // A project snapshot contains only verified runtime bytes, never enrollment state.
-  if (!mode) {
-    // npm installations do not carry the manifest/build identity this receipt certifies.
-    if (workerBundle && bootstrap.install !== "npm") reportRuntimeInstallation(reusedRuntime ? "existing-verified" : "installed");
+  // Runtime-only capture receives the existing immutable-artifact verification receipt.
+  if (!mode && workerBundle && bootstrap.install !== "npm") reportRuntimeInstallation(reusedRuntime ? "existing-verified" : "installed");
+  };
+  if (mode && await reuseNodeProcess(prepareRuntime)) {
+    if (desktopTarget !== "macos") finishDesktopSetup();
     setPhase("complete");
     return;
   }
+  if (!mode) {
+    await prepareRuntime();
+    setPhase("complete");
+    return;
+  }
+  activationStarted = performance.now();
   setPhase("activation");
   try {
     if (!fs.lstatSync(runtimeLink).isSymbolicLink()) throw new Error("Cloud worker runtime pointer is occupied");
@@ -665,12 +666,12 @@ setPhase("preparation");
   await launchNodeProcess();
   if (desktopTarget !== "macos") finishDesktopSetup();
   setPhase("complete");
-})().catch((error) => { console.error(error.downloadArtifact ? error.message : failureMessage("node bootstrap", error.downloadPhase || phase, error.code) + ": " + error.message); process.exitCode = 1; });
+})().catch((error) => { console.error(error.downloadArtifact ? error.message : failureMessage("node bootstrap", error.downloadPhase || phase, error.code) + ": " + error.message); process.exitCode = 1; }).finally(reportTiming);
 `;
   return {
     command:
       ((params.target ?? "linux") === "linux"
-        ? (enrollment ? LINUX_PLATFORM_TRUST_SETUP : "") + (linuxToolchainSetup ?? "")
+        ? (enrollment ? CRABBOX_LINUX_PLATFORM_TRUST_SETUP : "") + (linuxToolchainSetup ?? "")
         : "") +
       wrapCrabboxNodeScript(
         script.trimEnd(),

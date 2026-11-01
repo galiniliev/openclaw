@@ -169,6 +169,81 @@ describe("repository project admission", () => {
     clearRuntimeConfigSnapshot();
   });
 
+  it.each([
+    "present",
+    "missing",
+    "unauthorized",
+    "forbidden",
+    "unavailable",
+    "network",
+    "base-missing",
+    "unrecorded-present",
+    "unrecorded-missing",
+  ] as const)("resolves optional session branch without hiding %s errors", async (scenario) => {
+    const fallbackCommit = "f".repeat(40);
+    const ordinaryFetch = fetchImpl.getMockImplementation()!;
+    fetchImpl.mockImplementation(async (input, init) => {
+      const url = new URL(new Request(input).url);
+      if (url.pathname === "/repos/acme/project/git/ref/heads/clawson/synthetic") {
+        if (scenario === "network") {
+          throw new Error("synthetic network failure");
+        }
+        if (scenario === "present" || scenario === "unrecorded-present") {
+          return Response.json({
+            ref: "refs/heads/clawson/synthetic",
+            object: { type: "commit", sha: commit },
+          });
+        }
+        return new Response(null, {
+          status:
+            scenario === "unauthorized"
+              ? 401
+              : scenario === "forbidden"
+                ? 403
+                : scenario === "unavailable"
+                  ? 503
+                  : 404,
+        });
+      }
+      if (url.pathname === `/repos/acme/project/git/commits/${fallbackCommit}`) {
+        return scenario === "base-missing"
+          ? new Response(null, { status: 404 })
+          : Response.json({ sha: fallbackCommit, tree: { sha: rootTree } });
+      }
+      return ordinaryFetch(input, init);
+    });
+    const preparing = prepareRepositoryWorkerProjectSource({
+      ...admission,
+      repository: {
+        agentId: "main",
+        url: repositoryUrl,
+        ref: "refs/heads/clawson/synthetic",
+        ...(scenario.startsWith("unrecorded-")
+          ? { requirePublishedRef: true as const }
+          : { fallbackCommit }),
+      },
+    });
+    if (scenario === "present" || scenario === "missing" || scenario === "unrecorded-present") {
+      const resolved = await preparing;
+      expect(resolved.project.baseCommit).toBe(scenario === "missing" ? fallbackCommit : commit);
+      expect(resolved.recoverySource).toBe(
+        scenario === "missing" ? "recorded-base" : "published-branch",
+      );
+    } else {
+      await expect(preparing).rejects.toThrow(
+        scenario === "unrecorded-missing"
+          ? "Restore this workspace from a verified backup"
+          : undefined,
+      );
+      if (scenario === "unrecorded-missing") {
+        expect(requestPaths()).not.toContain("/repos/acme/project/commits/main");
+      }
+      if (scenario !== "base-missing") {
+        expect(requestPaths()).not.toContain(`/repos/acme/project/git/commits/${fallbackCommit}`);
+      }
+    }
+  });
+
   it("admits the declarative recipe before an executable fallback from immutable blobs", async () => {
     const blob = "e".repeat(40);
     rootEntries.push({ path: ".devcontainer.json", type: "blob", mode: "100644", sha: blob });

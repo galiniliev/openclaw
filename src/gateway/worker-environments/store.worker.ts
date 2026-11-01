@@ -105,6 +105,10 @@ function environmentMutation<Name extends EnvironmentMethod, Result>(
 }
 
 export const workerEnvironmentOperations = {
+  "workerEnvironments.resumeParkedRetainedWorkspaceOwner": environmentMutation(
+    "resumeParkedRetainedWorkspaceOwner",
+    (input, store) => store.resumeParkedRetainedWorkspaceOwner(input),
+  ),
   "workerEnvironments.initialize": mutation("initialize", (_input, { db, now, touch }) => {
     for (const id of reconcileAttachedSessionOwners(db, now())) {
       touch(id);
@@ -139,6 +143,9 @@ export const workerEnvironmentOperations = {
   "workerEnvironments.refreshBootstrapReceipt": environmentMutation(
     "refreshBootstrapReceipt",
     (input, store) => store.refreshBootstrapReceipt(input),
+  ),
+  "workerEnvironments.recordRetention": environmentMutation("recordRetention", (input, store) =>
+    store.recordRetention(input),
   ),
   "workerEnvironments.transition": environmentMutation("transition", (input, store) =>
     store.transition(input),

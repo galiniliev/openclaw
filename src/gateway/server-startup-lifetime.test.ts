@@ -78,6 +78,94 @@ function expectStartupCleanupError(failure: unknown, cause: unknown) {
 }
 
 describe("Gateway startup lifetime", () => {
+  it.each([false, true])(
+    "initializes worker presence after plugin publication with placement=%s",
+    async (withPlacement) => {
+      const state = await createStartupTestState("gateway-plugin-presence-order", {
+        OPENCLAW_TEST_MINIMAL_GATEWAY: undefined,
+      });
+      const port = await getFreePort();
+      const order: string[] = [];
+      let server: GatewayServer | undefined;
+      const setHumanPresence = vi.fn(async (present: boolean) => {
+        expect(present).toBe(false);
+        expect(order).toEqual(["publish", "after-commit"]);
+        order.push("presence");
+      });
+      const startupModule = await import("./server-startup-finish.js");
+      const finishStartup = startupModule.finishGatewayStartup;
+      const startupFactory = vi
+        .spyOn(startupModule, "finishGatewayStartup")
+        .mockImplementation(async (...args) => {
+          const runtime = args[0].kernelRuntime;
+          assert.ok(runtime.workerEnvironmentService);
+          vi.spyOn(runtime.workerEnvironmentService, "setHumanPresence").mockImplementation(
+            setHumanPresence,
+          );
+          if (withPlacement) {
+            assert.ok(runtime.workerPlacementRuntime);
+            vi.spyOn(runtime.workerPlacementRuntime, "startRuntime").mockImplementation(
+              async () => {
+                order.push("recovery");
+                return null;
+              },
+            );
+          } else {
+            runtime.workerPlacementRuntime = undefined;
+          }
+          vi.spyOn(runtime, "prepareAttachedPluginRuntime").mockResolvedValue({
+            publish: () => {
+              order.push("publish");
+            },
+            afterCommit: () => {
+              order.push("after-commit");
+            },
+          });
+          vi.spyOn(runtime, "refreshAttachedGatewayDiscovery").mockImplementation(async () => {
+            expect(order).toEqual(["publish", "after-commit", "presence"]);
+            order.push("discovery");
+          });
+          return finishStartup(...args);
+        });
+      const postAttachModule = await import("./server-startup-post-attach.js");
+      const postAttach = vi
+        .spyOn(postAttachModule, "startGatewayPostAttachRuntime")
+        .mockImplementation(async (params) => {
+          expect(setHumanPresence).not.toHaveBeenCalled();
+          await params.onStartupPluginsLoaded?.({
+            pluginRegistry: createEmptyPluginRegistry(),
+            gatewayMethods: [],
+          });
+          await params.startWorkerEnvironmentRuntime?.();
+          return {
+            stopGatewayUpdateCheck: async () => {},
+            startupSettled: Promise.resolve(),
+            subagentRecoverySettled: Promise.resolve(),
+          };
+        });
+      try {
+        await configureStartup(state, port);
+        const { startGatewayServerCore } = await import("./server-start.js");
+        server = await startGatewayServerCore(port, startupOptions());
+        await server.startupSettled;
+        expect(setHumanPresence).toHaveBeenCalledExactlyOnceWith(false);
+        expect(order).toEqual([
+          "publish",
+          "after-commit",
+          "presence",
+          "discovery",
+          ...(withPlacement ? ["recovery"] : []),
+        ]);
+      } finally {
+        await server?.close();
+        postAttach.mockRestore();
+        startupFactory.mockRestore();
+        vi.restoreAllMocks();
+        await state.cleanup();
+      }
+    },
+  );
+
   it.each(["close", "startup failure"] as const)(
     "releases idle prepared donor custody before registry retirement during %s",
     async (entry) => {

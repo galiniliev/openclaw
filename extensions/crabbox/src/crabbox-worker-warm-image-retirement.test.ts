@@ -17,6 +17,7 @@ import { commandResult } from "./crabbox-worker-provider.test-support.js";
 import type { WarmProfileRecord } from "./crabbox-worker-warm-image-records.js";
 import {
   listCrabboxWarmImages,
+  clearCrabboxWarmImageCapture,
   openCrabboxWarmImageStore,
 } from "./crabbox-worker-warm-image-store.js";
 import {
@@ -168,17 +169,22 @@ it("keeps demoted pins until unpinned after rollback", async () => {
   expect(s.store.lookup(entry.key)?.image?.checkpointId).toBe("chk_previous");
 });
 
-it("refuses rollback during retirement", async () => {
+it("preserves unrelated retirement during rollback", async () => {
   const s = await captured();
   const entry = s.entry();
   s.store.update(entry.key, (record) => ({
     ...record!,
     previous: { ...record!.image!, checkpointId: "chk_previous" },
-    operation: { type: "retire", checkpointId: "chk_retiring" },
+    retirements: [{ type: "retire", checkpointId: "chk_retiring" }],
   }));
   const before = s.store.lookup(entry.key);
-  await expect(s.provider.images.rollback("chk_previous")).rejects.toThrow("capture or retirement");
-  expect(s.store.lookup(entry.key)).toEqual(before);
+  await expect(s.provider.images.rollback("chk_previous")).resolves.toMatchObject({
+    checkpointId: "chk_previous",
+  });
+  expect(s.store.lookup(entry.key)?.retirements).toEqual([
+    ...(before?.retirements ?? []),
+    { type: "retire", checkpointId: entry.value.image!.checkpointId },
+  ]);
 });
 
 it.each([
@@ -259,7 +265,7 @@ it.each(["capacity", "missing"])("retries debt after restart (%s)", async (clean
   const restarted = scenario(catalog.command, initial.stateDir);
   clock.mockReturnValue(now + 2 * DAY_MS);
   await restarted.capture("repeat-refresh");
-  expect(catalog.captures).toBe(2);
+  expect(catalog.captures).toBe(3);
   expect(restarted.checkpoints("fork")[0]?.[3]).toBe("chk_capture_2");
   const stop = restarted.calls.findLastIndex(({ argv }) => argv[1] === "stop");
   expect(stop).toBeGreaterThanOrEqual(0);
@@ -268,7 +274,7 @@ it.each(["capacity", "missing"])("retries debt after restart (%s)", async (clean
   if (cleanup === "capacity") {
     for (let index = 0; index < 127; index++) {
       restarted.store.register(`reserved-${index}`, {
-        version: 3,
+        version: 4,
         allocations: {},
         operation: captureOperation(`claim-${index}`, {
           startedAtMs: now,
@@ -281,7 +287,7 @@ it.each(["capacity", "missing"])("retries debt after restart (%s)", async (clean
       "capacity is full",
     );
     expect(restarted.store.entries()).toHaveLength(128);
-    expect(catalog.captures).toBe(2);
+    expect(catalog.captures).toBe(3);
   } else {
     restarted.store.register(image.key, {
       ...image.value,
@@ -290,18 +296,24 @@ it.each(["capacity", "missing"])("retries debt after restart (%s)", async (clean
     catalog.missing = true;
     await restarted.capture("missing-replacement");
     catalog.missing = false;
-    expect(catalog.captures).toBe(2);
+    expect(catalog.captures).toBe(3);
   }
-  expect(restarted.store.lookup(image.key)?.image?.checkpointId).toBe("chk_capture_2");
-  await expectDebt(image.key, { checkpointId: "chk_capture_1" });
-  expect(resources).toEqual(new Set(["chk_capture_1", "chk_capture_2"]));
+  expect(restarted.store.lookup(image.key)?.image?.checkpointId).toBe("chk_capture_3");
+  expect(restarted.store.lookup(image.key)?.retirements).toEqual(
+    [1, 2, 3].map((id) => ({ type: "retire", checkpointId: `chk_capture_${id}` })),
+  );
+  expect(resources).toEqual(new Set(["chk_capture_1", "chk_capture_2", "chk_capture_3"]));
 
   catalog.failDeletion = false;
   await restarted.provider.maintain!(maintenanceContext());
-  expect(resources).toEqual(new Set(["chk_capture_2"]));
+  expect(resources).toEqual(new Set());
+  const forks = restarted.checkpoints("fork");
   const recovered = await restarted.provision("deletion-recovered");
-  expect(resources).toEqual(new Set(["chk_capture_2"]));
-  expect(restarted.checkpoints("fork").at(-1)?.[3]).toBe("chk_capture_2");
+  expect(resources).toEqual(new Set());
+  expect(restarted.checkpoints("fork")).toEqual(forks);
+  expect(restarted.store.lookup(image.key)?.allocations[recovered.leaseId]?.choice).toEqual({
+    kind: "cold",
+  });
   await restarted.stop(recovered, { ...PROFILE, warmImage: false });
 });
 
@@ -356,7 +368,7 @@ it("reports current-image capacity deletion failures", async () => {
   await s.capture("cleanup", { ...PROFILE, class: "fast" });
   expect(s.store.lookup(image.key)).toMatchObject({
     image: { checkpointId: "chk_profile_warm" },
-    operation: { type: "retire", checkpointId: "chk_profile_warm" },
+    retirements: [{ type: "retire", checkpointId: "chk_profile_warm" }],
   });
   expect(s.warn).toHaveBeenCalledWith(
     expect.stringMatching(
@@ -419,11 +431,11 @@ function observeComparisons(before: () => void | Promise<void>, after?: () => vo
   return () => attempts;
 }
 
-it("normalizes diagnostics without migrating v3 records", async () => {
+it("normalizes diagnostics without migrating v4 records", async () => {
   const { fixture, store } = stateFixture();
   fixture.register("old", warmRecord());
   warmStore<unknown>().register("malformed", {
-    version: 3,
+    version: 4,
     allocations: {},
     recipePreparation: { source: "unknown", commands: ["must not appear"] },
   });
@@ -434,7 +446,7 @@ it("normalizes diagnostics without migrating v3 records", async () => {
   };
   fixture.register("oversized", warmRecord({ recipePreparation }));
 
-  expect(await store.lookup("old")).toEqual({ version: 3, allocations: {} });
+  expect(await store.lookup("old")).toEqual({ version: 4, allocations: {} });
   expect((await store.lookup("malformed"))?.recipePreparation).toBeUndefined();
   const diagnostics = (await store.entries()).find(({ key }) => key === "oversized")?.value
     .recipePreparation;
@@ -467,7 +479,7 @@ it("rechecks retirement and siblings after conflict", async () => {
   const attempts = observeComparisons(() => {
     seed({
       image,
-      operation: retirement,
+      retirements: [retirement],
       allocations: { sibling: warmAllocation() },
     });
   });
@@ -476,7 +488,7 @@ it("rechecks retirement and siblings after conflict", async () => {
   expect(result.choice).toEqual({ kind: "cold" });
   const committed = read()!;
   expect(Object.keys(committed.allocations).toSorted()).toEqual(["new", "sibling"]);
-  expect(committed.operation).toEqual(retirement);
+  expect(committed.retirements).toEqual([retirement]);
   expect(attempts()).toBe(2);
 });
 
@@ -593,3 +605,17 @@ it.each(["pin", "rollback"] as const)(
     await expect(s.provider.images.pin(image.checkpointId, false)).rejects.toThrow();
   },
 );
+
+it("capture recovery preserves detached retirement even without images or allocations", async () => {
+  const debt = { type: "retire" as const, checkpointId: "chk_held" };
+  const { store } = stateFixture({
+    retirements: [debt],
+    operation: captureOperation("recover-with-debt"),
+  });
+  expect(await clearCrabboxWarmImageCapture(store, "profile", "recover-with-debt")).toBe(true);
+  expect(await store.lookup("profile")).toEqual({
+    version: 4,
+    allocations: {},
+    retirements: [debt],
+  });
+});

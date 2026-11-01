@@ -1,5 +1,6 @@
 import type { WorkerAdmissionHandshake } from "../../../packages/gateway-protocol/src/schema/worker-admission.js";
 import type { Deferred } from "../../shared/deferred.js";
+import type { RetainedWorkspaceAuthority } from "../../state/retained-workspace-authority.js";
 import type { NodeWorkerSupervisorTransport } from "../node-registry-private.js";
 import type { createNodeWorkerLaunchAdapter } from "./node-launch-adapter.js";
 import type { NodeWorkspaceTransferService } from "./node-workspace-transfer-service.js";
@@ -53,6 +54,7 @@ export type NodeWorkerWorkspaceBinding = {
     | { kind: "local"; path: string }
     | { kind: "device-folder"; deviceId: string; path: string }
     | { kind: "repository"; baseCommit: string; baseManifestRef: string };
+  diskAuthority?: RetainedWorkspaceAuthority;
   manifestRef: string;
   remoteWorkspaceDir: string;
   sessionKey?: string;

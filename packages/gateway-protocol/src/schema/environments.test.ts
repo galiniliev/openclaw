@@ -68,19 +68,48 @@ describe("worker environment protocol schemas", () => {
       ].map(desktop),
     );
   });
-  it("accepts only a profile and local project selector for preparation", () => {
+  it("accepts exactly one local or repository preparation selector", () => {
     const request = { profileId: "development", projectPath: "/projects/app" };
-    prepare.accepts(request);
+    const repository = {
+      profileId: "development",
+      repository: { agentId: "main", url: "https://github.com/example/project", ref: "main" },
+    };
+    prepare.accepts(
+      request,
+      repository,
+      ...["worker-turn", "remote-exec"].flatMap((executionMode) => [
+        { ...request, executionMode },
+        { ...repository, executionMode },
+      ]),
+    );
     prepare.rejects(
       {},
       { profileId: "development" },
       { ...request, profileId: "" },
       { ...request, projectPath: "" },
       { ...request, setupAuthorized: false },
+      { ...request, executionMode: "gateway" },
+      { ...repository, executionMode: "remote" },
+      { ...repository, executionMode: null },
+      { ...request, repository: repository.repository },
+      { ...repository, repository: { ...repository.repository, agentId: "" } },
+      { ...repository, repository: { ...repository.repository, url: "" } },
+      { ...repository, repository: { ...repository.repository, grant: "synthetic" } },
     );
     const result = { environmentId: "worker-1", preparationKey: "project-key", reused: false };
-    prepared.accepts(result, { ...result, reused: true });
-    prepared.rejects({ ...result, reused: "true" }, { ...result, preparationKey: "" });
+    prepared.accepts(
+      result,
+      { ...result, reused: true },
+      { ...result, status: "ready" },
+      { ...result, cacheKey: "a".repeat(64) },
+    );
+    prepared.rejects(
+      { ...result, status: "accepted" },
+      { ...result, reused: "true" },
+      { ...result, preparationKey: "" },
+      { ...result, cacheKey: "" },
+      { ...result, cacheKey: "not-a-digest" },
+    );
   });
 
   it("rejects missing, empty, and unknown lifecycle request fields", () => {

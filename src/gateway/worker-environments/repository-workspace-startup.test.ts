@@ -2,7 +2,13 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
+import { prepareGitHubAppInstallation } from "../../agents/github-app-installation.js";
+import type { GitHubCredentialReader } from "../../agents/github-credential-reader.js";
 import { createGitHubReadIdentity } from "../../agents/github-read-identity.js";
+import {
+  clearRuntimeConfigSnapshot,
+  setRuntimeConfigSnapshot,
+} from "../../config/runtime-snapshot.js";
 import { NodeWorkerWorkspaceRuntime } from "../../node-host/node-worker-workspace.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { closeOpenClawStateDatabaseByPathAsync } from "../../state/openclaw-state-db-cache.js";
@@ -33,6 +39,12 @@ import { requireWorkspaceResultGit } from "./workspace-result-git.js";
 // mock-isolation: Workspace startup supplies a synthetic identity without credential discovery.
 vi.mock("./repository-github-identity.js", () => ({ prepareRepositoryGitHubIdentity: vi.fn() }));
 
+// External issuance stays fixed while the selected App and repository admission run normally.
+vi.mock("../../agents/github-app-installation.js", async (original) => ({
+  ...(await original<typeof import("../../agents/github-app-installation.js")>()),
+  prepareGitHubAppInstallation: vi.fn(),
+}));
+
 const session = {
   sessionId: "repository-session",
   sessionKey: "agent:main:repository-session",
@@ -48,6 +60,7 @@ let nodeDatabasePath: string | undefined;
 afterEach(async () => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+  clearRuntimeConfigSnapshot();
   for (const pathname of [nodeDatabasePath, databasePath]) {
     if (pathname) {
       await closeOpenClawStateDatabaseByPathAsync(pathname);
@@ -625,3 +638,230 @@ it.each(["base manifest", "accepted manifest"] as const)(
     expect(f.reconcileWorkspace).not.toHaveBeenCalled();
   },
 );
+
+it.each(["accepted", "denied", "retired", "no cleanup"] as const)(
+  "admits only the foreground repository through the selected App: %s",
+  async (outcome) => {
+    const f = await fixture();
+    integrationState.enabled = true;
+    const actual = await vi.importActual<typeof import("./repository-github-identity.js")>(
+      "./repository-github-identity.js",
+    );
+    vi.mocked(prepareRepositoryGitHubIdentity).mockImplementation(
+      actual.prepareRepositoryGitHubIdentity,
+    );
+    setRuntimeConfigSnapshot({
+      tools: {
+        github: {
+          kind: "app-installation",
+          profileId: "ghp_00000000000000000000000000000001",
+          app: {
+            appId: 101,
+            installationId: 202,
+            accountId: 303,
+            repositories: [
+              { id: 404, fullName: "example/project" },
+              { id: 405, fullName: "example/other" },
+            ],
+            permissions: { contents: "read", metadata: "read" },
+            privateKey: "synthetic-key",
+            keyVersion: "synthetic-v1",
+          },
+        },
+      },
+    });
+    const revoke = vi.fn(async () => {});
+    vi.mocked(prepareGitHubAppInstallation)
+      .mockReset()
+      .mockResolvedValue({
+        token,
+        readToken: async () => token,
+        account: { accountId: 9001, login: "factory[bot]", avatarUrl: null },
+        expiresAtMs: Date.now() + 60_000,
+        verifiedUntil: Date.now() + 60_000,
+        facts: {
+          appId: 101,
+          installationId: 202,
+          accountId: 303,
+          repositories: [{ id: 404, fullName: "example/project" }],
+          permissions: { contents: "read", metadata: "read" },
+          suspended: false,
+        },
+        revoke,
+      });
+    const readNativeCredential = vi.fn<GitHubCredentialReader>(async (_env, request) => {
+      expect(request).toMatchObject({
+        kind: "repository-admission",
+        host: "github.com",
+        selection: { app: { repositories: [{ id: 404, fullName: "example/project" }] } },
+      });
+      if (outcome === "denied") {
+        throw new Error("Repository integration admission denied");
+      }
+      if (outcome === "retired") {
+        f.closeAuthority();
+      }
+      return undefined;
+    });
+    Object.assign(readNativeCredential, { admit: async () => {}, assertCurrent: f.assertCurrent });
+    const cleanups: Array<() => Promise<void>> = [];
+    const pending = f.start({
+      readNativeCredential,
+      ...(outcome === "no cleanup"
+        ? {}
+        : { retainCredentialCleanup: (cleanup) => cleanups.push(cleanup) }),
+    });
+    if (outcome !== "accepted") {
+      await expect(pending).rejects.toThrow(
+        outcome === "denied"
+          ? "The effective GitHub identity could not be verified"
+          : outcome === "retired"
+            ? "authority closed"
+            : "unavailable",
+      );
+      expect(f.syncWorkspace).not.toHaveBeenCalled();
+      expect(prepareGitHubAppInstallation).not.toHaveBeenCalled();
+      return;
+    }
+    await pending;
+    expect(readNativeCredential).toHaveBeenCalledOnce();
+    expect(prepareGitHubAppInstallation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repositories: [{ id: 404, fullName: "example/project" }],
+      }),
+    );
+    expect(f.syncWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: expect.objectContaining({ gitToken: token, runSetupScript: false }),
+      }),
+    );
+    expect((await f.store.get(f.repository.workspaceId))?.checkpointRef).toBeTruthy();
+    expect(cleanups).toHaveLength(1);
+    await cleanups[0]!();
+    expect(revoke).toHaveBeenCalledOnce();
+  },
+);
+
+it.each([false, true])(
+  "restores only a verified source-only missing repository checkpoint (changed=%s)",
+  async (changed) => {
+    const f = await fixture();
+    await f.start();
+    if (changed) {
+      await fs.writeFile(path.join(f.remote, "unpublished.txt"), "unpublished work\n");
+      // Record actual worker changes through the startup checkpoint owner.
+      const current = await f.store.get(f.repository.workspaceId);
+      if (!current) {
+        throw new Error("Expected accepted workspace");
+      }
+      const manifest = await captureWorkspaceManifest({ root: f.remote, baseCommit: f.baseCommit });
+      const prepared = await stageSessionRepositoryCheckpoint({
+        workspaceId: current.workspaceId,
+        expectedRevision: current.revision,
+        stagingRoot: f.remote,
+        baseManifestRaw: serializeWorkerWorkspaceManifest(f.base.manifest),
+        currentManifestRaw: serializeWorkerWorkspaceManifest(manifest.manifest),
+        baseManifestRef: f.base.manifestRef,
+        currentManifestRef: manifest.manifestRef,
+        assertCurrent: f.assertCurrent,
+      });
+      await prepared.publish();
+      await prepared.discard();
+    }
+    const accepted = await f.store.get(f.repository.workspaceId);
+    if (!accepted) {
+      throw new Error("Expected accepted workspace");
+    }
+    await fs.rm(f.store.artifactPath(accepted.workspaceId), { recursive: true });
+    f.syncWorkspace.mockClear();
+    const start = f.start({
+      repository: accepted,
+      runSetupScript: true,
+      prepareCheckpointRecovery: async () => f.assertCurrent,
+    });
+    if (changed) {
+      await expect(start).rejects.toThrow("Restore the missing repository checkpoint");
+      expect(f.syncWorkspace).not.toHaveBeenCalled();
+    } else {
+      await expect(start).resolves.toMatchObject({ manifestRef: f.base.manifestRef });
+      const restored = await f.store.get(accepted.workspaceId);
+      expect(restored).toEqual(accepted);
+      await withSessionRepositoryCheckpoint(
+        { workspaceId: accepted.workspaceId },
+        async (checkpoint) => {
+          expect(checkpoint.currentManifestRef).toBe(f.base.manifestRef);
+        },
+      );
+      expect(f.syncWorkspace).toHaveBeenCalledWith(
+        expect.objectContaining({
+          source: expect.objectContaining({
+            baseCommit: f.baseCommit,
+            ref: f.baseCommit,
+            runSetupScript: false,
+          }),
+        }),
+      );
+    }
+  },
+);
+
+it.each(["unavailable", "different-source", "revoked"] as const)(
+  "keeps a missing checkpoint untouched when recovery is %s",
+  async (failure) => {
+    const f = await fixture();
+    await f.start();
+    const accepted = await f.store.get(f.repository.workspaceId);
+    if (!accepted) {
+      throw new Error("Expected accepted workspace");
+    }
+    const artifact = f.store.artifactPath(accepted.workspaceId);
+    await fs.rm(artifact, { recursive: true });
+    f.syncWorkspace.mockClear();
+    if (failure === "different-source") {
+      await fs.writeFile(path.join(f.remote, "unexpected.txt"), "different fetched tree\n");
+    }
+    if (failure === "revoked") {
+      f.verifyStable.mockImplementationOnce(async () => f.closeAuthority());
+    }
+    await expect(
+      f.start({
+        repository: accepted,
+        ...(failure === "unavailable"
+          ? {}
+          : {
+              prepareCheckpointRecovery: async () => {
+                return f.assertCurrent;
+              },
+            }),
+      }),
+    ).rejects.toThrow(
+      failure === "unavailable"
+        ? "recovery ownership is unavailable"
+        : failure === "revoked"
+          ? "placement authority closed"
+          : "does not match the missing checkpoint",
+    );
+    expect(await f.store.get(accepted.workspaceId)).toEqual(accepted);
+    // Revocation may leave unreachable prepared objects, but never an accepted recovery ref.
+    if (failure === "revoked") {
+      await expect(
+        requireWorkspaceResultGit(artifact, ["rev-parse", "--verify", accepted.checkpointRef!]),
+      ).rejects.toThrow();
+    } else {
+      await expect(fs.stat(artifact)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    expect(f.publish).toHaveBeenCalledTimes(1);
+  },
+);
+
+const integrationState = vi.hoisted(() => ({
+  enabled: false,
+  provider: { preparedCapacity: "image" as const },
+}));
+vi.mock("../../plugins/repository-integration-runtime.js", () => ({
+  getRepositoryIntegration: () =>
+    integrationState.enabled ? integrationState.provider : undefined,
+}));
+afterEach(() => {
+  integrationState.enabled = false;
+});

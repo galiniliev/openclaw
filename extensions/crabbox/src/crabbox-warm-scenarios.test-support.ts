@@ -54,7 +54,7 @@ export function warmImage(id: string, patch: Partial<WarmImageRecord> = {}): War
 }
 
 export function warmRecord(patch: Partial<WarmProfileRecord> = {}): WarmProfileRecord {
-  return { version: 3, allocations: {}, ...patch };
+  return { version: 4, allocations: {}, ...patch };
 }
 
 type Capture = Extract<NonNullable<WarmProfileRecord["operation"]>, { type: "capture" }>;

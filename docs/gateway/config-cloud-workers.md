@@ -71,6 +71,88 @@ This setting selects execution, not provider credentials or an OS sandbox. For
 node-only credentials, configure the required profile and node as described in
 [Worker-local inference](/gateway/cloud-workers/native-inference).
 
+### Session-private disk retention
+
+For new Linux Azure Sandbox sessions, a profile may opt into an in-place private
+Disk instead of ephemeral replacement:
+
+```json5
+{
+  cloudWorkers: {
+    profiles: {
+      sandbox: {
+        provider: "crabbox",
+        retention: { mode: "session-disk", computeWindowSeconds: 14400 },
+        settings: { provider: "azure-sandbox", target: "linux" },
+      },
+    },
+  },
+}
+```
+
+This requires a matched Crabbox controller and runtime pack advertising
+`session-disk-retention-v1` and `pause-resume`. Existing ephemeral allocations
+cannot be converted. Retained sessions bypass sessionless ready reserves and
+private state never enters a reusable image or clean pool.
+
+The compute window authorizes finite work, not a physical billing deadline.
+The existing provider idle-stop policy still applies. Idle suspension and **Stop
+cloud worker** close compute while retaining the exact disk, placement, device,
+and workspace. The next same-session input settles pending suspension and opens
+a distinct finite window. Provider outages leave durable pending work; they do
+not authorize replacement. Disk persistence does not preserve RAM, processes,
+sockets, or an interrupted live model stream. `/tmp` persistence depends on its
+actual provider mount and must not be assumed from disk retention alone.
+
+A failed enrollment or stale cleanup request does not discard an original retained
+workspace disk. After its saved owner is reconciled, retrying dispatch validates
+the same resource and attaches it under a fresh execution epoch. Fresh node
+enrollment replaces only the proven old node process and uses its new bootstrap
+ticket; it preserves the disk, repository, and session identity. Missing or
+mismatched ownership still holds recovery instead of allocating a replacement.
+
+Codex remote-exec resumes its existing private native thread and refuses a new
+thread when retained state is missing or mismatched. OpenClaw worker-turn keeps
+its transcript-based turn semantics. Neither mode reruns checkout or setup on
+resume. Missing ownership, disk policy, or native state fails with recovery
+information. An existing retained disk is always preferred. After the canonical
+owner confirms that the old resource is gone and recovery work has settled,
+normal dispatch restores an available accepted checkpoint. A missing source-only
+checkpoint can be reconstructed exactly. If private checkpoint bytes are also
+missing, dispatch may restore the authorized published branch or recorded base,
+preserving original checkpoint provenance and reporting partial recovery. The
+session ID and conversation history remain; unavailable unpublished files are
+not reported as recovered. Access failures, timeouts, and unknown resource state
+do not authorize this replacement. Moving a retained session is unavailable. Archive/delete
+settles local workspace work and records exact provider cleanup before retiring
+the session. Provider unavailability does not delay the session action; its durable
+environment record retains the private resource identity and retries cleanup.
+Deleting or archiving a dedicated retained worker discards its private workspace.
+After active model work settles, retirement uses its saved resource binding and
+local cleanup journal without restarting an offline worker just to export files.
+Unresolved model operations or local journal cleanup still block completion.
+Ordinary Stop, Move, and suspension keep their workspace-preservation behavior.
+
+Selecting a configured profile for a **new allocation** uses its current settings.
+Updating a stable profile ID to a
+new base disk does not migrate an existing session's private disk. Existing
+retained sessions resume and clean up through their recorded provider, allocation,
+and profile snapshot, including after that profile is replaced or removed from
+configuration. Keep the provider plugin available. Current session, placement,
+lease, and node authorization still apply; a caller-supplied old snapshot does
+not authorize a fresh allocation after its profile is removed. If the saved disk
+is observed missing, its exact lease must first settle through canonical cleanup.
+Replacement dispatch then restores the accepted checkpoint or pinned repository
+base into a fresh worker while preserving the session and conversation. It never
+resets a retained checkpoint to an optional published branch. Unavailable private
+changes remain unrecoverable; unknown work and unresolved journals retain their
+existing recovery fences. Missing ownership evidence or transient inspection
+failures never authorize an empty replacement.
+New cloud child sessions select the current configured profile (or the required
+profile under Gateway policy), rather than copying the retained parent's old
+allocation settings. An already-admitted child keeps its own recorded placement
+when its creation operation is recovered.
+
 ### Crabbox profile
 
 Manage profiles under **Settings → Connections → Cloud environments → Advanced → Machines**. Repository defaults, snapshot actions, pool limits, and retention are described in [Cloud environments](/gateway/cloud-workers/warm-images#inspect-snapshots-in-the-control-ui). Saving settings does not start a build.
@@ -109,6 +191,11 @@ The bundled `crabbox` provider provisions a disposable machine through the local
 ```
 
 - `settings.provider` (required): backend from the [Crabbox provider reference](https://crabbox.sh/providers/index.html), passed through `--provider`. Direct or coordinator-backed operation follows Crabbox's configuration.
+- `settings.azureSandboxDiskId`: optional private disk ID passed to `--azure-sandbox-disk-id` for the `azure-sandbox` backend. It must be a non-empty string of at most 256 characters. Prepared capacity is bound to the selected disk; changing it selects a different prepared-image identity. With `warmImage: false`, Linux disk profiles with a resolved class and no `setupEnv` still prepare repository checkouts and Ready workers without capturing snapshots.
+- `settings.configFile`: optional absolute path to the operator-owned Crabbox configuration. The selected configuration follows provisioning, inspection, heartbeat, resume, and cleanup without changing the Gateway process environment.
+- `settings.sdkPython`: optional absolute path to a preinstalled Azure Sandbox snapshot SDK interpreter, for `azure-sandbox` only. It requires `configFile` and `sdkIdentity`. The interpreter must contain `azure-containerapps-sandbox` 0.1.0b4, `azure-identity` 1.26.0, and `azure-core` 1.41.0 with their matched dependencies, on Python 3.10 or newer. OpenClaw checks this runtime before preparation; it never installs Python packages at startup.
+- `settings.sdkIdentity`: explicit `{ kind: "azure-cli" }` or `{ kind: "managed-identity", clientId: "11111111-1111-4111-8111-111111111111" }` for the snapshot SDK and Crabbox commands. Azure CLI mode requires a selected configuration with no file-owned managed identity; an empty environment override cannot clear that identity. Keep this route consistent with the operator's qualified provider configuration.
+- `settings.snapshotVerifier`: bounded executable argument array for the canonical clean-image verifier on the prepared Linux worker. The verifier must attest empty workspace and absent session credentials, plus the exact immutable runtime archives, before snapshot capture. The verifier is operator-configured; its arguments are not interpreted by a shell. See [Azure Sandbox snapshots](/gateway/cloud-workers/warm-images#azure-sandbox-snapshots).
 - `settings.class`: optional Crabbox machine class passed to `--class`. Omission leaves selection to Crabbox unless the placement supplies `machineClass`; OpenClaw does not invent a default or hardware size. Explicit `null`, empty or whitespace strings, and nonstring values are invalid. Edit classless profiles through **Settings → Advanced**.
 - `settings.ttl` and `settings.idleTimeout` (required): positive Go duration strings passed to `--ttl` and `--idle-timeout`. TTL is total lifetime from creation, including provisioning; idle timeout is the inactivity window. The earlier deadline wins. Crabbox may clamp either request to effective policy; idle never exceeds TTL. The default maximum is `4h`, while explicit owner or organization overrides can permit longer requests, up to `24h`. OpenClaw accepts those longer configured values and uses the effective policy returned by Crabbox.
 - `settings.azureSandboxDiskId`: optional non-empty disk ID (up to 256 characters) for an `azure-sandbox` backend, passed to `--azure-sandbox-disk-id`. With a Linux target and selected machine class, this also permits project preparation when `warmImage: false`. Preparation runs before enrollment without capturing a snapshot; different selected disks never share preparation identity. This does not enable retained-disk recovery or change Crabbox disk permissions.
@@ -116,7 +203,12 @@ The bundled `crabbox` provider provisions a disposable machine through the local
 - `settings.setup`: optional, repeatable machine setup command for the profile's `settings.target` (Linux when omitted). Profiles with setup cannot override the OS between native Windows (PowerShell) and POSIX targets; incompatible OS and machine choices are omitted. Configure a separate profile with compatible setup for the other interpreter. Snapshot forks reuse its filesystem results. Repository lifecycle commands belong in the [environment file](/gateway/cloud-workers/environment-file).
 - `settings.setupSecrets`: operator-approved environment-name to protected store SecretRef map; see [Setup secrets](/gateway/config-cloud-workers#setup-secrets).
 - `settings.binary`: optional absolute Crabbox executable path. OpenClaw requires Crabbox 0.80.0 or newer for every target and checks the sibling Crabbox checkout and `PATH` when the path is omitted. If an explicitly configured binary is missing or unsupported, worker operations first try the current sibling or `PATH` discovery. If that is also unavailable or unsupported, OpenClaw reuses or installs a checksum- and version-verified managed release under `$OPENCLAW_STATE_DIR/tools/crabbox` (default `~/.openclaw/tools/crabbox`), preserving existing binaries and settings. Later operations reuse it; damaged managed copies are replaced with the old directory retained for recovery. `openclaw doctor --fix` can install it before the first worker or configured sandbox operation. Read-only profile suggestions never install a CLI. Installation failure stops before allocation and reports the cause.
+- `runSetupScript`: optional repository setup policy. Set `false` for a prebuilt profile to skip repository lifecycle hooks and detected dependency installation during both `environments.prepare` and session dispatch. Unset preserves normal setup authorization and behavior; setting `true` does not grant setup permission. Skipped setup has a distinct preparation identity. Repository access, native runtime/bootstrap checks, ownership, retained state, and snapshot-security checks remain enabled. Provider-owned identity initialization is unchanged. This option does not skip provider profile setup; keep that setup limited to the image owner's required initialization.
+
 - `readyWorkers`: non-negative integer target per eligible local project or repository and profile; defaults to `1`. Empty committed workspaces share a separate runtime-only target per provider and profile, replenished after successful activation. The first empty session provisions normally; browser presence alone does not warm empty workspaces. Set `0` to disable this profile's reserves while keeping warm-image reuse.
+
+A repository integration can select image-only standing capacity for the default repository profile. These reserves contain runtime artifacts and node enrollment, with no repository checkout or GitHub credential. Foreground admission authorizes repository preparation after a session claims compatible capacity. Native `readyWorkers`, `preparedPool.maxTotal`, cleanup, and expiry limits still apply.
+
 - `cloudWorkers.preparedPool.maxTotal`: non-negative integer Gateway-wide reserve cap; defaults to `4`. Preparing workers and unconfirmed cleanup count toward both limits. Set `0` to drain unused reserves and stop refill. Reserves incur running-machine charges and expire from successful session activation or explicit build demand using the provider's existing idle policy. See [Ready workers](/gateway/cloud-workers/warm-images#ready-workers).
 
 When a cloud-worker profile explicitly sets `settings.binary` and its version probe is rejected, OpenClaw warns once per configured path during the provider's lifetime. The warning names the configured path, the outdated version and required minimum or a bounded probe-failure reason, and whether the replacement is the current deployed executable or a managed copy. Implicit binary discovery and supported configured executables do not produce this warning.
@@ -203,12 +295,13 @@ Setup secrets do not disable snapshots. Names and store references affect compat
 
 - `profiles`: named worker profiles with non-empty, whitespace-trimmed ids. Each profile selects a provider registered by a plugin.
 - `provider`: non-empty worker provider id. The examples use the bundled `crabbox` provider and the QA Lab `static-ssh` provider.
-- `install`: SSH-backed `remote-exec` worker installation method. `"bundle"` (default) transfers a content-hashed bundle of the gateway's installed build and supports released, development, and unreleased versions. `"npm"` is an opt-in optimization for an unmodified packaged release; it installs `openclaw@<exact gateway version>` from the public npm registry and never installs `latest`. Node-backed `worker-turn` and `remote-exec` providers install the pinned Gateway bundle through node transport instead.
+- `install`: `"bundle"` (default) transfers the content-hashed Gateway build and uses preassembled node dependencies for the prepared target OS and CPU. SSH-backed `remote-exec` also supports explicit `"npm"` for an unmodified packaged release: it installs `openclaw@<exact gateway version>` and never `latest`. Node-backed profiles use this selection for common node bootstrap: `"npm"` installs exact dependency pins on the destination while retaining the Gateway's bundled JavaScript and lifecycle hooks. Their worker loop still uses the pinned Gateway bundle through node transport. Offline runtime exports always use preassembled bundles.
+- `lostWorkerRecovery`: optional `"repository-ref"` policy for repository sessions on dedicated workers. After the previous worker's exact cleanup is proven complete, the next admission provisions a replacement from the session's saved GitHub branch, or its recorded base commit if that exact branch was never published. Repository access and network failures still stop recovery. Dirty files and unpushed commits on the lost worker are discarded. Session identity, issuer, conversation, and Goal remain unchanged; stale worker results cannot replace the new workspace. Omit this field to retain the normal accepted-workspace recovery policy.
 - `suspendAfter`: optional profile-level duration such as `45m`, `90m`, or `2h`; minimum `1m`. The Gateway safely reclaims the worker after its session stays idle for this long. The next message provisions a replacement, warm when an image exists. Omit this field to disable automatic idle suspension; Crabbox lifetime limits still apply.
 - Bundled provider plugins are selected automatically when configured, but explicit disables and `plugins.allow` still apply. Include the provider id (for example, `crabbox`) when an allowlist is configured. External provider plugins must also be installed and explicitly enabled.
 - `settings`: provider-owned bounded JSON. The selected plugin defines and validates its keys; use [SecretRef objects](/gateway/secrets) for secret-bearing values. The static SSH provider requires `host`, `user`, `hostKey`, and `keyRef`; `port` defaults to `22`. `hostKey` must be one OpenSSH public host-key line (`algorithm base64`) obtained from the known host or another trusted channel, with no options prefix.
 
-A compatible Node runtime (24.16.0+ on 24.x or 26.1.0+; 24.22.1+/26.12.1+ strongly recommended for security) with WAL-reset-safe SQLite must already be installed on the worker. The opt-in `"npm"` method also requires `npm` and outbound HTTPS access to the public npm registry. Networked toolchain setup is provider policy; bootstrap reports an actionable error instead of installing toolchains itself.
+Workers require a [supported Node runtime](/install/node-compatibility) with WAL-reset-safe SQLite. Bundle installation requires no npm or registry access; explicit `"npm"` also needs npm and HTTPS access to the configured registry. Linux toolchain preparation and macOS/Windows prerequisites follow [worker setup](/gateway/cloud-workers/setup-and-bundle-installation). Missing prerequisites report the required next step before node activation.
 
 Node-backed `worker-turn` launches the self-contained worker loop and proxies model inference through the Gateway by default. A device-provider profile with `settings.inference: "worker"` instead uses [worker-local native inference](/gateway/cloud-workers/native-inference) and node-local provider credentials. Node-backed or SSH-backed `remote-exec` keeps the model loop on the Gateway and routes sandbox operations to the remote host. Node-backed Codex accepts process, filesystem, capability, and credential-free HTTP operations; authenticated HTTP is rejected before reaching the node. Both modes reconcile the session workspace and transcript through the durable placement lifecycle. A disconnected node-backed Codex attempt is terminal; reconnect permits only a fresh attempt, never process or stream resumption.
 

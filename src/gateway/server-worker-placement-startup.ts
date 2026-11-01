@@ -16,6 +16,7 @@ import { runInDetachedAsyncContext } from "../shared/detached-async-context.js";
 import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
 import { createGitHubPublicationRuntime } from "./github-publication-runtime.js";
 import type { NodeWorkerSupervisorTransport } from "./node-registry-private.js";
+import type { PrepareRepositoryPublicationCheckpoint } from "./repository-publication-checkpoint.js";
 import { measureGatewayCloseStep, measureGatewayRestartTrace } from "./restart-trace.js";
 import { emitSessionsChanged } from "./server-methods/session-change-event.js";
 import { measureStartup, type GatewayStartupTrace } from "./server-startup-trace.js";
@@ -74,6 +75,18 @@ const WORKER_PLACEMENT_RECONCILE_INTERVAL_MS = 60_000;
 
 type WorkerPlacementSidecar = { stop: () => Promise<void> };
 
+export function createGatewayGitHubPublicationRuntime(params: {
+  prepareRepositoryCheckpoint?: PrepareRepositoryPublicationCheckpoint;
+  placements: WorkerSessionPlacementStore;
+  getCommittedRuntimeConfig: () => OpenClawConfig;
+  warn: (message: string) => void;
+}) {
+  return createGitHubPublicationRuntime({
+    ...params,
+    loadSessionRuntime: loadWorkerPlacementSessionRuntimeModule,
+  });
+}
+
 export type GatewayWorkerPlacementRuntimeParams = {
   githubPublicationRuntime?: ReturnType<typeof createGitHubPublicationRuntime>;
   scheduler: GatewayScheduler;
@@ -90,17 +103,6 @@ export type GatewayWorkerPlacementRuntimeParams = {
   info?: (message: string) => void;
   warn: (message: string) => void;
 };
-
-export function createGatewayGitHubPublicationRuntime(params: {
-  placements: WorkerSessionPlacementStore;
-  getCommittedRuntimeConfig: () => OpenClawConfig;
-  warn: (message: string) => void;
-}) {
-  return createGitHubPublicationRuntime({
-    ...params,
-    loadSessionRuntime: loadWorkerPlacementSessionRuntimeModule,
-  });
-}
 
 export type GatewayWorkerPlacementRuntime = ReturnType<typeof createGatewayWorkerPlacementRuntime>;
 
@@ -122,6 +124,7 @@ export function createGatewayWorkerPlacementRuntime(params: GatewayWorkerPlaceme
     ready: githubPublicationReady,
     close: closeGitHubPublication,
     coordinator: githubPublication,
+    needsAcceptedWorkspacePublication,
     prepareAcceptedWorkspacePublication,
     publishAcceptedWorkspace,
     reconcilePublications,
@@ -213,6 +216,8 @@ export function createGatewayWorkerPlacementRuntime(params: GatewayWorkerPlaceme
       environments: params.environments,
       // Stop closes provider work before the ordinary dispatch failure path releases its resources.
       isShuttingDown: isStopping,
+      hasCurrentRunner: (id) => nodeWorkerSupervisorTransport?.hasCurrentRunner(id) === true,
+      waitForRecoveryNode: runtimeRefresh.waitForRecoveryNode,
       runnerAvailability,
       resolveDevicePlacementRequirement,
       isCurrentNodePlacement: createDevicePlacementAuthority(() => nodeWorkerSupervisorTransport),
@@ -265,6 +270,7 @@ export function createGatewayWorkerPlacementRuntime(params: GatewayWorkerPlaceme
             }),
         ),
       workspaceOperations,
+      needsAcceptedWorkspacePublication,
       prepareAcceptedWorkspacePublication,
       publishAcceptedWorkspace,
       resolveGitAuthor: (agentId) =>
@@ -353,6 +359,7 @@ export function createGatewayWorkerPlacementRuntime(params: GatewayWorkerPlaceme
     waitForInitialPlacement: dispatchService.waitForInitialPlacement,
     redispatchPlacement,
     workspaceOperations,
+    needsAcceptedWorkspacePublication,
     prepareAcceptedWorkspacePublication,
     publishAcceptedWorkspace,
     persistAbandonedPartial: params.persistAbandonedPartial,

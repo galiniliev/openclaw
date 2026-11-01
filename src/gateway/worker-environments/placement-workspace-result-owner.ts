@@ -80,3 +80,10 @@ export function matchesWorkspaceResultClaim(
         claim.owner.ownerEpoch === recoveryOwner.ownerEpoch))
   );
 }
+
+/** Reclaim owns a workspace result, not an active model execution. */
+export function isWorkerReclaimWorkspaceResult(
+  pending: Pick<WorkerWorkspacePendingResult, "claimId" | "runId">,
+): boolean {
+  return pending.claimId === pending.runId && pending.claimId.startsWith("reclaim-");
+}

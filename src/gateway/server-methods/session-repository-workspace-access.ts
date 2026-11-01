@@ -19,6 +19,7 @@ import {
 import { captureSessionMutationRouting } from "../session-sharing-preparation.js";
 import type { GatewaySessionEntryRead } from "../session-utils.js";
 import type { WorkerSessionPlacementStore } from "../worker-environments/placement-store.js";
+import { prepareRetainedWorkspaceTransfer } from "../worker-environments/retained-workspace.js";
 import { readSessionWorkerPlacementAsync } from "../worker-environments/session-placement-lifecycle.js";
 import type { GatewayRequestContext } from "./types.js";
 
@@ -185,6 +186,32 @@ export async function resolveRepositoryWorkspaceAccess(
         };
         const run = async (assertOperation = assertAuthorized) => {
           assertOperation();
+          if (repository.diskAuthority) {
+            const assertResumeCurrent = () => {
+              assertOperation();
+              const current = placementRead
+                ? placementRead.current()
+                : placements?.getMany([sessionId]).get(sessionId);
+              if (current?.turnClaim) {
+                throw new Error("Retained file transfer is waiting for current work to settle");
+              }
+            };
+            await prepareRetainedWorkspaceTransfer({
+              authority: repository.diskAuthority,
+              placement,
+              environments,
+              assertCurrent: assertOperation,
+              assertResumeCurrent,
+              beforeResume: async () => {
+                if (
+                  !placements?.listPendingWorkspaceResultsAsync ||
+                  (await placements.listPendingWorkspaceResultsAsync(sessionId)).length
+                ) {
+                  throw new Error("Retained file transfer is waiting for exact disk recovery");
+                }
+              },
+            });
+          }
           const tunnel = await environments.startTunnel({
             environmentId: placement.environmentId,
             ownerEpoch: placement.activeOwnerEpoch,

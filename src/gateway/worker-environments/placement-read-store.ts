@@ -4,7 +4,12 @@ import {
   placementAuthorityOwnerFor,
   withLocalPlacementTurns,
 } from "./placement-authority-owner.js";
-import { required, type WorkerSessionPlacementRecord } from "./placement-record.js";
+import {
+  required,
+  type WorkerSessionPlacementIdentity,
+  type WorkerSessionPlacementRecord,
+} from "./placement-record.js";
+import type { WorkerPlacementCancellationTarget } from "./placement-target.js";
 import { capturePlacementReplicaRead, readPlacementReplica } from "./placement-turn-authority.js";
 
 export function createPlacementReadStore(params: {
@@ -48,6 +53,13 @@ export function createPlacementReadStore(params: {
     return new Map(records.map((record) => [record.sessionId, structuredClone(record)]));
   };
   return {
+    canResumeRetainedOriginal(
+      input: WorkerSessionPlacementIdentity & { expected: WorkerPlacementCancellationTarget },
+    ) {
+      return runOpenClawStateWorkerOperation(context, (scope) =>
+        scope.execute({ type: "workerPlacements.canResumeRetainedOriginal", input }),
+      );
+    },
     getManyAsync,
     async getAsync(sessionId: string) {
       return (await getManyAsync([sessionId])).values().next().value;

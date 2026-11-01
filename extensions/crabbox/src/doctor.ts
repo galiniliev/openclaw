@@ -9,18 +9,16 @@ import {
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { findCrabboxBinary } from "./crabbox-binary.js";
 import * as managedBinary from "./crabbox-managed-binary.js";
-import { CRABBOX_WORKER_PROVIDER_ID, parseCrabboxSetupSecrets } from "./crabbox-worker-profile.js";
+import { CRABBOX_WORKER_PROVIDER_ID } from "./crabbox-worker-profile.js";
+import { parseCrabboxSetupSecrets } from "./crabbox-worker-setup-profile.js";
 import {
   crabboxWarmImageRecoveryHint,
+  projectCrabboxWarmImage,
   CRABBOX_WARM_IMAGE_WAIT_HINT,
   WARM_IMAGE_MAX_ENTRIES,
-  crabboxWarmImageHoldingLeaseIds,
   type WarmProfileRecord,
 } from "./crabbox-worker-warm-image-records.js";
-import {
-  admitCrabboxWarmImageProfile,
-  projectCrabboxWarmImage,
-} from "./crabbox-worker-warm-image-store.js";
+import { admitCrabboxWarmImageProfile } from "./crabbox-worker-warm-image-store.js";
 
 export const CRABBOX_CLOUD_WORKER_PROFILE_CHECK_ID = "crabbox/cloud-worker-profiles";
 const CRABBOX_SETUP_SECRETS_CHECK_ID = "crabbox/setup-secrets";
@@ -336,15 +334,11 @@ export function registerCrabboxWorkerProviderDoctorChecks(
                 : CRABBOX_WARM_IMAGE_WAIT_HINT,
             });
           }
-          if (image.retirement) {
-            const holders = crabboxWarmImageHoldingLeaseIds(image, image.retirement.checkpointId);
-            const held =
-              holders.length > 0
-                ? ` Held by allocation leases: ${holders.join(", ").slice(0, 1024)}.`
-                : "";
+          for (const retirement of image.retirements) {
             findings.push({
               ...details,
-              message: `Warm-image checkpoint ${image.retirement.checkpointId}${display} is still awaiting deletion.${held}`,
+              severity: retirement.held ? "info" : "warning",
+              message: `Warm-image checkpoint ${retirement.checkpointId}${display} is ${retirement.held ? "deferred while allocations retain it" : "still awaiting deletion"}.`,
               fixHint:
                 "Cleanup retries during periodic maintenance or the next warm-image capture or worker teardown. Confirmed-gone allocation leases are released automatically; live or unconfirmed leases keep their holds. Inspect `openclaw crabbox warm-images --json` and the Gateway log for holding leases or provider deletion errors if it remains pending.",
             });

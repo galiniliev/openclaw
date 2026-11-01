@@ -3,6 +3,8 @@ import type { EngineConnection } from "../../infra/sql-connection.js";
 import { sessionChanges } from "../../sessions/session-row-changes.js";
 import { ensureRepositoryWorkspacePendingResultSchema } from "../../state/openclaw-state-db-schema-additive.js";
 import type { DB as StateDatabase } from "../../state/openclaw-state-db.generated.js";
+import { readRetainedWorkspaceAuthority } from "../../state/retained-workspace-authority.js";
+import { findSessionRepositoryWorkspaceInDatabase } from "../../state/session-repository-workspaces.kernel.js";
 import {
   resolvePlacementTurnEnvironment,
   type WorkerSessionPlacementRecord,
@@ -40,6 +42,9 @@ export function pendingResultFromRow(
     recoveryRequestedAtMs: row.recovery_requested_at_ms,
     workspaceAcceptedAtMs: row.workspace_accepted_at_ms,
     stagedResultRef: row.staged_result_ref,
+    ...(row.disk_authority_json
+      ? { diskAuthority: readRetainedWorkspaceAuthority(row.disk_authority_json) }
+      : {}),
     ...(row.repository_workspace_id ? { repositoryWorkspaceId: row.repository_workspace_id } : {}),
   };
 }
@@ -170,6 +175,16 @@ export function insertWorkerWorkspacePendingResult(
     throw new Error(`Cannot retain stale worker workspace result for ${claim.sessionId}`);
   }
   const { environmentId, ownerEpoch } = environment;
+  const repository = findSessionRepositoryWorkspaceInDatabase(db, placement);
+  const disk = repository?.diskAuthority;
+  if (
+    disk &&
+    (disk.environmentId !== environmentId ||
+      disk.ownerEpoch !== ownerEpoch ||
+      disk.sessionId !== placement.sessionId)
+  ) {
+    throw new Error("Retained workspace result lost its disk owner");
+  }
   const result = executeSqliteQuerySync(
     db,
     query(db)
@@ -185,6 +200,8 @@ export function insertWorkerWorkspacePendingResult(
         recovery_requested_at_ms: null,
         workspace_accepted_at_ms: null,
         staged_result_ref: null,
+        disk_authority_json: disk ? JSON.stringify(disk) : null,
+        ...(disk ? { repository_workspace_id: repository.workspaceId } : {}),
         created_at_ms: nowMs,
       })
       .onConflict((conflict) => conflict.column("session_id").doNothing())

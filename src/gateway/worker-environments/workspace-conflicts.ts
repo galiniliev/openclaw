@@ -1,4 +1,5 @@
 import { asOptionalRecord as readRecord } from "@openclaw/normalization-core/record-coerce";
+import type { SessionManager } from "../../agents/sessions/session-manager.js";
 
 export type WorkerWorkspaceResultConflict = {
   paths: string[];
@@ -95,4 +96,44 @@ export function formatWorkspaceConflictSummary(
   const remainder =
     totalCount > visiblePaths.length ? ` (+${totalCount - visiblePaths.length} more)` : "";
   return `Cloud result applied with ${totalCount} conflict(s); kept local versions: ${visible}${remainder}. Cloud versions staged at ${stagedResultRef}.`;
+}
+
+export function latestDurableWorkspaceConflict(
+  entries: ReturnType<SessionManager["getBranch"]>,
+): WorkerWorkspaceResultConflict | undefined {
+  for (const entry of entries.toReversed()) {
+    if (entry.type !== "custom_message") {
+      continue;
+    }
+    if (entry.customType === WORKSPACE_CONFLICT_CLEARED_TRANSCRIPT_TYPE) {
+      return undefined;
+    }
+    if (entry.customType !== WORKSPACE_CONFLICT_TRANSCRIPT_TYPE) {
+      continue;
+    }
+    const details = entry.details as
+      | { paths?: unknown; stagedResultRef?: unknown; totalCount?: unknown }
+      | null
+      | undefined;
+    if (
+      !Array.isArray(details?.paths) ||
+      details.paths.length === 0 ||
+      !details.paths.every(
+        (entryPath): entryPath is string => typeof entryPath === "string" && entryPath.length > 0,
+      ) ||
+      typeof details.stagedResultRef !== "string" ||
+      (details.totalCount !== undefined &&
+        (!Number.isSafeInteger(details.totalCount) ||
+          (details.totalCount as number) < details.paths.length)) ||
+      !/^refs\/openclaw\/worker-results\/[A-Za-z0-9-]+$/u.test(details.stagedResultRef)
+    ) {
+      return undefined;
+    }
+    return projectWorkspaceResultConflict(
+      details.paths,
+      details.stagedResultRef,
+      details.totalCount as number | undefined,
+    );
+  }
+  return undefined;
 }

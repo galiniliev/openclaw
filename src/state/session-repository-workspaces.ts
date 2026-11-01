@@ -33,10 +33,12 @@ import {
 } from "./session-repository-workspaces.receipts.js";
 import type {
   RepositoryWorkspaceBase,
+  RepositoryWorkspaceBranchReset,
   RepositoryWorkspaceCheckpoint,
   RepositoryWorkspaceCreate,
   RepositoryWorkspaceMutationResult,
   RepositoryWorkspaceOwner,
+  RepositoryWorkspaceRetainedOwner,
   SessionRepositoryWorkspaceRecord,
 } from "./session-repository-workspaces.types.js";
 import type { RepositoryWorkspaceWorkerOperations } from "./session-repository-workspaces.worker-contract.js";
@@ -308,6 +310,31 @@ export function createSessionRepositoryWorkspaceStore(
               expectedRevision: input.expectedRevision,
               baseCommit: input.baseCommit,
               baseManifestHash: input.baseManifestHash,
+              diskAuthority: input.diskAuthority,
+            },
+          },
+          input.assertCurrent,
+        ),
+      );
+    },
+    async rebindRetainedOwner({
+      assertCurrent,
+      ...input
+    }: Guarded<RepositoryWorkspaceRetainedOwner>) {
+      return requireWorkspace(
+        await mutate({ type: "repositoryWorkspaces.rebindRetainedOwner", input }, assertCurrent),
+      );
+    },
+    async resetToBranch(input: Guarded<RepositoryWorkspaceBranchReset>) {
+      return requireWorkspace(
+        await mutate(
+          {
+            type: "repositoryWorkspaces.resetToBranch",
+            input: {
+              sourceCommit: input.sourceCommit,
+              recovery: input.recovery,
+              workspaceId: input.workspaceId,
+              expectedRevision: input.expectedRevision,
             },
           },
           input.assertCurrent,

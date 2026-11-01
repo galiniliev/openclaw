@@ -25,6 +25,7 @@ import {
   type WorkspaceHashMemo,
 } from "./workspace-hash-memo.js";
 import { MAX_WORKSPACE_MANIFEST_BYTES } from "./workspace-inventory-limits.js";
+import { measureReconcileStep } from "./workspace-reconcile-timing.js";
 import {
   createRemoteWorkspaceManifestScript,
   REMOTE_WORKSPACE_MANIFEST_JS,
@@ -188,40 +189,42 @@ export async function captureRemoteWorkspaceManifest(params: {
   hashMemo: WorkspaceHashMemo;
   maxHashMemoBytes?: number;
 }): Promise<string> {
-  const captured = await params.runWorkspaceCommand({
-    transportRetry: "idempotent",
-    argv: [
-      "node",
-      "-e",
-      params.maxHashMemoBytes === undefined
-        ? REMOTE_WORKSPACE_MANIFEST_JS
-        : createRemoteWorkspaceManifestScript(params.maxHashMemoBytes),
-      params.remoteWorkspaceDir,
-      params.baseCommit ?? "",
-      params.baseCommit ? "eligible" : "all",
-      ...params.priorManifestDigests,
-      "memo-v1",
-    ],
-    input: serializeRemoteWorkspaceHashMemo(params.hashMemo, params.maxHashMemoBytes),
-  });
-  if (!workerWorkspaceCommandSucceeded(captured)) {
-    throw new Error(
-      `Worker workspace manifest capture failed: ${boundedWorkerError(
-        captured.stderr.trim() ||
-          `${captured.termination} (exit code ${captured.code}, signal ${captured.signal})`,
-      )}`,
-    );
-  }
-  let response;
-  try {
-    response = parseRemoteWorkspaceManifestEnvelope(captured.stdout);
-  } catch (error) {
-    throw new Error("Worker workspace manifest returned an invalid memo response", {
-      cause: error,
+  return measureReconcileStep("remote-manifest-capture", async () => {
+    const captured = await params.runWorkspaceCommand({
+      transportRetry: "idempotent",
+      argv: [
+        "node",
+        "-e",
+        params.maxHashMemoBytes === undefined
+          ? REMOTE_WORKSPACE_MANIFEST_JS
+          : createRemoteWorkspaceManifestScript(params.maxHashMemoBytes),
+        params.remoteWorkspaceDir,
+        params.baseCommit ?? "",
+        params.baseCommit ? "eligible" : "all",
+        ...params.priorManifestDigests,
+        "memo-v1",
+      ],
+      input: serializeRemoteWorkspaceHashMemo(params.hashMemo, params.maxHashMemoBytes),
     });
-  }
-  replaceWorkerWorkspaceHashMemoEntries(params.hashMemo, response.memo);
-  return response.manifestRef;
+    if (!workerWorkspaceCommandSucceeded(captured)) {
+      throw new Error(
+        `Worker workspace manifest capture failed: ${boundedWorkerError(
+          captured.stderr.trim() ||
+            `${captured.termination} (exit code ${captured.code}, signal ${captured.signal})`,
+        )}`,
+      );
+    }
+    let response;
+    try {
+      response = parseRemoteWorkspaceManifestEnvelope(captured.stdout);
+    } catch (error) {
+      throw new Error("Worker workspace manifest returned an invalid memo response", {
+        cause: error,
+      });
+    }
+    replaceWorkerWorkspaceHashMemoEntries(params.hashMemo, response.memo);
+    return response.manifestRef;
+  });
 }
 
 export async function probeWorkspaceGitMode(params: {

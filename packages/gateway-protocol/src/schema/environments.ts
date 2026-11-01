@@ -337,16 +337,31 @@ export const EnvironmentsCreateParamsSchema = closedObject({
 /** Create result uses the same public summary shape as list and status. */
 export const EnvironmentsCreateResultSchema = closedObject(createEnvironmentSummaryProperties());
 
-/** Prepares a configured profile's local Git project without dispatching a session. */
-export const EnvironmentsPrepareParamsSchema = closedObject({
-  profileId: NonEmptyString,
-  projectPath: NonEmptyString,
-});
+/** Repository builds keep their original requester through the final preparation receipt. */
+export const EnvironmentsPrepareParamsSchema = Type.Union([
+  closedObject({
+    profileId: NonEmptyString,
+    projectPath: NonEmptyString,
+    executionMode: Type.Optional(WorkerExecutionModeSchema),
+  }),
+  closedObject({
+    profileId: NonEmptyString,
+    executionMode: Type.Optional(WorkerExecutionModeSchema),
+    repository: closedObject({
+      agentId: NonEmptyString,
+      url: Type.String({ minLength: 1, maxLength: 2048 }),
+      ref: Type.Optional(Type.String({ minLength: 1, maxLength: 1024 })),
+    }),
+  }),
+]);
 
 export const EnvironmentsPrepareResultSchema = closedObject({
   environmentId: NonEmptyString,
   preparationKey: NonEmptyString,
+  // Older preparation receipts predate the shared snapshot compatibility projection.
+  cacheKey: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
   reused: Type.Boolean(),
+  status: Type.Optional(Type.Literal("ready")),
 });
 
 /** Destroys one durable worker environment by its gateway-owned id. */

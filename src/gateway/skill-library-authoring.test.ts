@@ -269,7 +269,7 @@ it("serves worker Workshop through the same Gateway capability and rejects a los
   const { createWorkerGatewayToolRuntime } =
     await import("./worker-environments/worker-gateway-tool-runtime.js");
   const { createWorkerWorkshopCallRetention } =
-    await import("./worker-environments/worker-session-tool-executor.js");
+    await import("./worker-environments/worker-session-tool-result.js");
   const { createWorkerGatewayToolProxies } = await import("../worker/worker-gateway-tools.js");
   const claim = {
     sessionId: "shared",

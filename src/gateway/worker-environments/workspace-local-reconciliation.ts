@@ -9,6 +9,7 @@ import {
   type WorkspaceHashMemo,
 } from "./workspace-hash-memo.js";
 import type { WorkerWorkspaceManifest } from "./workspace-manifest.js";
+import { measureReconcileStep } from "./workspace-reconcile-timing.js";
 import {
   type WorkerWorkspaceApplyResult,
   inspectAcceptedWorkerWorkspace,
@@ -18,10 +19,16 @@ import type { WorkerWorkspaceGitHistory } from "./workspace-result-inventory.js"
 import { workerWorkspaceResultStaging } from "./workspace-result-staging.js";
 
 /** Accepts authenticated transport snapshots through one local journal and result owner. */
-export async function prepareLocalWorkspaceReconciliation(params: {
+type LocalReconciliationParams = {
   request: WorkerLocalWorkspaceReconcileRequest;
   hashMemo: WorkspaceHashMemo;
-}) {
+};
+
+export function prepareLocalWorkspaceReconciliation(params: LocalReconciliationParams) {
+  return measureReconcileStep("local-recovery-prepare", () => prepareLocalReconciliation(params));
+}
+
+async function prepareLocalReconciliation(params: LocalReconciliationParams) {
   const { request, hashMemo } = params;
   const pending = await request.journal.load();
   if (pending) {
@@ -53,22 +60,26 @@ export async function prepareLocalWorkspaceReconciliation(params: {
     verifyStable: () => Promise<void>;
   }): Promise<WorkerWorkspaceReconcileResult> => {
     const additionalPaths = snapshot.current.baseCommit
-      ? await selectLocalWorkspaceCanonicalPaths({
-          root: request.localPath,
-          admittedPaths: "[]",
-          assertCurrent: () => request.assertCurrent?.(),
-        })
+      ? await measureReconcileStep("local-canonical-inventory", () =>
+          selectLocalWorkspaceCanonicalPaths({
+            root: request.localPath,
+            admittedPaths: "[]",
+            assertCurrent: () => request.assertCurrent?.(),
+          }),
+        )
       : undefined;
     const inspected =
       snapshot.currentManifestRef === request.baseManifestRef
         ? await runLocal(() =>
-            inspectAcceptedWorkerWorkspace({
-              root: request.localPath,
-              expectedManifestRef: request.baseManifestRef,
-              base: snapshot.base,
-              current: snapshot.current,
-              additionalPaths,
-            }),
+            measureReconcileStep("local-manifest-inspect", () =>
+              inspectAcceptedWorkerWorkspace({
+                root: request.localPath,
+                expectedManifestRef: request.baseManifestRef,
+                base: snapshot.base,
+                current: snapshot.current,
+                additionalPaths,
+              }),
+            ),
           )
         : undefined;
     const hasWorkerCommits =
@@ -79,18 +90,20 @@ export async function prepareLocalWorkspaceReconciliation(params: {
       await snapshot.verifyStable();
     }
     const staged = await runLocal(() =>
-      workerWorkspaceResultStaging.prepareRequestedWorkerWorkspaceResult({
-        request,
-        stagingRoot: snapshot.stagingRoot,
-        currentManifestRef: snapshot.currentManifestRef,
-        baseManifestRaw: snapshot.baseRaw,
-        currentManifestRaw: snapshot.currentRaw,
-        gitHistory: snapshot.gitHistory,
-        gitPackPath: snapshot.gitPackPath,
-        publishAcceptedManifest: snapshot.publishAcceptedManifest,
-        unchanged,
-        additionalPaths,
-      }),
+      measureReconcileStep("local-result-prepare", () =>
+        workerWorkspaceResultStaging.prepareRequestedWorkerWorkspaceResult({
+          request,
+          stagingRoot: snapshot.stagingRoot,
+          currentManifestRef: snapshot.currentManifestRef,
+          baseManifestRaw: snapshot.baseRaw,
+          currentManifestRaw: snapshot.currentRaw,
+          gitHistory: snapshot.gitHistory,
+          gitPackPath: snapshot.gitPackPath,
+          publishAcceptedManifest: snapshot.publishAcceptedManifest,
+          unchanged,
+          additionalPaths,
+        }),
+      ),
     );
     const { acceptUnchangedStagedResult } = staged;
     return {

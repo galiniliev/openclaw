@@ -213,19 +213,18 @@ describe("Crabbox warm-image doctor", () => {
           provider: "aws",
           message: "Native capture is unsupported by this coordinator.",
         };
+      } else if (operation === "retire") {
+        record.retirements = [{ type: "retire", checkpointId: "chk_predecessor" }];
       } else {
-        record.operation =
-          operation === "retire"
-            ? { type: "retire", checkpointId: "chk_predecessor" }
-            : captureOperation("capture-selector", {
-                leaseId: "cbx_capture",
-                provider: "aws",
-                startedAtMs: now - (operation === "scrubbing" ? 1_200_000 : 0),
-                phase: operation,
-                ...(operation === "uncertain"
-                  ? { checkpointIds: ["chk_interrupted_a", "chk_interrupted_b"] }
-                  : {}),
-              });
+        record.operation = captureOperation("capture-selector", {
+          leaseId: "cbx_capture",
+          provider: "aws",
+          startedAtMs: now - (operation === "scrubbing" ? 1_200_000 : 0),
+          phase: operation,
+          ...(operation === "uncertain"
+            ? { checkpointIds: ["chk_interrupted_a", "chk_interrupted_b"] }
+            : {}),
+        });
       }
       if (operation === "retire") {
         record.allocations = {

@@ -56,6 +56,7 @@ const CLEANUP_TIMEOUT_DETAILS_TRUNCATED_SUFFIX = "...[truncated]";
 
 type AgentCleanupLogger = {
   warn: (message: string) => void;
+  info?: (message: string, meta: Record<string, unknown>) => void;
 };
 
 function truncateCleanupTimeoutDetails(value: string): string {
@@ -123,6 +124,8 @@ type AgentCleanupStepOutcome = "done" | "timeout" | { error: unknown };
 async function settleAgentCleanupStep(
   params: AgentCleanupStepParams,
 ): Promise<AgentCleanupStepOutcome> {
+  const startedAt = Date.now();
+  const started = performance.now();
   let timeoutMs = resolveOptionalIntegerOption(params.timeoutMs, { min: 1 });
   if (timeoutMs === undefined) {
     const env = params.env ?? process.env;
@@ -168,6 +171,19 @@ async function settleAgentCleanupStep(
     params.log.warn(
       `agent cleanup timed out: runId=${params.runId} sessionId=${params.sessionId} step=${params.step} timeoutMs=${timeoutMs}${details}`,
     );
+  }
+  try {
+    params.log.info?.("Agent cleanup phase", {
+      runId: params.runId,
+      sessionId: params.sessionId,
+      phase: params.step,
+      startedAt,
+      endedAt: Date.now(),
+      durationMs: Math.round(performance.now() - started),
+      outcome: typeof result === "object" ? "failed" : result,
+    });
+  } catch {
+    // Observation cannot change cleanup settlement or certify closure after timeout.
   }
   return result;
 }

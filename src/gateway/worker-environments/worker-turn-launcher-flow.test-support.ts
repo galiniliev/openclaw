@@ -139,6 +139,7 @@ export function environmentForTunnel(
 ): WorkerTurnEnvironmentService {
   return {
     get: vi.fn(attachedEnvironment),
+    inspectTurnLease: vi.fn(async () => {}),
     acquireTurnCredential: vi.fn(async () => credential()),
     acknowledgeCredentialDelivery: vi.fn(async () => true),
     stopTunnel: vi.fn(async () => {}),
@@ -163,6 +164,7 @@ export function remoteExecEnvironment(
   return {
     ...unusedEnvironments(),
     get: vi.fn(attachedEnvironment),
+    inspectTurnLease: vi.fn(async () => {}),
     startTunnel: vi.fn(async () => {
       onStart?.();
       return tunnel;

@@ -1,12 +1,19 @@
 import { z } from "zod";
 import { parseDurationMs } from "../cli/parse-duration.js";
 import { normalizeCloudRepo } from "./cloud-worker-project-profiles.js";
-import { validateProviderSettings } from "./provider-settings.js";
+import {
+  validateProviderSettings,
+  WORKER_PROFILE_SETTINGS_JSON_LIMITS,
+} from "./provider-settings.js";
 import { projectConfigFieldMetadata } from "./schema.field-metadata.js";
 import { configUiMetadata } from "./zod-schema.sensitive.js";
 
 const CloudWorkerSettingsSchema = z.record(z.string(), z.unknown()).superRefine((value, ctx) => {
-  const message = validateProviderSettings(value, "Worker profile");
+  const message = validateProviderSettings(
+    value,
+    "Worker profile",
+    WORKER_PROFILE_SETTINGS_JSON_LIMITS,
+  );
   if (message) {
     ctx.addIssue({ code: "custom", message });
   }
@@ -20,7 +27,11 @@ const CloudWorkerProfileSchema = z
     }),
     install: z.enum(["bundle", "npm"]).optional().default("bundle").register(configUiMetadata, {
       label: "Cloud Worker Install Method",
-      help: 'Worker installation method: "bundle" (default) transfers the gateway\'s content-hashed installed build and supports released, development, and unreleased versions; "npm" installs the exact gateway version and is available only when that version is released.',
+      help: 'Worker installation uses the gateway\'s content-hashed preassembled bundle for released, development, and unreleased versions. The legacy "npm" preference is accepted but also uses the bundle; workers never install or resolve packages.',
+    }),
+    runSetupScript: z.boolean().optional().register(configUiMetadata, {
+      label: "Run Repository Setup",
+      help: "Set false for a prebuilt worker profile to skip repository lifecycle hooks and detected dependency installation during preparation and dispatch. Native runtime, identity, ownership, and snapshot security checks remain enabled. Unset preserves normal setup authorization and behavior.",
     }),
     suspendAfter: z
       .string()
@@ -36,9 +47,23 @@ const CloudWorkerProfileSchema = z
         label: "Cloud Worker Idle Suspend Duration",
         help: "Automatically reclaims an idle cloud worker after this duration, such as 45m or 2h; the next message provisions a replacement. Minimum: 1m. Leave unset to keep workers running.",
       }),
+    retention: z
+      .strictObject({
+        mode: z.literal("session-disk"),
+        computeWindowSeconds: z.number().int().positive().max(2_147_483),
+      })
+      .optional()
+      .register(configUiMetadata, {
+        label: "Session Disk Retention",
+        help: "Retain a private disk until session archive or deletion. Each activation admits work for the finite compute window; provider idle stop and pending-stop recovery do not guarantee a physical billing deadline. Applies only to new session allocations.",
+      }),
     readyWorkers: z.number().int().nonnegative().optional().register(configUiMetadata, {
       label: "Cloud Worker Ready Reserve Target",
       help: "Target unassigned prepared workers per eligible project using this profile (default: 1), subject to the Gateway-wide prepared pool cap. Set 0 to disable this profile's reserves while preserving snapshot reuse. Preparing workers and unconfirmed reserve cleanup count toward the target.",
+    }),
+    lostWorkerRecovery: z.literal("repository-ref").optional().register(configUiMetadata, {
+      label: "Lost Worker Recovery",
+      help: "Recover a definitively lost dedicated worker from the session's recorded GitHub branch after exact provider cleanup. Worker files, disks, packages, and unpushed commits are ephemeral. Unset preserves workspace reconciliation and retained-checkpoint recovery; session history, Goal, original authority, and unknown-effect holds remain intact.",
     }),
     settings: CloudWorkerSettingsSchema.optional().register(configUiMetadata, {
       label: "Cloud Worker Provider Settings",

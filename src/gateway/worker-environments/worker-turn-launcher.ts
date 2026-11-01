@@ -227,10 +227,7 @@ export function createWorkerSessionTurnPlacementProvider(options: WorkerTurnLaun
               initialSetup = ready;
               await previousSetup?.release();
             }
-            if (
-              routablePlacement.state === "reclaimed" ||
-              (routablePlacement.state === "failed" && routablePlacement.activeOwnerEpoch !== null)
-            ) {
+            if (requiredAdmission.needsRedispatch(routablePlacement)) {
               reportProvisioning();
               preparedResultPending = undefined;
               routablePlacement = await options.redispatchPlacement(routablePlacement, {
@@ -242,6 +239,14 @@ export function createWorkerSessionTurnPlacementProvider(options: WorkerTurnLaun
                 { ...claim, agentId: identity.agentId, sessionKey: identity.sessionKey },
                 routablePlacement,
               );
+            }
+            if (routablePlacement.state === "draining") {
+              routablePlacement = await requiredAdmission.recoverTurnPlacement(
+                routablePlacement,
+                inputTurn,
+                assertAdmissionCurrent,
+              );
+              preparedResultPending = undefined;
             }
             const resultPending =
               preparedResultPending ??
@@ -258,9 +263,16 @@ export function createWorkerSessionTurnPlacementProvider(options: WorkerTurnLaun
               );
               continue;
             }
+            routablePlacement = await requiredAdmission.recoverTurnPlacement(
+              routablePlacement,
+              inputTurn,
+              assertAdmissionCurrent,
+            );
+            if (requiredAdmission.needsRedispatch(routablePlacement)) {
+              continue;
+            }
             placement = requireActivePlacement(routablePlacement);
-            const environmentId = placement.environmentId;
-            const refresh = options.environments.readRuntimeRefresh?.(environmentId);
+            const refresh = options.environments.readRuntimeRefresh?.(placement.environmentId);
             if (refresh) {
               reportProvisioning();
               await waitForWorkerRuntimeRefresh({
@@ -284,7 +296,7 @@ export function createWorkerSessionTurnPlacementProvider(options: WorkerTurnLaun
             }
             const assertClaimCurrent = () => {
               assertAdmissionCurrent();
-              if (options.environments.readRuntimeRefresh?.(environmentId)) {
+              if (options.environments.readRuntimeRefresh?.(placement.environmentId)) {
                 throw new WorkerRuntimeRefreshPendingError(
                   "Worker runtime refresh started during turn admission",
                 );
@@ -417,6 +429,17 @@ export function createWorkerSessionTurnPlacementProvider(options: WorkerTurnLaun
                 throw error;
               }
               placement = assertPreparationCurrent();
+              if (workspace.kind === "repository") {
+                const { prepareRetainedWorkspace } = await import("./retained-workspace.js");
+                assertPreparationCurrent();
+                workspace = await prepareRetainedWorkspace({
+                  workspace,
+                  placement,
+                  getEnvironment: () => options.environments.get(placement.environmentId),
+                  assertCurrent: assertPreparationCurrent,
+                });
+              }
+              placement = assertPreparationCurrent();
               const execute = remoteExec
                 ? (await raceNodeWorkerOperation(loadRemoteExecTurn(), turn.abortSignal))
                     .executeRemoteExecTurn
@@ -443,6 +466,7 @@ export function createWorkerSessionTurnPlacementProvider(options: WorkerTurnLaun
                 placement,
                 placements: options.placements,
                 workspace,
+                needsAcceptedWorkspacePublication: options.needsAcceptedWorkspacePublication,
                 prepareAcceptedWorkspacePublication: options.prepareAcceptedWorkspacePublication,
                 publishAcceptedWorkspace: options.publishAcceptedWorkspace,
                 workspaceOperations: options.workspaceOperations,

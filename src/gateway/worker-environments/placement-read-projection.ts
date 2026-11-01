@@ -311,6 +311,7 @@ export function readWorkerSessionPlacementProjectionInDatabase(
           providerId: record.providerId,
           profileId: record.profileId,
           profileSnapshot: record.profileSnapshot,
+          retention: record.retention,
           ...workerInferenceMetadata(record),
           state: record.state,
           leaseId: record.leaseId,

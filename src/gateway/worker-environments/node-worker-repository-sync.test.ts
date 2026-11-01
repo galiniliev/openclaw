@@ -251,7 +251,12 @@ it.each([
           >[0]
         | undefined;
       let revision = 0;
-      const capture = async (active = actions, directory = first.remoteWorkspaceDir) => {
+      const capture = async (
+        active = actions,
+        directory = first.remoteWorkspaceDir,
+        options: { changed?: boolean; lateWriter?: boolean } = {},
+      ) => {
+        const changed = options.changed ?? true;
         const firstCapture = manifestCaptures.length;
         const phases: string[] = [];
         const result = await active.reconcileWorkspace({
@@ -301,19 +306,25 @@ it.each([
             },
           },
         });
+        expect(result.changed).toBe(changed);
         expect(phases).toEqual([
           "repositoryCheckpointUpload",
-          "repositoryVerification",
           "repositoryPublicationUpload",
-          "repositoryVerification",
+          ...(changed ? ["repositoryVerification"] : []),
           "repositoryCheckpointStage",
         ]);
         await verifyReconciledWorkspaceFinal(result, {
-          assertActive: async () => {},
+          assertActive: async () => {
+            if (options.lateWriter) {
+              await fs.writeFile(path.join(directory, "late-writer.txt"), "late workspace write\n");
+            }
+          },
           resume: async () => {},
         });
         const captures = manifestCaptures.slice(firstCapture);
-        expect(captures).toHaveLength(4);
+        // Unchanged checkpoints use the canonical final fence once; changed
+        // checkpoints retain preparation plus both final remote fences.
+        expect(captures).toHaveLength(changed ? 3 : 1);
         expect(captures.slice(1).every(({ metrics }) => metrics.contentHashCount === 0)).toBe(true);
         expect(captures.slice(1).every(({ metrics }) => metrics.memoHitCount > 0)).toBe(true);
         return captures;
@@ -325,10 +336,14 @@ it.each([
         return;
       }
       // Startup must accept setup output even when GitHub normalization is unavailable.
-      const initialCaptures = await capture();
+      const initialCaptures = await capture(actions, first.remoteWorkspaceDir, { changed: false });
       expect(initialCaptures[0]!.metrics.contentHashCount).toBeGreaterThan(0);
       expect(revision).toBe(1);
       expect(checkpoint).toBeDefined();
+      const unchangedCaptures = await capture(actions, first.remoteWorkspaceDir, {
+        changed: false,
+      });
+      expect(unchangedCaptures).toHaveLength(1);
       await gitAt(first.remoteWorkspaceDir, "rm", "--cached", "retained-removal.ignored");
       await fs.writeFile(
         path.join(first.remoteWorkspaceDir, "published[1].ignored"),
@@ -409,7 +424,7 @@ it.each([
         root: path.join(home, "node-host"),
         env: { PATH: process.env.PATH, HOME: home },
       });
-      await capture(replacement, restored.remoteWorkspaceDir);
+      await capture(replacement, restored.remoteWorkspaceDir, { changed: false });
       expect(
         JSON.parse(checkpoint!.currentManifestRaw).entries.map(
           (entry: { path: string }) => entry.path,
@@ -434,6 +449,20 @@ it.each([
           sha: null,
         });
       }
+      const acceptedCheckpoint = checkpoint;
+      await expect(
+        capture(replacement, restored.remoteWorkspaceDir, {
+          changed: false,
+          lateWriter: true,
+        }),
+      ).rejects.toMatchObject({
+        message: "Repository workspace changed during checkpoint capture",
+        reclaimDisposition: "retry",
+      });
+      expect(checkpoint).toBe(acceptedCheckpoint);
+      expect(
+        await fs.readFile(path.join(restored.remoteWorkspaceDir, "late-writer.txt"), "utf8"),
+      ).toBe("late workspace write\n");
     } finally {
       await server.close();
       await service.closeAll();

@@ -44,7 +44,9 @@ describe("ordinary cloud runtime preparation", () => {
             );
             expect(script).not.toContain(workerBundle.token);
             expect(script).not.toContain(nodeBootstrap.token);
-            return commandResult({ code: fail ? 1 : 0 });
+            return commandResult({
+              code: fail ? 1 : 0,
+            });
           }
           events.push("enrollment setup");
         }

@@ -25,15 +25,14 @@ import { SessionMutationAuthorizationChangedError } from "../session-sharing.js"
 import { withGatewaySessionEntryReadOnly } from "../session-utils-read-lifetime.js";
 import { resolveDevicePlacementEligibility } from "../worker-environments/device-placement-eligibility.js";
 import { selectDevicePlacementCandidates } from "../worker-environments/device-placement-selector.js";
-import { DEVICE_WORKER_PROVIDER_ID } from "../worker-environments/device-provider-identity.js";
 import { deviceUnavailableText } from "../worker-environments/device-provider.js";
 import { composePlacementAuthorization } from "../worker-environments/placement-authorization.js";
 import {
   resolveProjectProfileDestination,
   resolveWorkerPlacementDestination,
 } from "../worker-environments/placement-destination.js";
+import { stopWorkerSessionPlacement } from "../worker-environments/placement-disk-pause.js";
 import { canRetryDeviceDispatch } from "../worker-environments/placement-dispatch-failure.js";
-import { readWorkerPlacementIdentity } from "../worker-environments/placement-projector.js";
 import {
   isForceAbandonedWorkerPlacement,
   type WorkerSessionPlacementRecord,
@@ -52,6 +51,7 @@ import { withWorkerPlacementAuthorization } from "./session-placement-authorizat
 import {
   respondWorkerPlacement,
   respondWorkerDispatchError,
+  respondWorkerRecoveryRequired,
 } from "./sessions-dispatch-response.js";
 import { requireSessionKey } from "./sessions-shared.js";
 import type { GatewayRequestContext, GatewayRequestHandlers, RespondFn } from "./types.js";
@@ -323,29 +323,22 @@ export const sessionDispatchHandlers: GatewayRequestHandlers = {
       }
       const existingPlacement = await readSessionWorkerPlacementAsync({ context, sessionId });
       sessionMutationAuthorization?.assertCurrent();
+      const retainedOriginal =
+        existingPlacement?.state === "failed" &&
+        (await context.workerSessionPlacementService?.canResumeRetainedOriginal?.({
+          ...session,
+          expected: existingPlacement,
+        }));
+      sessionMutationAuthorization?.assertCurrent();
       if (
         existingPlacement?.state === "failed" &&
+        !retainedOriginal &&
         !isFailedWorkerPlacementEnvironmentGone({
           environmentService: context.workerEnvironmentService,
           placement: existingPlacement,
         })
       ) {
-        let providerId: string | undefined;
-        try {
-          const identity = readWorkerPlacementIdentity(
-            existingPlacement,
-            context.workerEnvironmentService,
-          );
-          providerId = identity?.providerId;
-        } catch {
-          // Missing inventory proof must retain the refusal even when its label is unknown.
-        }
-        respondInvalidWorkerSession(
-          respond,
-          providerId === DEVICE_WORKER_PROVIDER_ID
-            ? "device worker placement must be abandoned before redispatch; use Continue on Gateway"
-            : "cloud worker environment must be stopped before redispatch; use Stop cloud worker",
-        );
+        respondWorkerRecoveryRequired(existingPlacement, context, respond);
         return;
       }
       if (
@@ -447,6 +440,9 @@ export const sessionDispatchHandlers: GatewayRequestHandlers = {
             try {
               const request: WorkerPlacementDispatchRequest = {
                 ...session,
+                ...(retainedOriginal && existingPlacement
+                  ? { expectedPlacement: existingPlacement }
+                  : {}),
                 executionMode,
                 runSetupScript,
                 ...candidateTarget,
@@ -653,7 +649,10 @@ export const sessionDispatchHandlers: GatewayRequestHandlers = {
       }
       let placement: WorkerSessionPlacementRecord;
       try {
-        placement = await placementService.reclaim!(
+        placement = await stopWorkerSessionPlacement(
+          placementService,
+          context.workerEnvironmentService,
+          existingPlacement,
           {
             ...session,
             ...(params.recoverToGateway ? { recoverToGateway: params.recoverToGateway } : {}),

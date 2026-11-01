@@ -1,5 +1,6 @@
 import { DEVICE_FOLDER_MANIFEST_REF } from "../../worker/device-folder.js";
 import { DEVICE_WORKER_PROVIDER_ID } from "./device-provider-identity.js";
+import { hasForcedWorkerEnvironmentAbandonment } from "./environment-errors.js";
 import {
   isUnavailableEnvironment,
   type WorkerDispatchPlacement,
@@ -19,6 +20,10 @@ import {
   matchesWorkerPlacementTarget,
   type WorkerPlacementCancellationTarget,
 } from "./placement-target.js";
+import {
+  isCurrentWorkerWorkspacePendingResultOwner,
+  isWorkerReclaimWorkspaceResult,
+} from "./placement-workspace-result-owner.js";
 import type {
   WorkerPlacementAuthorization,
   WorkerPlacementMoveRequest,
@@ -82,6 +87,141 @@ export function createWorkerPlacementMoveAbandonment(
         return current;
       }
     });
+
+  // Delete/archive discard the private workspace; normal Stop and Move still save it.
+  const retireRetainedSession = async (
+    request: WorkerPlacementReclaimRequest,
+    authorize?: WorkerPlacementAuthorization,
+    beforeDrain?: () => void,
+  ): Promise<Extract<WorkerDispatchPlacement, { state: "local" }>> => {
+    const initial = await placements.getAsync(request.sessionId);
+    authorize?.();
+    beforeDrain?.();
+    if (!initial?.environmentId || initial.activeOwnerEpoch === null) {
+      throw new Error("Retained retirement lost its worker placement");
+    }
+    const environmentId = initial.environmentId;
+    const ownerEpoch = initial.activeOwnerEpoch;
+    return options.workspaceOperations.run(environmentId, async () => {
+      const current = await placements.getAsync(request.sessionId);
+      const environment = environments.get(environmentId);
+      const retention = environment?.retention;
+      const hasSettledResource = (record: typeof environment) =>
+        record?.state === "destroyed" || (record?.state === "failed" && record.leaseId === null);
+      // Proven provider cleanup retires the execution epoch and attachment. The
+      // retained binding still owns discard, bounded to that exact terminal owner.
+      let settledOwnerEpoch = hasSettledResource(environment) ? environment?.ownerEpoch : undefined;
+      const assertCurrent = () => {
+        authorize?.();
+        const live = placements.get(request.sessionId);
+        const owned = environments.get(environmentId);
+        const settledOwner =
+          settledOwnerEpoch !== undefined &&
+          owned?.ownerEpoch === settledOwnerEpoch &&
+          hasSettledResource(owned);
+        if (
+          !live ||
+          live.sessionKey !== request.sessionKey ||
+          live.agentId !== request.agentId ||
+          live.environmentId !== initial.environmentId ||
+          live.activeOwnerEpoch !== initial.activeOwnerEpoch ||
+          !owned?.retention ||
+          owned.retention.ownerBinding !== retention?.ownerBinding ||
+          owned.retention.owner.sessionId !== request.sessionId ||
+          owned.retention.owner.sessionKey !== request.sessionKey ||
+          owned.retention.owner.agentId !== request.agentId ||
+          (owned.sharedHost !== false && !settledOwner) ||
+          (!hasForcedWorkerEnvironmentAbandonment(owned) &&
+            !settledOwner &&
+            (owned.ownerEpoch !== initial.activeOwnerEpoch ||
+              owned.attachedSessionIds.length !== 1 ||
+              owned.attachedSessionIds[0] !== request.sessionId))
+        ) {
+          throw new Error("Retained retirement worker owner changed");
+        }
+      };
+      assertCurrent();
+      if (
+        !current ||
+        !environment ||
+        !retention ||
+        !["active", "draining", "failed"].includes(current.state)
+      ) {
+        throw new Error("Retained retirement is waiting for placement settlement");
+      }
+      const pending = (await placements.listPendingWorkspaceResultsAsync(request.sessionId))[0];
+      assertCurrent();
+      if (
+        current.turnClaim &&
+        (!pending ||
+          !isCurrentWorkerWorkspacePendingResultOwner(current, pending) ||
+          !isWorkerReclaimWorkspaceResult(pending))
+      ) {
+        throw new Error("Retained retirement is waiting for active model work to settle");
+      }
+      const cleanupErrors: unknown[] = [];
+      const destroyed = await environments.destroy(
+        environmentId,
+        {
+          sessionId: request.sessionId,
+          ownerEpoch,
+          retainedOwnerBinding: retention.ownerBinding,
+          authorize: assertCurrent,
+        },
+        async () => {
+          assertCurrent();
+          await forceAbandonWorkerEnvironment({
+            placements,
+            environmentId,
+            resolveWorkspace: options.resolveWorkspace,
+            onCleanupError: (error) => cleanupErrors.push(error),
+          });
+        },
+      );
+      // A live retirement can itself finish teardown and revoke its execution epoch.
+      // Adopt only that acknowledged terminal result for subsequent cleanup checks.
+      if (hasSettledResource(destroyed)) {
+        settledOwnerEpoch = destroyed.ownerEpoch;
+      }
+      // Physical cleanup may commit while local rollback remains uncertain. Keep
+      // the failed placement/journal, so deletion cannot cascade away its evidence.
+      if (cleanupErrors.length) {
+        throw new AggregateError(cleanupErrors, "Retained workspace cleanup is still pending");
+      }
+      const journals = await placements.listWorkspaceReconciliationOwners();
+      assertCurrent();
+      if (journals.some((owner) => owner.environmentId === initial.environmentId)) {
+        throw new Error("Retained workspace journal cleanup is still pending");
+      }
+      const failed = await placements.getAsync(request.sessionId);
+      const cleanup = environments.get(environmentId);
+      assertCurrent();
+      if (
+        !failed ||
+        failed.state !== "failed" ||
+        !isForceAbandonedWorkerPlacement(failed) ||
+        failed.turnClaim ||
+        failed.environmentId !== initial.environmentId ||
+        !cleanup ||
+        (!hasSettledResource(cleanup) && !hasForcedWorkerEnvironmentAbandonment(cleanup))
+      ) {
+        throw new Error("Retained resource cleanup has no durable owner");
+      }
+      const local = await placements.transition(
+        {
+          sessionId: request.sessionId,
+          from: "failed",
+          to: "local",
+          expectedGeneration: failed.generation,
+        },
+        authorize,
+      );
+      if (local.state !== "local") {
+        throw new Error("Retained retirement did not finish its placement");
+      }
+      return local;
+    });
+  };
 
   const validateAbandonSource = (
     request: WorkerPlacementMoveRequest,
@@ -190,5 +330,5 @@ export function createWorkerPlacementMoveAbandonment(
     return local;
   };
 
-  return { abandonSource, forceDestroyEnvironment, validateAbandonSource };
+  return { abandonSource, forceDestroyEnvironment, validateAbandonSource, retireRetainedSession };
 }

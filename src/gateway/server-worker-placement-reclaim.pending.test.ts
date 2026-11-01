@@ -37,6 +37,7 @@ it.each([
       placements: {
         get: () => ({ state, sessionId }) as never,
         getAsync: async () => ({ state, sessionId }) as never,
+        listPendingWorkspaceResultsAsync: async () => [],
         waitForTurnClaimRelease: vi.fn(),
       },
       loadSessionRuntime: async () => ({

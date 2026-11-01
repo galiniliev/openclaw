@@ -87,6 +87,8 @@ export async function createHarness(
     failMoveAfterBegin?: boolean;
     runMoveBarrier?: DispatchOptions["runMoveBarrier"];
     isShuttingDown?: () => boolean;
+    hasCurrentRunner?: DispatchOptions["hasCurrentRunner"];
+    waitForRecoveryNode?: DispatchOptions["waitForRecoveryNode"];
     prepareAcceptedWorkspacePublication?: DispatchOptions["prepareAcceptedWorkspacePublication"];
     publishAcceptedWorkspace?: DispatchOptions["publishAcceptedWorkspace"];
     beforeMoveBegin?: (abandoned: { runId: string } | undefined) => Promise<void>;
@@ -454,6 +456,8 @@ export async function createHarness(
     placements,
     environments,
     isShuttingDown: options.isShuttingDown,
+    hasCurrentRunner: options.hasCurrentRunner,
+    waitForRecoveryNode: options.waitForRecoveryNode,
     prepareGatewayMove: options.prepareGatewayMove,
     runReclaimPreparation: options.runReclaimPreparation ?? runReclaimPreparation,
     runnerAvailability: createWorkerPlacementRunnerAvailabilityReader({
@@ -649,6 +653,10 @@ export const createRecoveryService = async (
   placements: PlacementStore,
   environments: WorkerEnvironmentService,
   isShuttingDown: () => boolean = () => false,
+  resolveWorkspace: DispatchOptions["resolveWorkspace"] = async () => ({
+    kind: "local",
+    path: "/gateway/workspace",
+  }),
 ) =>
   createWorkerPlacementDispatchService({
     initialPlacements: await placements.listAsync(),
@@ -665,7 +673,5 @@ export const createRecoveryService = async (
     runReclaimBarrier: async ({ begin, reclaim }) =>
       await reclaim({ kind: "local", path: "/gateway/workspace" }, await begin()),
     runFailedReclaimBarrier: async ({ reclaim }) => await reclaim(),
-    ...createWorkerWorkspaceRecoveryFixture({
-      resolveWorkspace: async () => ({ kind: "local", path: "/gateway/workspace" }),
-    }),
+    ...createWorkerWorkspaceRecoveryFixture({ resolveWorkspace }),
   });
