@@ -50,6 +50,7 @@ type UpdateStateInspectionInput = { resultPath?: string } & (
   | (Parameters<
       typeof import("./update-database-restore-source.js").prepareUpdateDatabaseRestoreSourceInProcess
     >[0] & { mode: "database-restore-preparation" })
+  | { mode: "migration-filesystem-backup"; output: string }
   | {
       mode: "database-generations";
       paths: string[];
@@ -63,6 +64,26 @@ async function inspectCandidateState(input: UpdateStateInspectionInput): Promise
   if (input.mode === "runtime-retention") {
     const { prepareRetainedRuntimeFiles } = await import("./update-retained-runtime-files.js");
     return prepareRetainedRuntimeFiles(input);
+  }
+  if (input.mode === "migration-filesystem-backup") {
+    const { createBackupArchive } = await import("./backup-create.js");
+    const { withArtifactPreservingStateReads } =
+      await import("../state/artifact-preserving-state-reads.js");
+    const { verifyBackupArchive } = await import("../commands/backup-verify.js");
+    // The parent owns/renews the exact suspension and joins this subprocess on
+    // cancellation. This child only reads sources and writes its private archive.
+    return withArtifactPreservingStateReads(
+      async () => {
+        const archive = await createBackupArchive({
+          output: input.output,
+          preserveSourceArtifacts: true,
+        });
+        await verifyBackupArchive(archive.archivePath);
+        // Detailed inventories can exceed the subprocess's bounded JSON channel.
+        return { archivePath: archive.archivePath, verified: true };
+      },
+      { agentDatabases: true },
+    );
   }
   if ("stateDir" in input && input.mode !== "database-generations" && input.mode !== "snapshot") {
     // Older installed drivers omit this from their restricted environment payload.

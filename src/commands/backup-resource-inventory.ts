@@ -24,7 +24,8 @@ export type BackupRegenerableKind =
   | "managed state"
   | "plugin skills"
   | "plugin resource"
-  | "plugin dependencies";
+  | "plugin dependencies"
+  | "worktree templates";
 
 type BackupRegenerableRoot = Readonly<{
   kind: BackupRegenerableKind;
@@ -128,9 +129,11 @@ export async function createBackupResourcePlan(params: {
   oauthDirs: readonly string[];
   workspaceDirs: readonly string[];
   excludedWorkspaceDirs: readonly string[];
+  worktreeTemplateDirs?: readonly string[];
   agentRoots: readonly BackupAgentRoot[];
   pluginResources: readonly ResolvedPluginBackupResource[];
   pluginRoots: readonly string[];
+  localCompanion?: boolean;
   onlyConfig?: boolean;
 }): Promise<BackupResourcePlan> {
   const stateDir = path.resolve(params.stateDir);
@@ -165,6 +168,20 @@ export async function createBackupResourcePlan(params: {
       exclude("agent temporary files", temporaryRoot);
     }
     exclude("plugin skills", path.join(stateDir, "plugin-skills"));
+    if (params.localCompanion) {
+      // Codex diagnostics are disposable; its state databases, credentials,
+      // rollouts and history remain owned backup resources for retained sessions.
+      for (const root of agentRoots) {
+        for (const file of ["logs_2.sqlite", "logs_2.sqlite-wal", "logs_2.sqlite-shm"]) {
+          exclude("plugin resource", path.join(root.sourcePath, "codex-home", file));
+        }
+      }
+    }
+    // Only cache materialization is disposable. Checkout edits and snapshot backing
+    // remain ordinary backup resources; explicit durable owners still override this exclusion.
+    for (const directory of params.worktreeTemplateDirs ?? []) {
+      exclude("worktree templates", directory);
+    }
 
     for (const resource of params.pluginResources) {
       const anchors = resource.scope === "state" ? [{ sourcePath: stateDir }] : agentRoots;

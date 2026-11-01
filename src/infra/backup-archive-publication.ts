@@ -3,7 +3,14 @@ import type { BigIntStats } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { sameFileIdentity } from "@openclaw/fs-safe/advanced";
+import { isPathInside } from "@openclaw/fs-safe/path";
+import {
+  buildBackupArchiveBasename,
+  resolveBackupArchivePath,
+  type BackupAsset,
+} from "../commands/backup-shared.js";
 import { resolveCommandProcessSignal } from "../process/exec-spawn.js";
+import { resolveHomeDir } from "../utils.js";
 import {
   removePreparedBackupArchive,
   type BackupArchiveCleanupReceipt,
@@ -16,7 +23,8 @@ import {
   requireDirectorySync,
   syncDirectoryIfSupported,
 } from "./directory-durability.js";
-import { pathEntryExists } from "./path-existence.js";
+import { isErrno } from "./errors.js";
+import { pathEntryExists, safeStat } from "./path-existence.js";
 
 type BackupArchiveLogger = (message: string) => void;
 
@@ -234,4 +242,85 @@ export async function publishPreparedBackupArchive(params: {
       }.`,
     );
   });
+}
+
+export async function resolveBackupArchiveOutputPath(params: {
+  output?: string;
+  nowMs: number;
+  includedAssets: BackupAsset[];
+  stateDir: string;
+}): Promise<string> {
+  const basename = buildBackupArchiveBasename(params.nowMs);
+  const rawOutput = params.output;
+  if (!rawOutput?.trim()) {
+    const cwd = path.resolve(process.cwd());
+    const canonicalCwd = await fs.realpath(cwd).catch(() => cwd);
+    const cwdInsideSource = params.includedAssets.some((asset) =>
+      isPathInside(asset.sourcePath, canonicalCwd),
+    );
+    const defaultDir = cwdInsideSource ? (resolveHomeDir() ?? path.dirname(params.stateDir)) : cwd;
+    return path.resolve(defaultDir, basename);
+  }
+
+  const resolved = resolveBackupArchivePath(rawOutput, "--output");
+  if (rawOutput.endsWith("/") || rawOutput.endsWith("\\")) {
+    return path.join(resolved, basename);
+  }
+
+  if ((await safeStat(resolved))?.isDirectory()) {
+    return path.join(resolved, basename);
+  }
+
+  return resolved;
+}
+
+type BackupOutputFailurePhase = "parent" | "publication" | "write";
+
+export function formatBackupOutputFailure(
+  error: unknown,
+  outputPath: string,
+  phase: BackupOutputFailurePhase,
+  ownedRoot?: string,
+): unknown {
+  const cause = phase === "write" && error instanceof Error ? error.cause : undefined;
+  const filesystemError = isErrno(error) ? error : isErrno(cause) ? cause : null;
+  if (!filesystemError) {
+    return error;
+  }
+  if (ownedRoot) {
+    const failedPath = filesystemError.path;
+    if (typeof failedPath !== "string" || !isPathInside(ownedRoot, path.resolve(failedPath))) {
+      return error;
+    }
+  }
+
+  const outputParent = path.dirname(outputPath);
+  const retry = "run `openclaw backup create --output <archive>` again.";
+  let detail: string;
+  switch (filesystemError.code) {
+    case "ENOENT":
+      detail = `Backup output directory could not be created: ${outputParent}. Check the path and ${retry}`;
+      break;
+    case "EACCES":
+    case "EPERM":
+    case "EROFS":
+      detail = `Backup output directory is not writable: ${outputParent}. Check the path and directory permissions, then ${retry}`;
+      break;
+    case "EEXIST":
+    case "ENOTDIR":
+      if (phase !== "parent") {
+        return error;
+      }
+      detail = `Backup output parent is not a directory: ${outputParent}. Choose a directory path and ${retry}`;
+      break;
+    case "ENOSPC":
+      detail = `The destination does not have enough free space: ${outputParent}. Free up disk space and ${retry}`;
+      break;
+    case "EDQUOT":
+      detail = `The destination storage quota is exhausted: ${outputParent}. Free up space or choose another path, then ${retry}`;
+      break;
+    default:
+      detail = `The output path could not be prepared: ${outputParent}. Check the path and filesystem, then ${retry}`;
+  }
+  return new Error(`Backup archive creation failed: ${outputPath}. ${detail}`, { cause: error });
 }

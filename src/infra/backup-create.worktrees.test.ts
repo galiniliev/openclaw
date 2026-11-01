@@ -1,16 +1,22 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import * as tar from "tar";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { withWorktreeAllocationLease } from "../agents/worktrees/allocation.js";
 import { reservePendingWorktree } from "../agents/worktrees/pending-slots.js";
 import { insertRegistryWorktree } from "../agents/worktrees/registry.js";
 import { makeWorktreeRecord } from "../agents/worktrees/service.test-support.js";
+import { verifyBackupArchive } from "../commands/backup-verify.js";
+import { backupCreateCommand } from "../commands/backup.js";
+import { createTestRuntime } from "../commands/test-runtime-config-helpers.js";
 import { openOpenClawAgentDatabase } from "../state/openclaw-agent-db.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import { closeStateDatabaseForTest } from "../test-utils/database-cleanup.js";
+import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { buildBackupArchivePath } from "./backup-archive-path-policy.js";
 import {
   backupCase,
+  declarePluginSqliteResources,
   createOwnedSqliteDatabase,
   createVerifiedBackup,
   expectAbsent,
@@ -21,6 +27,7 @@ import {
 } from "./backup-create-family.test-support.js";
 import { createBackupArchive } from "./backup-create.js";
 import { listArchiveEntries } from "./backup-create.test-support.js";
+import { requireNodeSqlite } from "./node-sqlite.js";
 
 const record = (root: string, id: string, worktreePath: string) =>
   makeWorktreeRecord(root, id, {
@@ -174,4 +181,101 @@ describe("backup managed workspaces", () => {
       }
     }),
   );
+});
+
+describe("backup worktree template selection", () => {
+  beforeEach(() => vi.stubEnv("OPENCLAW_DISABLE_BUNDLED_PLUGINS", "1"));
+  afterEach(() => vi.unstubAllEnvs());
+  it.each([
+    { excludeWorktreeTemplates: false, customRoot: false },
+    { excludeWorktreeTemplates: true, customRoot: false },
+    { excludeWorktreeTemplates: true, customRoot: true },
+  ])(
+    "preserves checkout and retained state (selected=$excludeWorktreeTemplates, custom=$customRoot)",
+    async ({ excludeWorktreeTemplates, customRoot }) => {
+      await withOpenClawTestState({ layout: "state-only", scenario: "minimal" }, async (state) => {
+        await state.writeConfig({
+          agents: { defaults: { workspace: state.workspaceDir } },
+          ...(customRoot ? { worktreeRoot: state.statePath("custom-worktrees") } : {}),
+        });
+        const cache = `${customRoot ? "custom-worktrees" : "worktrees"}/.templates/generation/dependencies.txt`;
+        const retained = [
+          "worktrees/repository/checkout/unique-edit.txt",
+          "repositories/source/.git/refs/openclaw/snapshots/removed-checkout",
+          "retained/native-context.bin",
+          "history/messages.bin",
+          "credentials/private-state.bin",
+        ];
+        for (const relative of [cache, ...retained]) {
+          await state.writeText(relative, `synthetic ${relative}\n`);
+        }
+        await fs.mkdir(state.workspaceDir, { recursive: true });
+        await fs.writeFile(path.join(state.workspaceDir, "authored.txt"), "authored workspace\n");
+        const result = await backupCreateCommand(createTestRuntime(), {
+          output: state.path("backup.tar.gz"),
+          excludeWorktreeTemplates,
+          verify: true,
+          json: true,
+        });
+        expect(result.verified).toBe(true);
+        const entries = await listArchiveEntries(result.archivePath);
+        const archived = (source: string) => buildBackupArchivePath(result.archiveRoot, source);
+        expect(entries.includes(archived(state.statePath(cache)))).toBe(!excludeWorktreeTemplates);
+        for (const relative of retained) {
+          expect(entries).toContain(archived(state.statePath(relative)));
+        }
+        expect(entries).toContain(archived(path.join(state.workspaceDir, "authored.txt")));
+        expect(result.skipped.filter((entry) => entry.kind === "worktree templates")).toHaveLength(
+          excludeWorktreeTemplates ? 1 : 0,
+        );
+        const restored = state.path("restore");
+        await fs.mkdir(restored);
+        await tar.x({ file: result.archivePath, gzip: true, cwd: restored });
+        for (const relative of retained) {
+          expect(
+            await fs.readFile(path.join(restored, archived(state.statePath(relative))), "utf8"),
+          ).toBe(`synthetic ${relative}\n`);
+        }
+        const manifest = JSON.parse(
+          await fs.readFile(path.join(restored, result.archiveRoot, "manifest.json"), "utf8"),
+        );
+        expect(manifest.options.excludeWorktreeTemplates ?? false).toBe(excludeWorktreeTemplates);
+      });
+    },
+  );
+
+  it("retains an explicitly owned durable plugin resource nested in the template directory", async () => {
+    await withOpenClawTestState({ layout: "state-only", scenario: "minimal" }, async (state) => {
+      await declarePluginSqliteResources(state, "worktrees/.templates/durable-owner");
+      await state.writeText("worktrees/.templates/durable-owner/keep.txt", "durable\n");
+      await state.writeText("worktrees/.templates/generation/dependency.txt", "regenerable\n");
+      const databasePath = state.statePath("worktrees/.templates/durable-owner/context.sqlite");
+      const database = new (requireNodeSqlite().DatabaseSync)(databasePath);
+      try {
+        database.exec(
+          "CREATE TABLE retained_context (value TEXT); INSERT INTO retained_context VALUES ('keep');",
+        );
+      } finally {
+        database.close();
+      }
+      const result = await backupCreateCommand(createTestRuntime(), {
+        output: state.path("backup.tar.gz"),
+        excludeWorktreeTemplates: true,
+        verify: true,
+        json: true,
+      });
+      expect(result.verified).toBe(true);
+      const entries = await listArchiveEntries(result.archivePath);
+      expect(entries.some((entry) => entry.endsWith("/durable-owner/keep.txt"))).toBe(true);
+      expect(entries.some((entry) => entry.endsWith("/generation/dependency.txt"))).toBe(false);
+      const restored = state.path("restore");
+      await fs.mkdir(restored);
+      await tar.x({ file: result.archivePath, gzip: true, cwd: restored });
+      expectDatabaseRows(
+        path.join(restored, buildBackupArchivePath(result.archiveRoot, databasePath)),
+        "SELECT value FROM retained_context",
+        [{ value: "keep" }],
+      );
+    });
+  });
 });

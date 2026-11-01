@@ -52,3 +52,51 @@ it.each(["plan", "inventory"] as const)(
     });
   },
 );
+
+it.each([false, true])(
+  "excludes only Codex diagnostics for local-companion: %s",
+  async (localCompanion) => {
+    await withTempDir("backup-codex-diagnostics-", async (stateDir) => {
+      const agentRoot = path.join(stateDir, "agents", "main", "agent");
+      const codexHome = path.join(agentRoot, "codex-home");
+      const resources = await createBackupResourcePlan({
+        stateDir,
+        configPaths: [],
+        oauthDirs: [],
+        workspaceDirs: [],
+        excludedWorkspaceDirs: [],
+        agentRoots: [
+          {
+            agentId: "main",
+            sourcePath: agentRoot,
+            databasePath: path.join(agentRoot, "openclaw-agent.sqlite"),
+          },
+        ],
+        pluginResources: [],
+        pluginRoots: [],
+        localCompanion,
+      });
+      for (const file of ["logs_2.sqlite", "logs_2.sqlite-wal", "logs_2.sqlite-shm"]) {
+        const diagnostic = path.join(codexHome, file);
+        expect(resources.isIncluded(diagnostic)).toBe(!localCompanion);
+        expect(sealBackupResourceInventory(resources, []).isIncluded(diagnostic)).toBe(
+          !localCompanion,
+        );
+      }
+      for (const file of [
+        "state_5.sqlite",
+        "state_5.sqlite-wal",
+        "auth.json",
+        "history.jsonl",
+        "sessions/rollout.jsonl",
+        "skills/user-skill/SKILL.md",
+        "logs_2.sqlite-user-data",
+      ]) {
+        expect(resources.isIncluded(path.join(codexHome, file))).toBe(true);
+      }
+      expect(resources.isIncluded(path.join(stateDir, "repository-workspaces", "repo.git"))).toBe(
+        true,
+      );
+    });
+  },
+);
