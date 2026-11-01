@@ -11,6 +11,7 @@ import { readUserProfileCatalogIdentity } from "./user-profile-catalog-identity.
 import { readUserProfileGitHubCommand } from "./user-profile-github-identity.js";
 import {
   readUserProfileSnapshotCommand,
+  selectExistingUserProfileAuthentication,
   selectUserProfileIdentityInDatabase,
 } from "./user-profile-identity.read.js";
 import { readUserProfileAvatarCommand } from "./user-profiles-internal.js";
@@ -21,6 +22,13 @@ export function readUserProfileCommand(
   command: Extract<OpenClawStateReadCommand, { type: `userProfiles.${string}` }>,
 ) {
   switch (command.type) {
+    case "userProfiles.authenticationIdentity":
+      return {
+        type: command.type,
+        result: runSqliteReadSnapshotSync(db, () =>
+          selectExistingUserProfileAuthentication(db, command.selector),
+        ),
+      };
     case "userProfiles.identity":
       return {
         type: command.type,

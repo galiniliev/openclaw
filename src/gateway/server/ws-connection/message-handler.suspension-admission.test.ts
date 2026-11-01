@@ -6,6 +6,7 @@ import {
   getActiveGatewayRootWorkCount,
   markGatewayRestartDraining,
   resetGatewayWorkAdmission,
+  setGatewayRollingAdmission,
   tryBeginGatewaySuspendAdmission,
 } from "../../../process/gateway-work-admission.js";
 import { GatewayConnectionWork } from "../../server-connection-work.js";
@@ -173,6 +174,18 @@ describe("WebSocket connect suspension admission", () => {
     },
   );
 
+  it("refuses an unqualified operator racing the rolling fence without registering or changing presence", async () => {
+    const harness = attachHarness();
+    harness.sendConnect();
+    setGatewayRollingAdmission("same-release", true);
+    await vi.waitFor(() => expect(harness.close).toHaveBeenCalled());
+    expect(harness.setClient).not.toHaveBeenCalled();
+    expect(upsertPresenceMock).not.toHaveBeenCalled();
+    expect(JSON.parse(harness.socketSend.mock.calls[0]?.[0] ?? "{}").error).toMatchObject({
+      retryable: false,
+      details: { reason: "gateway-rolling-client-upgrade-required" },
+    });
+  });
   it("rejects a validated connect while suspension is preparing before session mutations", async () => {
     const suspension = tryBeginGatewaySuspendAdmission(() => {});
     expect(suspension).not.toBeNull();

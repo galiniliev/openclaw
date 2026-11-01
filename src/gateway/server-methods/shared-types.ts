@@ -471,6 +471,31 @@ export type GatewayRequestContext = GatewayKernelContext &
     /** Live instance routing only; never authorization or wire state. */
     resolveGatewayContext?: GatewayContextResolver;
     hostLifecycle?: import("../server-public.js").GatewayHostLifecycle;
+    /** Existing host's private execution-lease owner, after cooperative quiescence. */
+    yieldRollingExecution?: (
+      contract: import("../rolling-release-contract.js").GatewayRollingContract,
+    ) => Promise<void>;
+    observeRollingExecution?: () => Promise<
+      import("../rolling-release-contract.js").GatewayRollingLeaseObservation
+    >;
+    rebindRollingExecution?: (
+      suspensionId: string,
+      previous: import("../rolling-release-contract.js").GatewayRollingContract,
+      candidateBootId: string,
+      expectedOwner: string,
+      assertCallerCurrent: () => void,
+    ) => Promise<import("../rolling-release-contract.js").GatewayRollingContract>;
+    resumeRollingExecution?: () => Promise<void>;
+    reopenRollingAdmission?: () => void;
+    /** Retains warm/yielded lifetime admission even while shutdown resets process admission. */
+    getPendingRollingReleaseId?: () => string | undefined;
+    isRollingReadReady?: () => boolean;
+    readRollingCompatibility?: () => Promise<{
+      compatibilityDigest: string;
+      storeIdentity: string;
+      bootId: string;
+      executionOwner: string;
+    }>;
     /** Entry-only access; the kernel owns closure. Absent in embedded-only contexts. */
     requestEntryLifetime?: Pick<
       import("../server-request-entry.js").GatewayRequestEntryLifetime,

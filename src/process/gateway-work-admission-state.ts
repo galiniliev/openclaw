@@ -19,6 +19,7 @@ export type GatewayDrainReason =
 
 export type GatewayRootWorkAdmission = {
   origin: string;
+  access: "read" | "write";
   references: number;
   released: boolean;
   /** A long-lived subscription that its owner retires when restart drain begins. */
@@ -33,6 +34,11 @@ export const currentRootWork = new AsyncContext<GatewayRootWorkAdmission>(
 export const reloadWaitingRoots = new AsyncContext<ReadonlySet<GatewayRootWorkAdmission>>(
   Symbol("gatewayReloadWaitingRoots"),
 );
+export const rollingStartup = new AsyncContext<{
+  active: boolean;
+  releaseId: string;
+  assertWriter: () => void;
+}>(Symbol("gatewayRollingStartupAdmission"));
 export const subscriptionRootWork = new AsyncContext<true>(Symbol("gatewaySubscriptionRootWork"));
 
 export function createShutdownCleanupController(): AbortController {
@@ -44,6 +50,7 @@ export function createShutdownCleanupController(): AbortController {
 export const GATEWAY_WORK_ADMISSION_STATE = resolveGlobalSingleton(
   Symbol.for("openclaw.gatewayWorkAdmissionState"),
   (): {
+    rollingAdmission?: { releaseId: string; reads: boolean };
     restartDrainReason: GatewayDrainReason | undefined;
     restartDrainController: AbortController;
     shutdownCleanupController: AbortController;
@@ -72,8 +79,11 @@ export const GATEWAY_WORK_ADMISSION_STATE = resolveGlobalSingleton(
 
 function isActiveRootWork(
   admission: GatewayRootWorkAdmission,
-  opts: { excludeCurrent?: boolean } | undefined,
+  opts: { excludeCurrent?: boolean; mutableOnly?: boolean } | undefined,
 ): boolean {
+  if (opts?.mutableOnly && admission.access === "read") {
+    return false;
+  }
   // An open subscription is not pending work until drain retires it; its close then is.
   if (admission.subscription && GATEWAY_WORK_ADMISSION_STATE.restartDrainReason === undefined) {
     return false;
@@ -85,7 +95,10 @@ function isActiveRootWork(
 }
 
 /** Active root requests/ticks, optionally excluding the caller running prepare. */
-export function getActiveGatewayRootWorkCount(opts?: { excludeCurrent?: boolean }): number {
+export function getActiveGatewayRootWorkCount(opts?: {
+  excludeCurrent?: boolean;
+  mutableOnly?: boolean;
+}): number {
   let count = 0;
   for (const admission of GATEWAY_WORK_ADMISSION_STATE.activeRootWork) {
     if (isActiveRootWork(admission, opts)) {

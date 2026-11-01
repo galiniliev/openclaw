@@ -41,6 +41,8 @@ import {
   runWithGatewayIndependentRootWorkAdmission,
   tryBeginGatewayRestartStartupRootWorkAdmission,
   tryBeginGatewayRootWorkAdmission,
+  tryBeginGatewayReadRootWorkAdmission,
+  getGatewayRollingAdmission,
 } from "../../../process/gateway-work-admission.js";
 import { isWebchatClient } from "../../../utils/message-channel.js";
 import {
@@ -59,7 +61,7 @@ import { truncateCloseReason } from "../close-reason.js";
 import type { GatewayConnectionFrame } from "../connection-transport.js";
 import { resolveGatewayWsBrowserOrigin } from "../ws-origin-policy.js";
 import { createGatewayAuthenticatedRequestDispatcher } from "./authenticated-request-dispatch.js";
-import { isStartupNodeConnect } from "./connect-admission.js";
+import { isStartupNodeConnect, parseGatewayPreauthConnectFrame } from "./connect-admission.js";
 import { authenticateGatewayConnect } from "./connect-auth.js";
 import { authorizeGatewayConnectDevice } from "./connect-device-pairing.js";
 import { publishConnectModelCatalog } from "./connect-model-catalog.js";
@@ -530,27 +532,8 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
     }
   };
 
-  const parsePreauthConnectFrame = (
-    data: GatewayConnectionFrame,
-  ): { id: string; params: ConnectParams } | null => {
-    if (isClosed() || rawDataByteLength(data) > MAX_PREAUTH_PAYLOAD_BYTES) {
-      return null;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(rawDataToString(data));
-    } catch {
-      return null;
-    }
-    if (
-      !validateRequestFrame(parsed) ||
-      parsed.method !== "connect" ||
-      !validateConnectParams(parsed.params)
-    ) {
-      return null;
-    }
-    return { id: parsed.id, params: parsed.params };
-  };
+  const parsePreauthConnectFrame = (data: GatewayConnectionFrame) =>
+    isClosed() ? null : parseGatewayPreauthConnectFrame(data);
 
   const rejectConnectForClosedAdmission = async (id: string): Promise<void> => {
     const restartDraining = isGatewayRestartDraining();
@@ -610,7 +593,15 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
       await handleMessage(data, requestAdmission);
       return;
     }
-    const admission = tryBeginGatewayRootWorkAdmission("ws:connect");
+    const parsedConnect = getGatewayRollingAdmission()?.reads
+      ? parsePreauthConnectFrame(data)
+      : null;
+    const admission =
+      parsedConnect &&
+      parsedConnect.params.role !== "node" &&
+      !claimsWorkerConnectionIdentity(parsedConnect.params)
+        ? tryBeginGatewayReadRootWorkAdmission("ws:connect")
+        : tryBeginGatewayRootWorkAdmission("ws:connect");
     if (!admission) {
       const connect = parsePreauthConnectFrame(data);
       if (

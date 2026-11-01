@@ -47,6 +47,14 @@ export type GatewayHostLifecycle = {
 export type GatewayStartupOperation = <T>(run: (signal: AbortSignal) => Promise<T>) => Promise<T>;
 
 export type GatewayServer = {
+  activateRollingWriter?: (assertRetiredPredecessor: () => void) => Promise<void>;
+  readRollingFacts?: () => Promise<{
+    compatibilityDigest: string;
+    storeIdentity: string;
+    executionOwner: string;
+  }>;
+  isRollingWriterReady?: () => boolean;
+  isRollingReadReady?: () => boolean;
   /** Process-local endpoint used by OpenClaw-managed Tailscale proxying. */
   getTailscaleIngressEndpoint: () => GatewayTailscaleIngressEndpoint | undefined;
   /** Fences WebSocket ingress and joins received work and connection cleanup before disposal. */
@@ -59,10 +67,22 @@ export type GatewayServer = {
 };
 
 export type GatewayServerOptions = {
+  /** Private rolling host capability; never selected by product configuration or RPC. */
+  rollingStartup?: import("./rolling-startup.js").GatewayRollingStartup;
+  rollingReadOnlyBinding?: true;
+  rollingWriterPreparation?: import("./rolling-release-contract.js").BoundGatewayRollingContract;
   /** Retained run-loop ownership; direct servers acquire and release their own owner. */
   gatewayStateOwner?: Pick<
     import("../infra/gateway-lock.js").GatewayLockHandle,
-    "assertDatabaseAccess" | "markListening"
+    | "assertDatabaseAccess"
+    | "markListening"
+    | "yieldExecutionForRollingHandoff"
+    | "restoreExecutionAfterRollingHandoff"
+    | "observeRollingExecutionHandoff"
+    | "rebindRollingExecutionHandoff"
+    | "assertExecutionCurrent"
+    | "gatewayOwnerId"
+    | "commitRollingPreparation"
   >;
   /** Internal, closure-bound host authority. Direct servers have no native lifecycle owner. */
   hostLifecycle?: GatewayHostLifecycle;

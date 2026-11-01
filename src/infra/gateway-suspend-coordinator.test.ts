@@ -65,6 +65,40 @@ afterEach(() => {
 });
 
 describe("gateway suspend coordinator", () => {
+  it.each([false, true])("reports the actual scheduler resume outcome (failure: %s)", (fail) => {
+    const warn = vi.fn();
+    expect(
+      prepare({
+        warn,
+        resumeScheduling: () => {
+          if (fail) {
+            throw new Error("scheduler unavailable");
+          }
+        },
+      }),
+    ).toMatchObject({ status: "ready" });
+    expect(resumeGatewaySuspend(LEASE)).toEqual(resumed);
+    expect(getGatewaySuspendStatus(LEASE)).toEqual({ status: "running" });
+    expect(getGatewaySuspendStatus(LEASE, true)).toMatchObject({
+      status: "running",
+      resumeObservationVersion: 1,
+      resumeObservation: {
+        suspensionId: LEASE,
+        ownerId: "request",
+        schedulingResumed: !fail,
+        admissionReopened: true,
+        reason: "resume",
+      },
+    });
+    expect(getGatewaySuspendStatus("different", true)).not.toHaveProperty("resumeObservation");
+    expect(warn).toHaveBeenCalledTimes(fail ? 1 : 0);
+    expect(prepare({ createSuspensionId: () => "next" })).toMatchObject({ status: "ready" });
+    expect(getGatewaySuspendStatus(LEASE, true)).not.toHaveProperty("resumeObservation");
+    resumeGatewaySuspend("next");
+    resetGatewaySuspendCoordinatorForLifecycleRestart();
+    expect(getGatewaySuspendStatus("next", true)).not.toHaveProperty("resumeObservation");
+  });
+
   it.each([false, true])(
     "lifecycle reset resumes a held scheduler before admission is cleared (drain: %s)",
     (drain) => {
@@ -263,6 +297,47 @@ describe("gateway suspend coordinator", () => {
     ).toThrow("inspection failed");
     expect(resumeScheduling).toHaveBeenCalledOnce();
     expect(isGatewayWorkAdmissionClosed()).toBe(false);
+  });
+
+  it.each([false, true])(
+    "keeps the original ten-minute rolling preparation deadline (clock rollback: %s)",
+    (rollbackClock) => {
+      vi.useFakeTimers();
+      const rollingReleaseId = "release";
+      const ttlMs = 10 * 60_000;
+      const expiresAtMs = Date.now() + ttlMs;
+      expect(prepare({ rollingReleaseId })).toMatchObject({ status: "ready", expiresAtMs });
+
+      vi.advanceTimersByTime(SUSPEND_TTL_MS);
+      if (rollbackClock) {
+        vi.setSystemTime(Date.now() - SUSPEND_TTL_MS);
+      }
+      expect(prepare({ rollingReleaseId })).toMatchObject({ status: "ready", expiresAtMs });
+      for (const conflict of [
+        { rollingReleaseId: undefined },
+        { rollingReleaseId: "other-release" },
+        { drain: true },
+      ]) {
+        expect(prepare({ rollingReleaseId, ...conflict })).toEqual({
+          status: "conflict",
+          expiresAtMs,
+        });
+      }
+      vi.advanceTimersByTime(ttlMs - SUSPEND_TTL_MS - 1);
+      expect(resumeScheduling).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(resumeScheduling).toHaveBeenCalledOnce();
+      expect(getGatewaySuspendStatus(LEASE)).toEqual({ status: "running" });
+      expect(isGatewayWorkAdmissionClosed()).toBe(false);
+    },
+  );
+
+  it("does not upgrade an ordinary suspension into rolling preparation", () => {
+    expect(prepare({ nowMs: () => 1_000 })).toMatchObject({ status: "ready" });
+    expect(prepare({ rollingReleaseId: "release", nowMs: () => 2_000 })).toEqual({
+      status: "conflict",
+      expiresAtMs: 1_000 + SUSPEND_TTL_MS,
+    });
   });
 
   it("renews one ready lease and resumes only with the matching id", () => {

@@ -5,7 +5,10 @@ import type { ChannelId } from "../channels/plugins/types.public.js";
 import { createDefaultDeps } from "../cli/deps.js";
 import { getRuntimeConfig } from "../config/io.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import { loadOrCreateProcessDeviceIdentityAsync } from "../infra/device-identity-async.js";
+import {
+  loadOrCreateProcessDeviceIdentityAsync,
+  loadDeviceIdentityIfPresentAsync,
+} from "../infra/device-identity-async.js";
 import { readDevicePairingNodeSnapshot } from "../infra/device-pairing-store-readonly.js";
 import type { GatewayScheduler } from "../infra/gateway-scheduler.js";
 import { loadGatewayTlsServerRuntime } from "../infra/tls/gateway.js";
@@ -129,7 +132,10 @@ export async function prepareGatewayKernelState(params: {
     hostDesktopService,
   });
   await startupTrace.measure("device-identity", () =>
-    loadOrCreateProcessDeviceIdentityAsync().catch(() => {
+    (opts.rollingStartup
+      ? loadDeviceIdentityIfPresentAsync()
+      : loadOrCreateProcessDeviceIdentityAsync()
+    ).catch(() => {
       // Chat fingerprints are optional; admission owns the bounded unavailability warning.
     }),
   );
@@ -138,6 +144,7 @@ export async function prepareGatewayKernelState(params: {
     ? await startupTrace.measure("worker-environments.runtime-imports", async () => {
         const workerModule = await import("./server-worker-environment-startup.js");
         return await workerModule.createGatewayWorkerEnvironmentRuntime({
+          rollingStartup: opts.rollingStartup,
           scheduler,
           getPluginRegistry: () => pluginRuntime.registry,
           getPortalRuntime: () => pluginGatewayContext.current,

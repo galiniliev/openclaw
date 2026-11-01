@@ -36,6 +36,8 @@ import { formatForLog } from "../../ws-log.js";
 import { truncateCloseReason } from "../close-reason.js";
 import {
   applyConnectionScopeCap,
+  rejectUnavailableProfileConnect,
+  isGatewayConnectReadOnly,
   isStartupNodeBootstrapConnect,
   rejectGatewayStartupConnect,
   resolveGatewayConnectPolicyFailure,
@@ -225,6 +227,13 @@ export async function authorizeGatewayConnectDevice(
         );
       }
       const waitForResolution = state.isControlUi && role === "operator";
+      if (isGatewayConnectReadOnly()) {
+        await rejectUnavailableProfileConnect(
+          context,
+          new Error("Gateway rolling read phase cannot change device pairing"),
+        );
+        return false;
+      }
       const pairingAbort = new AbortController();
       const cancelPairingWait = () => pairingAbort.abort();
       let resolution: ReturnType<typeof waitForDevicePairingResolution> | undefined;

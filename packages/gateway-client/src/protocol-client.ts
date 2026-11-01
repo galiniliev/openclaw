@@ -1,4 +1,5 @@
 import type { EventFrame, HelloOk } from "@openclaw/gateway-protocol";
+import { GATEWAY_CLIENT_CAPS } from "@openclaw/gateway-protocol/client-info";
 import {
   isGatewayEventFrame,
   isGatewayResponseFrame,
@@ -153,7 +154,21 @@ export class GatewayProtocolClient<TPlan> {
     if (typeof method !== "string" || method.length === 0) {
       return Promise.reject(new Error("invalid request frame: method must be a non-empty string"));
     }
-    return this.requests.request<T>(socket, method, params, options, !this.readyForRequests);
+    return this.requests.request<T>(
+      {
+        send: (data) => {
+          const current = this.socket;
+          if (!current?.isOpen()) {
+            throw new Error("gateway not connected");
+          }
+          current.send(data);
+        },
+      },
+      method,
+      params,
+      options,
+      !this.readyForRequests,
+    );
   }
 
   addEventListener(listener: (event: EventFrame) => void): () => void {
@@ -277,6 +292,7 @@ export class GatewayProtocolClient<TPlan> {
             decision.pendingError ??
               context.connectFailure?.error ??
               new Error(`gateway closed (${code}): ${reason}`),
+            decision.retry && !this.stopped,
           );
           this.invoke("close", () => this.opts.onClose?.(context, decision));
           // A close callback can reconnect synchronously and already own the next socket or retry.
@@ -406,8 +422,24 @@ export class GatewayProtocolClient<TPlan> {
       plan,
     };
     this.recordTiming("connect-plan-ready", generation, plan);
+    const params = this.opts.buildConnectParams(plan);
+    const connect = asRecord(params);
+    // This shared wire owner implements retention for Node and browser operators.
+    // Node/worker handshakes do not own user drafts or this reconnect contract.
+    const connectParams =
+      connect && (connect.role === undefined || connect.role === "operator")
+        ? {
+            ...connect,
+            caps: [
+              ...new Set([
+                ...filterStringEntries(connect.caps),
+                GATEWAY_CLIENT_CAPS.PLANNED_HANDOFF_RETENTION_V1,
+              ]),
+            ],
+          }
+        : params;
     void this.requests
-      .request<HelloOk>(socket, "connect", this.opts.buildConnectParams(plan), {
+      .request<HelloOk>(socket, "connect", connectParams, {
         onSent: () => {
           this.connectRequestSent = true;
           this.recordTiming("request-sent", generation, plan);
@@ -421,7 +453,6 @@ export class GatewayProtocolClient<TPlan> {
         }
         this.helloReceived = true;
         this.requests.maxPayloadBytes = hello.policy?.maxPayload;
-        this.requests.setSuspensionPhase(hello.snapshot?.suspension?.phase);
         this.clearHandshakeTimer();
         this.connectFailure = undefined;
         this.reconnectSupervisor.reset();
@@ -430,6 +461,12 @@ export class GatewayProtocolClient<TPlan> {
           if (!this.isConnectCurrent(socket, generation)) {
             return;
           }
+          this.requests.acceptReconnectIdentity(
+            hello.auth?.recoveryScope,
+            hello.auth?.storeIdentity,
+            hello.features?.plannedHandoffReadMethods,
+          );
+          this.requests.setSuspensionPhase(hello.snapshot?.suspension?.phase);
           this.invoke("hello", () => this.opts.onHello?.(hello));
           if (!this.isConnectCurrent(socket, generation)) {
             return;

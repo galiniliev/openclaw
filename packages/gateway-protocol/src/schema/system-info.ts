@@ -5,7 +5,9 @@ import { GatewayCompletionRouteSchema } from "./model-runtime-options.js";
 import { GatewayEventLoopHealthSchema, GatewayProcessMemorySchema } from "./runtime-vitals.js";
 
 /** Empty request payload for Gateway host system information. */
-export const SystemInfoParamsSchema = closedObject({});
+export const SystemInfoParamsSchema = closedObject({
+  includeRollingRelease: Type.Optional(Type.Literal(true)),
+});
 
 /** Where utility completions execute; absent when no owner can serve them. */
 const UtilityModelRuntimeSchema = Type.Optional(GatewayCompletionRouteSchema);
@@ -61,6 +63,14 @@ export const SystemInfoResultSchema = closedObject({
   ),
   /** Resolved utility model for the configured default agent. */
   defaultAgentUtilityModel: Type.Optional(UtilityModelStatusSchema),
+  rollingRelease: Type.Optional(
+    closedObject({
+      compatibilityDigest: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+      storeIdentity: Type.String({ minLength: 1 }),
+      bootId: Type.String({ minLength: 1 }),
+      executionOwner: Type.String({ minLength: 1 }),
+    }),
+  ),
 });
 
 // Wire types derive directly from local schema consts so public d.ts graphs never

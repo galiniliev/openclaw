@@ -29,6 +29,7 @@ export function createAuditEventRecorder(options: {
   scheduler: GatewayScheduler;
   getConfig: () => OpenClawConfig;
   writer?: AuditEventWriter;
+  deferStart?: (start: () => void) => void;
   stateDir?: string;
   terminalSettleMs?: number;
 }): AuditEventRecorder {
@@ -36,6 +37,7 @@ export function createAuditEventRecorder(options: {
   const writer =
     options.writer ??
     createAuditEventWriter({
+      deferStart: options.deferStart,
       scheduler: options.scheduler,
       ...(options.stateDir ? { stateDir: options.stateDir } : {}),
       onContention: (message) => log.warn(message),

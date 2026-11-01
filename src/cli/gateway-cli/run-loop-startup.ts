@@ -1,7 +1,12 @@
 import { clearRuntimeConfigSnapshot } from "../../config/runtime-snapshot.js";
 import { markGatewayRestartTrace } from "../../gateway/restart-trace.js";
+import type { BoundGatewayRollingContract } from "../../gateway/rolling-release-contract.js";
 import type { GatewayServerOptions, GatewayStartupOperation } from "../../gateway/server-public.js";
 import type { GatewayInstallationReplacement } from "../../gateway/stale-install.js";
+import {
+  getDatabaseEngineSelection,
+  withDatabaseEngineSelection,
+} from "../../infra/database-engine/context.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import type { GatewayBootLifecycleCompletion } from "../../infra/gateway-boot-lifecycle.js";
 import { acquireGatewayLock } from "../../infra/gateway-lock.js";
@@ -20,7 +25,12 @@ const lifecycleRuntimeLoader = createLazyImportLoader(() => import("./lifecycle.
 
 /** Prime lifecycle code and acquire initial custody before installing signal handlers. */
 export async function prepareGatewayRunLoop(
-  params: { lockPort?: number; lifecycleLockDeadlineMs?: number },
+  params: {
+    lockPort?: number;
+    lifecycleLockDeadlineMs?: number;
+    rollingHandoff?: BoundGatewayRollingContract;
+    startupSignal?: AbortSignal;
+  },
   logger: Pick<SubsystemLogger, "info" | "warn">,
 ) {
   // Updates rotate dist chunks; signal handling must retain this exact runtime.
@@ -33,15 +43,24 @@ export async function prepareGatewayRunLoop(
   const restartDecision = lifecycleRuntime.resolveGatewayRestartDecision();
   // Resolve the native deadline before acquiring custody that needs final settlement.
   const startupBudget = await resolveGatewayShutdownBudget(supervisorMode, logger);
-  const lock = await measureGatewayBootstrapStep("cli.bootstrap.gateway-lock", () =>
+  const acquire = () =>
     acquireGatewayLock({
       port: params.lockPort,
       listenerMode: supervisorMode ? "supervised" : "foreground",
       supervisor,
+      ...(params.startupSignal
+        ? { assertCurrent: () => params.startupSignal!.throwIfAborted() }
+        : {}),
+      ...(params.rollingHandoff ? { rollingHandoff: params.rollingHandoff } : {}),
       ...(params.lifecycleLockDeadlineMs !== undefined
         ? { lifecycleDeadlineMs: params.lifecycleLockDeadlineMs }
         : {}),
-    }),
+    });
+  const selection = getDatabaseEngineSelection();
+  const lock = await measureGatewayBootstrapStep("cli.bootstrap.gateway-lock", () =>
+    params.rollingHandoff && selection
+      ? withDatabaseEngineSelection({ ...selection, access: "read-write" }, acquire)
+      : acquire(),
   );
   return { lifecycleRuntime, supervisor, supervisorMode, restartDecision, startupBudget, lock };
 }

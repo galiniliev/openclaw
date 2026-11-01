@@ -66,3 +66,16 @@ export function normalizeRootNoColorArgvForProgram(
       resolveRootOptionRole(program, remainingArgs, noColorIndex) === "value",
   });
 }
+
+export function isCommanderParseExit(error: unknown): error is { exitCode: number } {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const candidate = error as { code?: unknown; exitCode?: unknown };
+  return (
+    typeof candidate.exitCode === "number" &&
+    Number.isInteger(candidate.exitCode) &&
+    typeof candidate.code === "string" &&
+    candidate.code.startsWith("commander.")
+  );
+}

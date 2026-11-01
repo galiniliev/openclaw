@@ -16,6 +16,7 @@ import { isAllowedToolCallName } from "../agents/tool-call-shared.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { AgentEventPayload } from "../infra/agent-events.js";
 import type { TrustedToolExecutionEvent } from "../infra/diagnostic-events.js";
+import { beginLifecycleWriteCustody } from "../infra/lifecycle-write-custody.js";
 import { isAuditLedgerEnabled } from "./audit-config.js";
 import type {
   AgentRunFinishedAuditEventInput,
@@ -282,6 +283,15 @@ export function createAgentEventAuditRecorder(options: {
   );
   const pendingTerminals = new Map<string, PendingTerminal>();
   const bufferedStarts = new Map<string, AgentRunStartedAuditEventInput>();
+  let releaseCustody: (() => void) | undefined;
+  const reconcileCustody = () => {
+    if (pendingTerminals.size > 0 || bufferedStarts.size > 0) {
+      releaseCustody ??= beginLifecycleWriteCustody("audit-persistence");
+    } else {
+      releaseCustody?.();
+      releaseCustody = undefined;
+    }
+  };
   const openRunInstances = new Set<string>();
   const settledRunInstances = new Set<string>();
 
@@ -311,6 +321,7 @@ export function createAgentEventAuditRecorder(options: {
       bufferedStarts.delete(runInstance);
       writer.record(start);
     }
+    reconcileCustody();
   };
   const settleTerminal = (runInstance: string, finish: AgentRunFinishedAuditEventInput) => {
     const start = bufferedStarts.get(runInstance);
@@ -320,6 +331,7 @@ export function createAgentEventAuditRecorder(options: {
       bufferedStarts.delete(runInstance);
       rememberSettled(runInstance);
     }
+    reconcileCustody();
   };
   const flushPending = (runInstance: string) => {
     const pending = pendingTerminals.get(runInstance);
@@ -349,6 +361,7 @@ export function createAgentEventAuditRecorder(options: {
     timer.unref?.();
     pendingTerminals.delete(runInstance);
     pendingTerminals.set(runInstance, { ...selected, timer });
+    reconcileCustody();
     if (pendingTerminals.size > MAX_TRACKED_RUN_INSTANCES) {
       const oldest = pendingTerminals.keys().next().value;
       if (oldest !== undefined) {

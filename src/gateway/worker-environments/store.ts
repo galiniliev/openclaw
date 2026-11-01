@@ -73,7 +73,7 @@ registerOpenClawStateDatabaseLifecycleListener((event) => {
 });
 
 export async function createWorkerEnvironmentStore(
-  options: { database?: OpenClawStateDatabase; now?: () => number } = {},
+  options: { database?: OpenClawStateDatabase; now?: () => number; readOnlyStartup?: true } = {},
 ) {
   const inCreationScope = AsyncLocalStorage.snapshot();
   let context = captureOpenClawStateWorkerContext(
@@ -303,7 +303,9 @@ export async function createWorkerEnvironmentStore(
     },
   });
   try {
-    await mutate("workerEnvironments.initialize", {});
+    if (!options.readOnlyStartup) {
+      await mutate("workerEnvironments.initialize", {});
+    }
     // First creation publishes its physical identity through the captured admission.
     workerEnvironmentProjections.get(context.admission.identity);
     // Hydration joins the inventory writer queue.
@@ -384,6 +386,9 @@ export async function createWorkerEnvironmentStore(
     assertActive();
   };
   const store = {
+    initializeAfterReadOnlyStartup: async () => {
+      await mutate("workerEnvironments.initialize", {});
+    },
     close,
     ready,
     async hasSessionAttachment(environmentId: string): Promise<boolean> {

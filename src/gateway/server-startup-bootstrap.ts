@@ -57,6 +57,7 @@ import {
   resumeGatewayRestartTraceFromEnv,
   resumeGatewayRestartTraceFromHandoff,
 } from "./restart-trace.js";
+import { runOrDeferGatewayMutableStartup } from "./rolling-startup.js";
 import { installGatewayDatabaseEngine } from "./server-database-engine.js";
 import type { GatewayServerOptions } from "./server-public.js";
 import { resolveGatewayStartupSourceConfig } from "./server-startup-secret-surfaces.js";
@@ -216,7 +217,9 @@ async function prepareGatewayServerBootstrapSelected(input: {
     }
   }
   if (!minimalTestGateway && !opts.updateCanary) {
-    await startupTrace.measure("runtime.agent-cli", () => prepareGatewayAgentCliShim());
+    await runOrDeferGatewayMutableStartup(opts.rollingStartup, () =>
+      startupTrace.measure("runtime.agent-cli", () => prepareGatewayAgentCliShim()),
+    );
   }
   const startupConfigModulePromise = startupTrace.measure(
     "config.runtime-imports",
@@ -239,16 +242,17 @@ async function prepareGatewayServerBootstrapSelected(input: {
   const startupTailscaleOverride = opts.tailscale ? structuredClone(opts.tailscale) : undefined;
   // Seed before secrets activation so every active/rollback snapshot carries
   // the same runtime-only browser origin baseline.
-  const controlUiSeed = minimalTestGateway
-    ? { config: configSnapshot.config, seededAllowedOrigins: false }
-    : await startupTrace.measure("control-ui.seed", () =>
-        maybeSeedControlUiAllowedOriginsAtStartup({
-          config: configSnapshot.config,
-          log,
-          runtimeBind: opts.bind,
-          runtimePort: port,
-        }),
-      );
+  const controlUiSeed =
+    minimalTestGateway || opts.rollingStartup
+      ? { config: configSnapshot.config, seededAllowedOrigins: false }
+      : await startupTrace.measure("control-ui.seed", () =>
+          maybeSeedControlUiAllowedOriginsAtStartup({
+            config: configSnapshot.config,
+            log,
+            runtimeBind: opts.bind,
+            runtimePort: port,
+          }),
+        );
   if (controlUiSeed.seededAllowedOrigins) {
     copyConfigResolutionFacts(configSnapshot.config, controlUiSeed.config);
   }
@@ -281,9 +285,11 @@ async function prepareGatewayServerBootstrapSelected(input: {
     logSecrets,
     emitStateEvent: emitSecretsStateEvent,
     beforeSnapshotPublication: async (config) => {
-      const { publishCanonicalUserChannelPolicy } =
-        await import("../state/user-channel-identity-operations.js");
-      await publishCanonicalUserChannelPolicy(config?.gateway, config?.commands?.ownerAllowFrom);
+      await runOrDeferGatewayMutableStartup(opts.rollingStartup, async () => {
+        const { publishCanonicalUserChannelPolicy } =
+          await import("../state/user-channel-identity-operations.js");
+        await publishCanonicalUserChannelPolicy(config?.gateway, config?.commands?.ownerAllowFrom);
+      });
     },
     ...(startupConfigLoad.pluginMetadataSnapshot
       ? { pluginMetadataSnapshot: startupConfigLoad.pluginMetadataSnapshot }
@@ -309,23 +315,30 @@ async function prepareGatewayServerBootstrapSelected(input: {
   const cfgAtStart = authBootstrap.cfg;
   startupTrace.setConfig(cfgAtStart);
   if (!opts.updateCanary) {
-    try {
-      const cleanup = await startupTrace.measure("agents.github-profile-cleanup", async () => {
-        const { cleanupRetiredManagedGitHubProfiles } =
-          await import("../agents/github-tool-profile-cleanup.js");
-        return await cleanupRetiredManagedGitHubProfiles({
-          config: cfgAtStart,
-          env: process.env,
+    await runOrDeferGatewayMutableStartup(opts.rollingStartup, async () => {
+      try {
+        const cleanup = await startupTrace.measure("agents.github-profile-cleanup", async () => {
+          const { cleanupRetiredManagedGitHubProfiles } =
+            await import("../agents/github-tool-profile-cleanup.js");
+          return await cleanupRetiredManagedGitHubProfiles({
+            config: cfgAtStart,
+            env: process.env,
+          });
         });
-      });
-      for (const warning of cleanup.warnings) {
-        log.warn(`managed GitHub profile cleanup: ${warning}`);
+        for (const warning of cleanup.warnings) {
+          log.warn(`managed GitHub profile cleanup: ${warning}`);
+        }
+      } catch (error) {
+        log.warn(`managed GitHub profile cleanup failed: ${formatErrorMessage(error)}`);
       }
-    } catch (error) {
-      log.warn(`managed GitHub profile cleanup failed: ${formatErrorMessage(error)}`);
-    }
+    });
   }
   if (authBootstrap.generatedToken) {
+    if (opts.rollingStartup) {
+      throw new Error(
+        "Gateway rolling release requires the existing configured authentication binding",
+      );
+    }
     log.warn(formatRuntimeGatewayAuthTokenWarning());
   }
   // prepareGatewayStartupConfig has already applied startupAuthOverride to cfgAtStart,
@@ -473,18 +486,21 @@ async function prepareGatewayServerBootstrapSelected(input: {
     preserveExistingOwnership: true,
   });
   if (!minimalTestGateway && !opts.updateCanary) {
-    const { recoverConfiguredMcpDockerServers } = await import("../agents/mcp-docker-recovery.js");
-    await recoverConfiguredMcpDockerServers(
-      cfgAtStart,
-      startupConfigLoad.pluginMetadataSnapshot?.manifestRegistry,
-    );
+    await runOrDeferGatewayMutableStartup(opts.rollingStartup, async () => {
+      const { recoverConfiguredMcpDockerServers } =
+        await import("../agents/mcp-docker-recovery.js");
+      await recoverConfiguredMcpDockerServers(
+        cfgAtStart,
+        startupConfigLoad.pluginMetadataSnapshot?.manifestRegistry,
+      );
+    });
   }
   const preparations = [
     minimalTestGateway || opts.updateCanary
       ? Promise.resolve(undefined)
       : startupTrace.measure("worker-environments.store-import", async () => {
           const workerModule = await loadWorkerEnvironmentStartupModule();
-          return await workerModule.loadGatewayWorkerEnvironmentStartupState();
+          return await workerModule.loadGatewayWorkerEnvironmentStartupState(opts.rollingStartup);
         }),
     (async () => {
       if (opts.updateCanary) {
@@ -493,16 +509,26 @@ async function prepareGatewayServerBootstrapSelected(input: {
       if (minimalTestGateway || opts.updateCanary) {
         return [];
       }
-      await startupTrace.measure("state.desktop-approval-admission", async () => {
-        const { migrateLegacyDesktopStreamOptOuts } =
-          await import("../infra/device-pairing-node-desktop-migration.js");
-        const retired = await migrateLegacyDesktopStreamOptOuts(cfgAtStart);
-        if (retired > 0) {
-          log.warn(
-            `Preserved disabled desktop access for ${retired} paired node(s); approve their updated desktop capability to enable sharing.`,
-          );
-        }
-      });
+      await runOrDeferGatewayMutableStartup(opts.rollingStartup, () =>
+        startupTrace.measure("state.desktop-approval-admission", async () => {
+          const { migrateLegacyDesktopStreamOptOuts } =
+            await import("../infra/device-pairing-node-desktop-migration.js");
+          const retired = await migrateLegacyDesktopStreamOptOuts(cfgAtStart);
+          if (retired > 0) {
+            log.warn(
+              `Preserved disabled desktop access for ${retired} paired node(s); approve their updated desktop capability to enable sharing.`,
+            );
+          }
+        }),
+      );
+      if (opts.rollingStartup) {
+        opts.rollingStartup.defer(async () => {
+          const { prepareGatewayStartupSessions } =
+            await import("./server-startup-session-migration.js");
+          await prepareGatewayStartupSessions({ cfg: cfgAtStart, env: process.env, log });
+        });
+        return [];
+      }
       return startupTrace.measure("sessions.admission", async () => {
         const { prepareGatewayStartupSessions } =
           await import("./server-startup-session-migration.js");
@@ -532,7 +558,9 @@ async function prepareGatewayServerBootstrapSelected(input: {
     if (!opts.updateCanary) {
       const { initSubagentRegistry } =
         await import("../agents/subagents/registry/subagent-registry.js");
-      await initSubagentRegistry();
+      await runOrDeferGatewayMutableStartup(opts.rollingStartup, async () => {
+        await initSubagentRegistry();
+      });
     }
     return prepareGatewayPluginBootstrap({
       cfgAtStart,

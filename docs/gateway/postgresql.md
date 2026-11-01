@@ -602,6 +602,84 @@ not migrate data.
 
 ## Migrate an existing installation
 
+### Move an exact stopped source between disposable hosts
+
+An ordinary user backup intentionally sanitizes delivery and recovery state. It
+is not an exact migration source. When an external supervisor must retire a
+SQLite host before an offline migration job can run, use the native exact
+migration capture while the original host's filesystem is still available.
+Stop its Gateway and every embedded writer first; stopping the whole replica
+before capture may discard its only local files.
+
+Create a fresh verified filesystem archive for that quiesced installation, then:
+
+```bash
+openclaw database migration-capture capabilities --json
+openclaw database migration-capture create --base-archive /private/filesystem.tar.gz --output /private/migration-capsule --json
+openclaw database migration-capture restore /private/migration-capsule --manifest-sha256 <producer-manifest-digest> --target /private/new-staging --json
+```
+
+By default, creation requires exclusive offline ownership and a supplied base
+archive. A host whose existing Gateway must remain alive while its replica-local
+files are captured can explicitly use an already prepared **non-drain** suspension:
+
+```bash
+openclaw database migration-capture create --externally-quiesced --request-id <host-request-id> --suspension-id <ready-suspension-id> --output /private/migration-capsule --json
+```
+
+The host must first freeze and settle its broker and other non-Native file
+writers. This mode authenticates to the discovered local Gateway, checks the
+existing suspension and physical owner, renews the same request, and requires
+ready status with zero active work and write custody throughout capture. It
+creates and verifies the filesystem base **inside that suspension**; supplying
+`--base-archive` is refused. Exact database snapshots use artifact-preserving
+read-only copies while the old process remains alive. It does not claim the
+source is stopped, migrate its schema, resume it or commit shutdown. Legacy audit
+inputs requiring a writer lease refuse rather than mutating the source.
+
+A changed owner, expired lease, failed renewal or mismatched suspension refuses
+the capture, retaining partial artifacts without a successful receipt. The old
+renewal RPC has no expected-suspension compare-and-swap; if a delayed request
+returns a different suspension, the host must reconcile that actual state. The
+command never resumes an uncertain source. After success, the original host must
+continue renewing the same suspension and holding all other writers until its
+managed retirement is confirmed; the capsule alone does not stop future writes.
+The optional `quiescence` manifest field binds the request, suspension, physical
+owner, and observed expiry to this capture, not to future activation authority.
+
+Both modes require an absent output directory outside the state/config roots.
+The private capsule contains the filesystem
+archive, exact native SQLite snapshots, and authored configuration/includes.
+Registered and retained native stores, fixed-local credentials, safety journals
+and daemon intent are discovered through the existing exact recovery owner.
+Codex and other opaque application files remain in the filesystem archive; their
+own processes must already have closed them. PostgreSQL sources and unsupported
+external database/config roots refuse rather than being silently omitted.
+
+Restore requires the producer's manifest digest, the same logical state/config
+paths, and a new empty staging target outside live state. It verifies the bound
+artifacts, extracts the full filesystem archive, then overlays exact native
+database/config images only inside that private staging tree. Shared/local
+credential bindings are re-admitted to the actual new file identities. Captured
+device/inode values are only source-pair evidence, never authority over a new
+host. An invalid capsule cannot publish a successful restore or mutate live
+state. The returned `archiveRoot`/`targetPath` and `exactMigration` receipt let the
+external lifecycle owner perform its existing state/config promotion before
+running the ordinary database porter.
+
+The receipt's exact profile covers the native database/configuration images.
+`verified: true` confirms artifact validation. For the default offline mode it
+does not establish temporal consistency of an arbitrary supplied base: the
+controller must bind that base to the same frozen source generation; matching
+`sourceStateDir` alone is not that proof. The externally quiesced mode creates
+its own base under the checked suspension, while the host remains responsible
+for the non-Native writer barrier and subsequent source retirement.
+Keep the complete capsule private; it includes credentials, claims and completion
+records deliberately absent from portable user backups. An incomplete capture
+is retained for diagnosis and never grants updater rollback or port-resume
+authority. This command does not create an active database-port manifest,
+import PostgreSQL namespaces, start services or enable multiple active Gateways.
+
 ### Prepare and port to PostgreSQL
 
 While the installation still selects SQLite, run:
@@ -981,6 +1059,37 @@ with `ALTER ROLE <openclaw_role> SET synchronous_commit = off` or the equivalent
 `ALTER DATABASE` setting. This can lose recently acknowledged commits on a server
 or operating-system crash, without corruption. Ports and backups always commit
 durably.
+
+### Supervisor-owned rolling handoff
+
+A private Gateway supervisor can prewarm a successor and bind its observational
+readers before transferring execution. This requires PostgreSQL for every portable
+store family, a matching final local companion, and compatible configuration,
+schema descriptors, plugin versions, and protocol contracts. Schema changes still
+use the stopped-writer update and migration flow above. Ordinary `openclaw update`
+does not select this private supervisor path automatically.
+
+The candidate can serve only the explicitly qualified core reads while mutation
+admission remains closed. Autonomous services, recovery writes, and other mutable
+startup work stay deferred. Writer activation requires the existing execution
+lease transfer and positive retirement of the predecessor; prewarm or read
+readiness alone never grants write authority. This temporary read-only overlap
+does not provide active-active Gateway support.
+
+Compatible clients retain qualified reads and requests the Gateway confirms never
+entered their handler. Reconnection must authenticate the same store and release,
+and the original request deadline and cancellation remain in force. A write whose
+delivery or outcome is unknown is not automatically replayed. An unqualified
+connected operator client prevents the planned fence until it upgrades or disconnects.
+
+After execution has been yielded, expiry cannot automatically reopen the old
+writer. The supervisor must reconcile the recorded owners before resuming or
+activating either process. Ordinary stopped-owner recovery can reclaim the lease
+only after the predecessor is positively dead and its recorded handoff has expired.
+Live and unverified predecessors remain reserved, and a late candidate cannot use
+an expired or replaced handoff. Keep an uncertain handoff with its original
+controller instead of starting another writer or repeating an operation with an
+unknown outcome.
 
 ## Search on PostgreSQL
 

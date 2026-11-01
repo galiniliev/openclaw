@@ -1,5 +1,6 @@
 import { safeParseJsonRecord } from "@openclaw/normalization-core/json-coercion";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { parseGatewayRollingContract } from "../gateway/rolling-release-contract.js";
 import { tableExists } from "../state/openclaw-state-db-schema-helpers.js";
 import { readOpenClawStateLease } from "../state/openclaw-state-lease-store.js";
 import type {
@@ -99,6 +100,14 @@ export function decodeGatewayOwnerLease(
   if ((payload.mode === "foreground") !== (supervisor === null)) {
     throw new Error("Gateway owner lease supervisor does not match its listener mode");
   }
+  if (
+    payload.rollingReturnToOwner !== undefined &&
+    (!payload.rollingHandoff ||
+      typeof payload.rollingReturnToOwner !== "string" ||
+      !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(payload.rollingReturnToOwner))
+  ) {
+    throw new Error("Gateway rolling return identity could not be verified");
+  }
   return {
     ...processOwner,
     owner: row.owner,
@@ -109,6 +118,12 @@ export function decodeGatewayOwnerLease(
     ...(typeof payload.listeningAt === "number" ? { listeningAt: payload.listeningAt } : {}),
     ...(typeof payload.stateDatabaseProvenance === "string"
       ? { stateDatabaseProvenance: payload.stateDatabaseProvenance }
+      : {}),
+    ...(payload.rollingHandoff === undefined
+      ? {}
+      : { rollingHandoff: parseGatewayRollingContract(payload.rollingHandoff) }),
+    ...(typeof payload.rollingReturnToOwner === "string"
+      ? { rollingReturnToOwner: payload.rollingReturnToOwner }
       : {}),
     // Expiry cannot revoke the separate physical Gateway coordinator.
     state: readStateLeaseProcessOwnerStatus(processOwner, row.heartbeatAt ?? row.createdAt),

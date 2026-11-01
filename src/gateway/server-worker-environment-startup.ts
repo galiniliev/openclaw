@@ -1,9 +1,11 @@
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
-import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
 import { resolveDefaultAgentId } from "../agents/agent-scope.js";
 import { getRuntimeConfig } from "../config/config.js";
 import { racePromiseWithAbortSignal } from "../infra/abort-signal.js";
-import { loadOrCreateProcessDeviceIdentityAsync } from "../infra/device-identity-async.js";
+import {
+  loadOrCreateProcessDeviceIdentityAsync,
+  loadDeviceIdentityIfPresentAsync,
+} from "../infra/device-identity-async.js";
 import { getPairedDevice } from "../infra/device-pairing.js";
 import type { GatewayScheduler } from "../infra/gateway-scheduler.js";
 import { resolveOpenClawPackageRootSync } from "../infra/openclaw-root.js";
@@ -20,7 +22,9 @@ import { configuredDefaultRepository } from "./configured-default-repository.js"
 import type { NodeDesktopStreamBroker } from "./desktop/node-stream-broker.js";
 import type { DesktopSessionRegistry } from "./desktop/session-registry.js";
 import type { NodeWorkerSupervisorTransport } from "./node-registry-private.js";
+import { runOrDeferGatewayMutableStartup, type GatewayRollingStartup } from "./rolling-startup.js";
 import type { GatewayContextResolver, GatewayRequestContext } from "./server-methods/types.js";
+import { loadGatewayWorkerEnvironmentStartupState } from "./server-worker-environment-state.js";
 import { createWorkerRuntimeInstallProgressPublisher } from "./server-worker-runtime-install-progress.js";
 import { retryGatewayWorkerStartupRecovery } from "./server-worker-startup-recovery.js";
 import type { ArtifactTransferHttpCallback } from "./worker-environments/artifact-transfer-http.js";
@@ -89,40 +93,8 @@ const loadWorkerSessionToolExecutorModule = createLazyRuntimeModule(
   () => import("./worker-environments/worker-session-tool-executor.js"),
 );
 
-export async function loadGatewayWorkerEnvironmentStartupState() {
-  const [{ createWorkerEnvironmentStore }, { createWorkerSessionPlacementStore }] =
-    await Promise.all([
-      import("./worker-environments/store.js"),
-      import("./worker-environments/placement-store.js"),
-    ]);
-  const store = await createWorkerEnvironmentStore();
-  const placementStore = createWorkerSessionPlacementStore();
-  const records = store.list();
-  const durableProviderIds = uniqueStrings(
-    records.flatMap((record) =>
-      record.state === "destroyed" || record.state === "failed" || record.state === "orphaned"
-        ? []
-        : record.providerId === DEVICE_WORKER_PROVIDER_ID
-          ? []
-          : [record.providerId],
-    ),
-  );
-  const listDurableProviderIds = () =>
-    uniqueStrings(
-      store
-        .listForReconcile()
-        .filter((record) => record.providerId !== DEVICE_WORKER_PROVIDER_ID)
-        .map((record) => record.providerId),
-    );
-  return {
-    durableProviderIds,
-    listDurableProviderIds,
-    store,
-    placementStore,
-  };
-}
-
 export async function createGatewayWorkerEnvironmentRuntime(params: {
+  rollingStartup?: GatewayRollingStartup;
   scheduler: GatewayScheduler;
   getPluginRegistry: () => PluginRegistry;
   getPortalRuntime: () => Pick<GatewayRequestContext, "portalService" | "broadcast"> | undefined;
@@ -176,16 +148,18 @@ export async function createGatewayWorkerEnvironmentRuntime(params: {
   // process are gone. Resolve their ambiguous effects before placement
   // reconciliation attempts to release the owning worker claims.
   const workerEnvironmentLog = params.log.child("worker-environments");
-  await retryGatewayWorkerStartupRecovery({
-    operation: "placementTools.recover",
-    run: () => params.startup.placementStore.recoverWorkerSessionToolOperationsAfterRestart(),
-    warn: (message) => workerEnvironmentLog.warn(message),
-  });
-  // A crashed gateway can leak local turn claims; drop them before workers re-admit turns.
-  await retryGatewayWorkerStartupRecovery({
-    operation: "workerPlacements.clearLocalTurnClaims",
-    run: () => params.startup.placementStore.clearLocalTurnClaimsAfterRestartAsync(),
-    warn: (message) => workerEnvironmentLog.warn(message),
+  await runOrDeferGatewayMutableStartup(params.rollingStartup, async () => {
+    await retryGatewayWorkerStartupRecovery({
+      operation: "placementTools.recover",
+      run: () => params.startup.placementStore.recoverWorkerSessionToolOperationsAfterRestart(),
+      warn: (message) => workerEnvironmentLog.warn(message),
+    });
+    // A crashed gateway can leak local turn claims; drop them before workers re-admit turns.
+    await retryGatewayWorkerStartupRecovery({
+      operation: "workerPlacements.clearLocalTurnClaims",
+      run: () => params.startup.placementStore.clearLocalTurnClaimsAfterRestartAsync(),
+      warn: (message) => workerEnvironmentLog.warn(message),
+    });
   });
   const placementGate = createWorkerSessionPlacementGate(params.startup.placementStore, {
     // Claims loaded before this Gateway acquired the state lock remain usable only by
@@ -276,14 +250,22 @@ export async function createGatewayWorkerEnvironmentRuntime(params: {
   const nodeWorkspaceTransfer = createNodeWorkspaceTransferService({
     getOwner: (environmentId) => params.startup.store.getTransferOwner(environmentId),
   });
-  await nodeWorkspaceTransfer.initialize();
+  await runOrDeferGatewayMutableStartup(params.rollingStartup, async () => {
+    await nodeWorkspaceTransfer.initialize();
+  });
   // Permanent credential revocation fences every in-flight workspace transfer for the
   // owner immediately. Rotation-style revocations (device reconcile re-mints) do not
   // notify, so routine reconcile never tears down healthy transfer contexts.
   params.startup.store.onCredentialRevoked((environmentId) => {
     nodeWorkspaceTransfer.fenceEnvironment(environmentId);
   });
-  const gatewayDeviceId = (await loadOrCreateProcessDeviceIdentityAsync()).deviceId;
+  const gatewayIdentity = params.rollingStartup
+    ? await loadDeviceIdentityIfPresentAsync()
+    : await loadOrCreateProcessDeviceIdentityAsync();
+  if (!gatewayIdentity) {
+    throw new Error("Rolling Gateway requires the existing device identity in its final companion");
+  }
+  const gatewayDeviceId = gatewayIdentity.deviceId;
   const nodeWorkerGatewayNamespace = resolveNodeWorkerGatewayNamespace(gatewayDeviceId);
   const nodeWorkerTunnelManager = createNodeWorkerTunnelManager({
     gatewayDeviceId,
@@ -416,8 +398,19 @@ export async function createGatewayWorkerEnvironmentRuntime(params: {
     getNodeTransport: () => deviceRuntime.getNodeTransport(),
     gatewayNamespace: nodeWorkerGatewayNamespace,
   });
+  const { createWorkerInferenceStore } = await import("./worker-environments/inference-store.js");
+  const inferenceStore = createWorkerInferenceStore();
   const workerEnvironmentService = createWorkerEnvironmentService({
     resolveGatewayContext: params.resolveGatewayContext,
+    inferenceStore: params.rollingStartup
+      ? {
+          ...inferenceStore,
+          recoverPending: (outcome, assertCurrent) =>
+            runOrDeferGatewayMutableStartup(params.rollingStartup, () =>
+              inferenceStore.recoverPending(outcome, assertCurrent),
+            ),
+        }
+      : inferenceStore,
     scheduler: params.scheduler,
     projectNamespace: nodeWorkerGatewayNamespace,
     prepareComputer: computers.prepare,
@@ -582,25 +575,27 @@ export async function createGatewayWorkerEnvironmentRuntime(params: {
     },
     logger: workerEnvironmentLog,
   });
-  try {
-    await workerEnvironmentService.ready();
-  } catch (error) {
+  await runOrDeferGatewayMutableStartup(params.rollingStartup, async () => {
     try {
-      await workerEnvironmentService.stop();
-    } catch (cleanupError) {
-      if (cleanupError !== error) {
-        if (cleanupError instanceof AggregateError && cleanupError.errors.includes(error)) {
-          throw cleanupError;
+      await workerEnvironmentService.ready();
+    } catch (error) {
+      try {
+        await workerEnvironmentService.stop();
+      } catch (cleanupError) {
+        if (cleanupError !== error) {
+          if (cleanupError instanceof AggregateError && cleanupError.errors.includes(error)) {
+            throw cleanupError;
+          }
+          throw new AggregateError(
+            [error, cleanupError],
+            "Worker environment startup and cleanup failed",
+            { cause: cleanupError },
+          );
         }
-        throw new AggregateError(
-          [error, cleanupError],
-          "Worker environment startup and cleanup failed",
-          { cause: cleanupError },
-        );
       }
+      throw error;
     }
-    throw error;
-  }
+  });
   bindDeviceWorkerAvailability(workerEnvironmentService, deviceRuntime.resolveAvailability);
   bindDeviceWorkerReconciliation(workerEnvironmentService, async (deviceId) => {
     const environmentIds = params.startup.store
@@ -686,3 +681,5 @@ export async function createGatewayWorkerEnvironmentRuntime(params: {
       createNodeWorkspaceTransferHttpCallback(nodeWorkspaceTransfer),
   };
 }
+
+export { loadGatewayWorkerEnvironmentStartupState } from "./server-worker-environment-state.js";

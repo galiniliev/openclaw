@@ -1,6 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import {
+  getDatabaseEngineSelection,
+  withDatabaseEngineSelection,
+} from "./database-engine/context.js";
 import { executeWithCachedStatement } from "./kysely-sync-cache-state.js";
 import { openNodeSqliteDatabase, resolveExistingSqliteFileUri } from "./node-sqlite.js";
 import { retireSqliteDatabaseAdmissionForPath } from "./sqlite-database-admission.js";
@@ -63,10 +67,17 @@ export function acquireSqliteStagingToken(
   const tokenExists = existing !== undefined || mode === "create";
   // Legacy readers may supply a parent without a token; fresh owners never recreate a removed inode.
   const existingIdentity = tokenExists ? readIdentity(location, "file") : undefined;
-  const db = withSqliteNativeOpen(() =>
+  const openToken = () =>
     openNodeSqliteDatabase(tokenExists ? resolveExistingSqliteFileUri(location) : location, {
       timeout: 0,
-    }),
+    });
+  const selection = getDatabaseEngineSelection();
+  // This inode-checked private lifetime token must commit retirement even while
+  // portable stores are fenced. The scope ends before any payload consumer runs.
+  const db = withSqliteNativeOpen(() =>
+    selection
+      ? withDatabaseEngineSelection({ ...selection, access: "read-write" }, openToken)
+      : openToken(),
   );
   let tokenIdentity: fs.BigIntStats;
   // This lock primitive needs fixed SQLite commands, not the query-builder graph.

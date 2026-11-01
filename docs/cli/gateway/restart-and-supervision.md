@@ -173,7 +173,32 @@ External terminals without Gateway-service markers, externally supervised Gatewa
 Inline `--password` can be exposed in local process listings. Prefer `--password-file`, env, or a SecretRef-backed `gateway.auth.password`.
 </Warning>
 
-### Install identity
+### Private rolling candidates
+
+A deployment supervisor can start a compatible PostgreSQL successor using
+`gateway run --rolling-standby <releaseId> --rolling-contract <path>` and its
+private control pipe. The contract must be a bounded, private regular file.
+This mode prewarms immutable runtime code, binds observational readers to the
+final companion, and prepares the existing Gateway writer lifecycle before
+activation. Activation requires the exact predecessor's recorded retirement;
+preparation alone does not enable mutations or background sidecars.
+
+The supervisor owns the staged handoff and its rollback. These private flags
+cannot combine with `--force`, `--reset`, `--dev`, or `--update-canary`.
+Ordinary `gateway run` and `gateway restart` keep their existing startup and
+shutdown behavior. Candidates close when their control pipe ends. An unactivated candidate also
+closes on contract expiry; expiry does not revoke an already activated writer.
+
+While the predecessor still holds a yielded suspension, its authenticated controller
+can use `gateway.suspend.handoff` with `inspectExecution` to observe the reservation
+or `rebindExecution` to name a fresh candidate. Rebinding requires the exact prior
+contract and observed owner, and a reservation that was never acquired or was
+explicitly returned. It preserves the expiry and keeps predecessor execution
+fenced. With `includeLifecycle`, suspension status also reports whether scheduling
+and admission actually resumed for the matching suspension. These observations do
+not prove successor readiness.
+
+## Install identity
 
 Service management (`install`, `start`, `stop`, `restart`, `uninstall`, Doctor service repair, and self-update service handling) belongs to the install that owns the host service. That is the standard `.openclaw` directory under the OS account home, or the `.openclaw-<profile>` directory a named profile projects there. Named profiles use distinct native service identities.
 

@@ -16,6 +16,7 @@ import { getGatewayContextLifetime } from "../plugins/runtime/gateway-request-sc
 import type { PluginServiceCronHost } from "../plugins/service-cron.js";
 import type { PluginServicesHandle } from "../plugins/services.js";
 import { createDeferredCore } from "../shared/deferred.js";
+import { runOrDeferGatewayMutableStartup, type GatewayRollingStartup } from "./rolling-startup.js";
 import type { GatewayBroadcastFn, GatewayBroadcastToConnIdsFn } from "./server-broadcast-types.js";
 import type { GatewayControlUiRootLifecycle } from "./server-control-ui-root.js";
 import type { GatewayClient, GatewayContextResolver } from "./server-methods/shared-types.js";
@@ -41,6 +42,8 @@ type Awaitable<T> = T | Promise<T>;
 
 /** Start work that depends on the HTTP server being attached and visible. */
 export async function startGatewayPostAttachRuntime(params: {
+  rollingStartup?: GatewayRollingStartup;
+  unlockReadOnlyStartupMethods?: () => void;
   scheduler: GatewayScheduler;
   minimalTestGateway: boolean;
   updateCanary?: boolean;
@@ -275,9 +278,14 @@ export async function startGatewayPostAttachRuntime(params: {
   // Startup failure can precede publication of the post-attach return handle.
   params.onGatewayLifetimeSidecars(updateCheck);
 
-  const startSidecars = () =>
+  const startSidecars = (signal?: AbortSignal) =>
     params.minimalTestGateway
-      ? startStartupLog().then(() => {
+      ? startStartupLog().then(async () => {
+          if (params.rollingStartup) {
+            params.unlockReadOnlyStartupMethods?.();
+            params.rollingStartup.publishReadReady();
+            await params.rollingStartup.waitForMutableStartup(signal);
+          }
           if (!candidateCanary && !params.isClosing?.()) {
             params.onChannelsStarted?.();
           }
@@ -294,6 +302,12 @@ export async function startGatewayPostAttachRuntime(params: {
             return pluginRegistry;
           }
           const startupLog = startStartupLog();
+          if (params.rollingStartup) {
+            params.unlockReadOnlyStartupMethods?.();
+            await startupLog;
+            params.rollingStartup.publishReadReady();
+            await params.rollingStartup.waitForMutableStartup(signal);
+          }
           if (candidateCanary) {
             await startupLog;
             // Retain attributed plugin failures in the published registry for health reporting.
@@ -481,7 +495,7 @@ export async function startGatewayPostAttachRuntime(params: {
     await sidecarsPromise;
   }
   if (!params.minimalTestGateway && !candidateCanary) {
-    updateCheck.start();
+    await runOrDeferGatewayMutableStartup(params.rollingStartup, async () => updateCheck.start());
   }
   const startupSettled =
     params.sidecarStartup === "defer"

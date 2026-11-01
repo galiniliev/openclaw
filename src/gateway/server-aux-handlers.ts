@@ -43,6 +43,7 @@ import {
 } from "./operator-approval-placement-grants.js";
 import { recoverOperatorApprovalsOnStartup } from "./operator-approval-store.js";
 import { QuestionManager } from "./question-manager.js";
+import { runOrDeferGatewayMutableStartup, type GatewayRollingStartup } from "./rolling-startup.js";
 import { publishAppliedApprovalResolution } from "./server-methods/approval-publication.js";
 import {
   cancelAgentRuntimeBoundApprovals,
@@ -67,6 +68,7 @@ type ApprovalPayload =
 
 export function createGatewayAuxHandlers(
   params: GatewaySecretsReloaderParams & {
+    rollingStartup?: GatewayRollingStartup;
     scheduler: GatewayScheduler;
     log: {
       warn?: (message: string) => void;
@@ -97,9 +99,11 @@ export function createGatewayAuxHandlers(
   const placementStandingGrants = createPlacementStandingGrantRuntime({
     runtimeEpoch: approvalPersistence.runtimeEpoch,
   });
-  const ready = recoverOperatorApprovalsOnStartup({
-    runtimeEpoch: approvalPersistence.runtimeEpoch,
-    nowMs: Date.now(),
+  const ready = runOrDeferGatewayMutableStartup(params.rollingStartup, async () => {
+    await recoverOperatorApprovalsOnStartup({
+      runtimeEpoch: approvalPersistence.runtimeEpoch,
+      nowMs: Date.now(),
+    });
   });
   const presentationWork = new AsyncWorkScope();
   const trackPresentationWork = (run: () => Promise<void>): Promise<void> =>
@@ -436,7 +440,9 @@ export function createGatewayAuxHandlers(
   void trackPresentationWork(async () => {
     try {
       await ready;
-      await approvalWebPushDelivery.recoverTerminalDeliveries();
+      await runOrDeferGatewayMutableStartup(params.rollingStartup, () =>
+        approvalWebPushDelivery.recoverTerminalDeliveries(),
+      );
     } catch (error: unknown) {
       params.log.error?.(`approval Web Push restart recovery failed: ${String(error)}`);
     }
