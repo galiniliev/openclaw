@@ -1,3 +1,5 @@
+import type { RetainedWorkspaceAuthority } from "../../state/retained-workspace-authority.js";
+
 export type WorkerWorkspacePendingResult = {
   sessionId: string;
   environmentId: string;
@@ -10,4 +12,5 @@ export type WorkerWorkspacePendingResult = {
   workspaceAcceptedAtMs: number | null;
   stagedResultRef: string | null;
   repositoryWorkspaceId?: string;
+  diskAuthority?: RetainedWorkspaceAuthority;
 };

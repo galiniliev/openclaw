@@ -224,9 +224,9 @@ Control UI owns tabs, layout, safe rendering, and keyboard interaction.
 
 When `gateway.github.host` selects an Enterprise host, the plugin also advertises
 an exact-host, session-scoped reader. It uses the foreground session's repository
-and the selected GitHub App identity. Factory requests require the current signed-in
-operator's `session-item-read` proof and existing repository admission; a pasted
-URL cannot select another repository or borrow a different person's credentials.
+and the selected GitHub App identity, subject to the selected repository
+integration's admission policy. A pasted URL cannot select another repository
+or borrow a different person's credentials.
 
 Private previews finish under that request's authority. Their UI cache is scoped
 to the connection, agent, and session; document caches also include the host,

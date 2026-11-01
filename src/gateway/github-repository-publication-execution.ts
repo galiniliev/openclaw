@@ -8,6 +8,8 @@ import {
   preparePersonalGitHubPublicationSelection,
   type PersonalGitHubSessionActionV2,
 } from "./github-personal-publication.js";
+import { matchesCurrentGitHubPublicationIdentity } from "./github-publication-availability.js";
+import { prepareGitHubPublicationExecutionIdentity } from "./github-publication-execution-identity.js";
 import { GitHubPublicationRequesterUnavailableError } from "./github-publication-failure.js";
 import { projectGitHubPublicationResult } from "./github-publication-receipt.js";
 import {
@@ -33,11 +35,13 @@ import {
   captureCheckpoint,
   prepareReceiptOwner,
 } from "./github-repository-publication-workspace.js";
+import type { PrepareRepositoryPublicationCheckpoint } from "./repository-publication-checkpoint.js";
 
 export function createRepositoryGitHubPublicationExecution(params: {
   instanceId: string;
   active: Map<string, string>;
   getCommittedRuntimeConfig: () => OpenClawConfig;
+  prepareRepositoryCheckpoint?: PrepareRepositoryPublicationCheckpoint;
   assertCurrent: () => void;
   prepareSource: (
     requester: Pick<GitHubPublicationRequesterPolicyV2, "prepareSource">,
@@ -159,6 +163,13 @@ export function createRepositoryGitHubPublicationExecution(params: {
         }
         assertExecution();
       }
+      if (!row.checkpoint_ref) {
+        await params.prepareRepositoryCheckpoint?.(
+          { sessionId: row.session_id, sessionKey: row.session_key, agentId: row.agent_id },
+          assertExecution,
+        );
+        assertExecution();
+      }
       if (
         !row.checkpoint_ref &&
         row.owner_profile_id === null &&
@@ -212,7 +223,33 @@ export function createRepositoryGitHubPublicationExecution(params: {
                     },
                   },
                 }
-              : {}),
+              : {
+                  identity: {
+                    prepare: async () => {
+                      assertExecution();
+                      const current = execution?.row;
+                      if (!current?.execution_id) {
+                        throw new Error("GitHub publication execution identity is unavailable.");
+                      }
+                      return await prepareGitHubPublicationExecutionIdentity({
+                        row,
+                        actor: getRequester().snapshot.actor,
+                        credentialSource: getRequester().repositoryCredentialSource,
+                        lifecycleRevision: row.session_lifecycle_revision,
+                        executionKind: "repository",
+                        ownerId: current.execution_id,
+                        assertCurrent: assertExecution,
+                      });
+                    },
+                    isCurrent: (identity: PreparedGitHubPublicationIdentity) => {
+                      assertExecution();
+                      return matchesCurrentGitHubPublicationIdentity({
+                        agentId: row.agent_id,
+                        identity,
+                      });
+                    },
+                  },
+                }),
           });
         },
         authority,

@@ -38,6 +38,7 @@ import {
   getRemoteControlUiIngressContext,
   hasCurrentRemoteControlUiIngress,
 } from "../../ingress-attribution.js";
+import { READ_SCOPE, WRITE_SCOPE } from "../../method-scopes.js";
 import { resolveIdentityOperatorScopes } from "../../operator-identity-scopes.js";
 import type { OperatorScope } from "../../operator-scopes.js";
 import { checkGatewayWsBrowserOrigin, normalizeChromeExtensionOrigin } from "../../origin-check.js";
@@ -132,12 +133,17 @@ export function resolveEffectiveConnectionScopes(params: {
   deviceScopes: string[];
   verifiedIdentity?: string;
   identityScopes?: Record<string, OperatorScope[]>;
+  verifiedIdentityWrite?: boolean;
   upgradeReq: IncomingMessage;
 }): string[] {
   const verifiedIdentity = params.verifiedIdentity;
   let identityScopes: OperatorScope[] = [];
   if (params.role === "operator" && verifiedIdentity) {
     identityScopes = resolveIdentityOperatorScopes(verifiedIdentity, params.identityScopes);
+    if (params.verifiedIdentityWrite) {
+      // Materialize read before the proxy ceiling attenuates the role-owned write grant.
+      identityScopes = [...new Set([...identityScopes, READ_SCOPE, WRITE_SCOPE])];
+    }
   }
   return applyConnectionScopeCap({
     role: params.role,

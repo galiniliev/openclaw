@@ -118,6 +118,7 @@ export async function startCodexAttemptThread(params: {
   nativeProviderWebSearchSupport: CodexNativeWebSearchSupport;
   sandboxExecServerEnabled: boolean;
   sandbox: CodexSandboxContext;
+  nativeWorkerPlacement?: NonNullable<CodexSandboxContext>["nativeWorkerPlacement"];
   contextEngineProjection: CodexContextEngineThreadBootstrapProjection | undefined;
   historyBootstrapItems?: Parameters<typeof startOrResumeThread>[0]["historyBootstrapItems"];
   historyDeltaItems?: Parameters<typeof startOrResumeThread>[0]["historyDeltaItems"];
@@ -443,6 +444,17 @@ export async function startCodexAttemptThread(params: {
             ) =>
               ({
                 client: activeStartupClient,
+                nativeWorkerPlacement: params.nativeWorkerPlacement,
+                ...(params.sandbox &&
+                "placementRetainedSession" in params.sandbox &&
+                params.sandbox.placementRetainedSession === true
+                  ? { retainedSession: true as const }
+                  : {}),
+                ...(params.sandbox &&
+                "placementRequireExistingNativeState" in params.sandbox &&
+                params.sandbox.placementRequireExistingNativeState === true
+                  ? { requireExistingThread: true as const }
+                  : {}),
                 reserveResumeThread,
                 bindingStore: params.bindingStore,
                 assertCurrent: params.assertCurrent,

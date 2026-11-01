@@ -3,14 +3,19 @@ import { expectDefined } from "@openclaw/normalization-core/expect";
 import { sha256Hex } from "@openclaw/normalization-core/node-crypto";
 import { afterEach, expect, it, vi } from "vitest";
 import { setRuntimeConfigSnapshot } from "../../config/runtime-snapshot.js";
+import type {
+  RepositoryIntegration,
+  RepositoryOperation,
+} from "../../plugins/repository-integration.types.js";
 import { getSessionRepositoryWorkspaceStore } from "../../state/session-repository-workspaces.js";
 import { linkEmail } from "../../state/user-profile-writes.worker.js";
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import { createFixture, sessionKey } from "../control-ui-session-pr-access.test-support.js";
-import {
-  redeemFactoryGitHubProof,
-  type FactoryGitHubProofVerdict,
-} from "../factory-github-proof.js";
+import type { GatewayClient } from "./client-types.js";
+const policy = vi.hoisted(() => ({ current: undefined as RepositoryIntegration | undefined }));
+vi.mock("../../plugins/repository-integration-runtime.js", () => ({
+  getRepositoryIntegration: () => policy.current,
+}));
 import { handleGatewayRequest } from "../server-methods.js";
 
 const host = "engineering.ghe.com";
@@ -28,6 +33,7 @@ const target = { owner: "example", repo: "project", number: 7 };
 const preview = { ...target, title: "Private session pull request" };
 
 afterEach(() => {
+  policy.current = undefined;
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
 });
@@ -42,17 +48,21 @@ it.each([
   "actor-mismatch",
   "cleanup-failure",
   "actor-rebound-during-cleanup",
+  "principal-retired",
 ] as const)(
   "reads Enterprise previews only through the current session and selected App (%s)",
   async (scenario) => {
     await withOpenClawTestState({ scenario: "minimal" }, async () => {
-      vi.stubEnv("FACTORY_AUTH_MODE", "github");
       vi.stubEnv("OPENCLAW_GATEWAY_PASSWORD", "synthetic-broker-password");
       const f = await createFixture("operator.read", true);
       try {
         linkEmail("github:engineering.ghe.com:50", f.profile.id);
-        f.client.authenticatedFactoryGitHubAccountId = scenario === "actor-mismatch" ? 51 : 50;
-        f.client.authenticatedUserId = `github:${host}:${f.client.authenticatedFactoryGitHubAccountId}`;
+        f.client.authenticatedRepositoryCredentialSource = Object.freeze({
+          id: `browser:${"b".repeat(64)}`,
+          expiresAtMs: Date.now() + 300_000,
+        });
+        f.client.authenticatedGitHubAccountId = scenario === "actor-mismatch" ? 51 : 50;
+        f.client.authenticatedUserId = `github:${host}:${f.client.authenticatedGitHubAccountId}`;
         f.client.internal = { ...f.client.internal, authenticatedOperator: true };
         setRuntimeConfigSnapshot({
           ...f.cfg,
@@ -89,34 +99,52 @@ it.each([
           repositoryWorkspaceId: repository.workspaceId,
           lifecycleRevision: "synthetic-lifecycle",
         });
-        const claims: FactoryGitHubProofVerdict[] = [];
+        const claims: (RepositoryOperation & {
+          actorId?: number;
+          profileId: string;
+          credentialSource?: GatewayClient["authenticatedRepositoryCredentialSource"];
+        })[] = [];
         const requests: string[] = [];
+        policy.current = {
+          version: 1,
+          preparedCapacity: "image",
+          resolveConnectionIdentity: () => undefined,
+          async withIdentity(context, run) {
+            context.assertCurrent();
+            if (context.actor.actorId !== 50) {
+              throw new Error("Integration actor denied");
+            }
+            const original = JSON.stringify(context.readCurrentProfile().emails);
+            const assertCurrent = () => {
+              context.assertCurrent();
+              if (JSON.stringify(context.readCurrentProfile().emails) !== original) {
+                throw new Error("Integration profile binding changed");
+              }
+            };
+            return run({
+              env: context.env,
+              assertCurrent,
+              readNativeCredential: async (_env, admission) => {
+                assertCurrent();
+                expect(admission).toMatchObject({ kind: "repository-admission", host });
+                claims.push({
+                  ...context.operation,
+                  actorId: context.actor.actorId,
+                  profileId: context.actor.profileId,
+                  credentialSource: context.actor.credentialSource,
+                });
+                if (scenario === "admission-denied") {
+                  throw new Error("Integration admission denied");
+                }
+                return undefined;
+              },
+            });
+          },
+        };
+
         const fetcher = vi.fn<typeof fetch>(async (input, init) => {
           const url = new URL(input instanceof Request ? input.url : String(input));
           requests.push(url.origin + url.pathname);
-          if (url.origin === "http://127.0.0.1:8080") {
-            const proof = expectDefined(
-              new Headers(init?.headers).get("x-factory-github-proof"),
-              "fixture broker proof",
-            );
-            const claim = redeemFactoryGitHubProof(proof);
-            claims.push(claim);
-            if (scenario === "admission-denied") {
-              return new Response(null, { status: 403 });
-            }
-            return Response.json({
-              version: 1,
-              kind: "repository-admission",
-              host,
-              appId: 101,
-              installationId: 202,
-              repository: repo,
-              actor: { accountId: claim.actorId, profileId: claim.profileId },
-              purpose: claim.purpose,
-              binding: claim.binding,
-              expiresAtMs: Date.now() + 60_000,
-            });
-          }
           expect(url.origin).toBe(apiBaseUrl);
           if (init?.method === "DELETE") {
             if (scenario === "actor-rebound-during-cleanup") {
@@ -155,6 +183,9 @@ it.each([
               expires_at: new Date(Date.now() + 3_600_000).toISOString(),
               permissions,
             });
+          }
+          if (url.pathname === "/repos/example/project" && scenario === "principal-retired") {
+            linkEmail(`github:${host}:50`, f.other.id);
           }
           if (url.pathname === "/repos/example/project/pulls/7") {
             expect(new Headers(init?.headers).get("authorization")).toBe(
@@ -199,6 +230,7 @@ it.each([
           expect(claims).toHaveLength(1);
           expect(claims[0]).toMatchObject({
             actorId: 50,
+            credentialSource: f.client.authenticatedRepositoryCredentialSource,
             profileId: f.profile.id,
             purpose: "session-item-read",
             binding: {
@@ -216,10 +248,13 @@ it.each([
           if (["foreign-repository", "foreign-host", "actor-mismatch"].includes(scenario)) {
             expect(fetcher).not.toHaveBeenCalled();
           }
+          if (scenario === "principal-retired") {
+            expect(requests.some((url) => url.includes("/pulls/"))).toBe(false);
+            expect(requests.at(-1)).toBe(`${apiBaseUrl}/installation/token`);
+          }
           if (scenario === "admission-denied") {
-            expect(requests).toEqual([
-              "http://127.0.0.1:8080/__factory__/github/repository-admission",
-            ]);
+            expect(claims).toHaveLength(1);
+            expect(requests).toEqual([]);
           }
         }
         expect(

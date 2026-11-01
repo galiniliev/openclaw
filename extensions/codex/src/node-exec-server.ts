@@ -41,6 +41,10 @@ export function parseCodexNodePlacementWorkspace(value: unknown) {
     throw new Error("Codex node exec-server requires an exact managed placement workspace.");
   }
   return {
+    ...(value.retainedSession === true ? { retainedSession: true as const } : {}),
+    ...(value.requireExistingNativeState === true
+      ? { requireExistingNativeState: true as const }
+      : {}),
     workspaceDir: value.cwd,
     environmentId: value.environmentId,
     sessionId: value.sessionId,

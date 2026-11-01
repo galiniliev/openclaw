@@ -17,6 +17,8 @@ import {
   currentGitHubPublicationConfig,
   matchesCurrentGitHubPublicationIdentity,
   prepareCurrentGitHubPublicationIdentity,
+  repositoryPublicationPreflightActor,
+  repositoryPublicationPreflightCredential,
 } from "./github-publication-availability.js";
 import { uploadGitHubPublicationEvidence } from "./github-publication-evidence.js";
 import {
@@ -199,7 +201,15 @@ export async function performSessionGitHubAction(options: Options): Promise<void
     (binding
       ? { url: binding.url, repository: binding.base.repository, branch: binding.head.branch }
       : publication!);
-  const identity = await prepareCurrentGitHubPublicationIdentity(session.agentId);
+  const identity = await prepareCurrentGitHubPublicationIdentity(
+    session.agentId,
+    repositoryPublicationPreflightActor(admitted.requester, session.sessionKey, assertRequester),
+    repositoryPublicationPreflightCredential({ ...session, assertCurrent: assertRequester }),
+  );
+  await using identityLifetime = {
+    identity,
+    [Symbol.asyncDispose]: async () => identity.revoke?.(),
+  };
   assertRequester();
   if (publication) {
     assertExpectedSharedGitHubPublisher(publication.publisher, {
@@ -225,7 +235,7 @@ export async function performSessionGitHubAction(options: Options): Promise<void
     inspection?.assertCurrent();
   };
   const url = URL.parse(pullRequest.url);
-  const host = identity.host ?? "github.com";
+  const host = identityLifetime.identity.host ?? "github.com";
   const expectedPath = `/${pullRequest.repository}/pull/`;
   const number = url?.pathname.slice(expectedPath.length);
   if (
@@ -266,6 +276,7 @@ export async function performSessionGitHubAction(options: Options): Promise<void
         pullRequestUrl: binding.url,
         session,
         requester: admitted.requester,
+        identity,
         assertCurrent: assertIdentity,
       });
     }

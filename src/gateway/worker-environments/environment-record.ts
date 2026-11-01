@@ -4,6 +4,7 @@ import type {
   WorkerProfile,
   WorkerSshEndpoint,
 } from "../../plugins/capability-provider.types.js";
+import type { WorkerSessionDiskRetention } from "../../plugins/worker-retention.types.js";
 import type { WorkerSessionPlacementDispatchIdentity } from "./placement-record.js";
 import type { WorkerEnvironmentLeasedState, WorkerEnvironmentUnleasedState } from "./state.js";
 
@@ -37,9 +38,11 @@ export type PreparedEnvironmentSelection = WorkerSessionPlacementDispatchIdentit
   bundleHash: string;
   assertCurrent: import("./placement-authorization.js").WorkerPlacementAuthorization;
 };
+
 type RecordIdentity = { environmentId: string; providerId: string; profileId: string };
 type RecordBase = RecordIdentity & {
   profileSnapshot: WorkerProfile;
+  retention?: WorkerSessionDiskRetention | null;
   preparation: WorkerEnvironmentPreparation | null;
   provisionOperationId: string;
   nodeSetupId: string | null;
@@ -70,6 +73,7 @@ type LeasedRecord = {
 };
 export type WorkerEnvironmentRecord = RecordBase & (UnleasedRecord | LeasedRecord);
 export type WorkerEnvironmentIntentInput = RecordIdentity & {
+  retention?: WorkerSessionDiskRetention;
   preparation?: WorkerEnvironmentPreparationIntent;
   profileSnapshot: WorkerProfile;
   provisionOperationId: string;

@@ -22,6 +22,7 @@ import { AGENT_GIT_CONFIG_PARAMETERS } from "../infra/git-maintenance-env.js";
 import { resolveAgentEntry, resolveAgentWorkspaceDir } from "./agent-scope-config.js";
 import {
   prepareAppGitHubIdentity,
+  matchesAppGitHubIdentity,
   configuredAppGitHubIdentityFacts,
   configuredAppGitHubOptionsIdentity,
 } from "./github-app-identity.js";
@@ -60,6 +61,7 @@ import {
 import type {
   PersonalGitHubIdentityPreparation,
   PreparedGitHubPublicationIdentity,
+  PreparedSharedGitHubPublicationIdentity,
   PreparedGitHubToolEnvironment,
   SharedGitHubIdentityPreparation,
 } from "./github-tool-identity.types.js";
@@ -146,11 +148,7 @@ function resolveSelectedGitHubProfileDir(
 export function prepareGitHubToolEnvironment(
   params: GitHubIdentityPreparation,
 ): PreparedGitHubToolEnvironment {
-  const identity = resolveGitHubToolIdentity(params);
-  if (identity.source !== "system-detected" && identity.config.kind === "app-installation") {
-    throw new Error("GitHub Apps support session reads only; select native or OAuth to run tools.");
-  }
-  return prepareGitHubToolEnvironmentForIdentity(params, identity);
+  return prepareGitHubToolEnvironmentForIdentity(params, resolveGitHubToolIdentity(params));
 }
 
 function prepareGitHubToolEnvironmentForIdentity(
@@ -176,6 +174,9 @@ function prepareGitHubToolEnvironmentForIdentity(
     localGitConfigParameters: AGENT_GIT_CONFIG_PARAMETERS,
     excludedStoreNames: Object.freeze(excludedStoreNames),
     managedLocalIdentity,
+    ...(identity.source !== "system-detected" && identity.config.kind === "app-installation"
+      ? { appInstallationProfileId: identity.config.profileId }
+      : {}),
     ...(managedLocalIdentity ? { hostExecutionRequired: true as const } : {}),
   });
 }
@@ -418,7 +419,9 @@ export function matchesPreparedGitHubPublicationIdentity(params: {
   return (
     current.source === params.identity.source &&
     (params.identity.host ?? resolveGitHubHost()) === resolveGitHubHost() &&
-    (current.source === "system-detected" || current.config.profileId === params.identity.profileId)
+    (current.source === "system-detected" ||
+      (current.config.profileId === params.identity.profileId &&
+        matchesAppGitHubIdentity(params.identity, current.config)))
   );
 }
 
@@ -474,10 +477,7 @@ async function prepareSharedGitHubIdentity(
     if (probe.status !== "available") {
       throw new GitHubIdentityError(probe.status);
     }
-    const prepared: Omit<PreparedGitHubPublicationIdentity, "env" | "source"> & {
-      source: "system-detected" | "system-configured" | "agent-override";
-      revoke?: () => Promise<void>;
-    } = {
+    const prepared: Omit<PreparedSharedGitHubPublicationIdentity, "env"> = {
       source: identity.source,
       ...(managed ? { profileId: identity.config.profileId } : {}),
       host,
@@ -495,6 +495,17 @@ export async function prepareGitHubPublicationIdentity(
   // Capture the child environment before awaiting credentials; retirement cannot
   // redirect an already-admitted publication to another profile.
   const env = { ...githubIdentityProbeEnvironment(params, identity), GH_PROMPT_DISABLED: "1" };
+  if (identity.source !== "system-detected" && identity.config.kind === "app-installation") {
+    const { prepared } = await prepareAppGitHubIdentity(
+      { ...params, allowAppInstallation: true },
+      identity.config,
+      identity.source,
+      env,
+      resolveGitHubHost(),
+      resolveGitHubApiBaseUrl(),
+    );
+    return prepared;
+  }
   // Only publication consumes expiry; bind it to the credential's rotation window.
   const readOAuth = () =>
     identity.source !== "system-detected" && identity.config.kind === "oauth"

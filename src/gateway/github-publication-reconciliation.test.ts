@@ -14,6 +14,7 @@ import { withinTest } from "../../test/helpers/promise.js";
 import { upsertSessionEntryCore } from "../config/sessions/session-accessor.js";
 import * as sqliteQueries from "../infra/kysely-sync.js";
 import * as stateReads from "../state/openclaw-state-db-readonly.js";
+import { OpenClawStateLeaseAcquisitionError } from "../state/openclaw-state-lease-error.js";
 import { GitHubPublicationRecoveryPendingError } from "./github-publication-git-index.js";
 import {
   createRealPublicationWorkspace,
@@ -229,6 +230,88 @@ it("recovers independent worktrees while preserving each worktree's publication 
   await first.restart().resumeSessionRequests();
   expect(mocks.runCommand.mock.calls.slice(calls).filter(([argv]) => argv[0] === "gh")).toEqual([]);
 });
+
+it.each([false, true])(
+  "admits a fresh worker turn during bound checkpoint publication (lost push response: %s)",
+  async (lostResponse) => {
+    const f = await fixture("repository");
+    const claim = await holdWorkerTurn(f);
+    const requested = await f.coordinator.requestForSessionV2({
+      ...f.request("bound-background", f.guest),
+      expectedRunId: claim.runId,
+    });
+    const accepted = await f.repository!.capture("accepted for publication\n", "bound-publication");
+    await f.placements.markWorkspaceResultPending(claim);
+    await f.coordinator.prepareClaimWorkspace(claim);
+    await f.placements.acceptWorkspaceResult(claim);
+    await f.coordinator.deferClaimPreparationAsync(claim);
+    await f.placements.completeWorkspaceResultAndReleaseTurn(claim);
+    expect(f.readReceipt(requested.requestId)).toMatchObject({ checkpoint_ref: accepted.ref });
+
+    const dispatched = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const transport = mocks.runCommand.getMockImplementation()!;
+    f.repository!.runtime.interruptPush = lostResponse;
+    mocks.runCommand.mockImplementation(async (argv: string[], options?: { input?: string }) => {
+      try {
+        return await transport(argv, options);
+      } finally {
+        if (argv.includes("graphql")) {
+          dispatched.resolve();
+          await release.promise;
+        }
+      }
+    });
+    const recovery = f.coordinator.resumeSessionRequests();
+    let next: Awaited<ReturnType<typeof f.placements.claimTurn>> | undefined;
+    try {
+      await Promise.race([
+        dispatched.promise,
+        recovery.then(() => {
+          throw new Error("Background publication never reached the push boundary");
+        }),
+      ]);
+      next = await f.placements.claimTurn({
+        sessionId: claim.sessionId,
+        sessionKey: f.session.sessionKey,
+        agentId: "main",
+        owner: claim.owner,
+        claimId: "next-worker-claim",
+        runId: "next-worker-run",
+      });
+      expect(f.placements.validateTurnClaim(next)).toBe(true);
+      await expect(
+        f.placements.withWorkspaceExclusion(claim.sessionId, async () => {
+          throw new Error("A second publisher must not enter");
+        }),
+      ).rejects.toBeInstanceOf(OpenClawStateLeaseAcquisitionError);
+      const newer = await f.repository!.capture("newer accepted workspace\n", "later-turn");
+      release.resolve();
+      await recovery;
+      expect(f.placements.validateTurnClaim(next)).toBe(true);
+      expect(f.repository!.runtime.uploaded.get(accepted.sha)).toEqual(
+        Buffer.from("accepted for publication\n"),
+      );
+      expect(f.repository!.runtime.uploaded.has(newer.sha)).toBe(false);
+      expect(f.readReceipt(requested.requestId)).toMatchObject({ checkpoint_ref: accepted.ref });
+      await f.placements.releaseTurn(next);
+      next = undefined;
+      if (lostResponse) {
+        expect(f.readReceipt(requested.requestId)?.status).toBe("requested");
+        mocks.runCommand.mockImplementation(transport);
+        await f.restart().resumeSessionRequests();
+      }
+      expect(f.readReceipt(requested.requestId)?.status).toBe("published");
+      expect(f.repository!.runtime.effects).toEqual(["push", "pull_request"]);
+    } finally {
+      release.resolve();
+      await recovery.catch(() => undefined);
+      if (next) {
+        await f.placements.releaseTurn(next);
+      }
+    }
+  },
+);
 
 it.each(["local", "repository"] as const)(
   "settles the accepted %s publication before stopping recovery between requests",

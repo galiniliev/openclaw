@@ -9,6 +9,7 @@ import { killProcessTree, signalPtySessionTree } from "./kill-tree.js";
 import { BrokerChild } from "./spawn-broker/child.js";
 import { getSpawnBroker } from "./spawn-broker/context.js";
 import type { SpawnInitiation } from "./spawn-initiation.js";
+import { prepareSecretInputStdio, type SpawnStdioEntry } from "./spawn-secret-input.js";
 import { spawnProcess } from "./spawn-utils.js";
 import type { TerminalPtyControl, TerminalPtyEvent } from "./terminal-pty-protocol.js";
 import type { TerminalPtyHandle, TerminalPtySpawnParams } from "./terminal-pty.js";
@@ -27,12 +28,19 @@ export async function spawnNodeTerminalPty(
     throw new Error("A Node executable is required for this terminal helper; add node to PATH.");
   }
   const worker = resolveRuntimeWorkerUrl(runtimeProcessEntrypoints.terminalPty);
+  const { privateEnv, ...publicParams } = params;
+  const stdio: SpawnStdioEntry[] = ["ignore", "pipe", "pipe", "ipc"];
+  using privateInput = prepareSecretInputStdio(
+    stdio,
+    privateEnv ? { fd: 4, createData: () => Buffer.from(JSON.stringify(privateEnv())) } : undefined,
+  );
+  const workerArgv = resolveRuntimeWorkerArgv(worker, node);
   const broker = getSpawnBroker();
   const child = runWithMainThreadTask(
     "process:spawn",
     () =>
-      spawnProcess(node, resolveRuntimeWorkerArgv(worker, node), {
-        stdio: ["ignore", "pipe", "pipe", "ipc"],
+      spawnProcess(node, privateEnv ? [...workerArgv, "--private-env-fd=4"] : workerArgv, {
+        stdio,
         serialization: "json",
         env: process.env,
       }),
@@ -67,7 +75,9 @@ export async function spawnNodeTerminalPty(
   let outputEnded = false;
   let ipcClosed = false;
 
+  const deliveryAbort = new AbortController();
   const fail = (error: Error) => {
+    deliveryAbort.abort();
     if (exited) {
       return;
     }
@@ -185,11 +195,28 @@ export async function spawnNodeTerminalPty(
     if (message.type === "boot" || message.type === "prepared") {
       try {
         if (message.type === "boot") {
-          if (initiateSpawn) {
+          const start = () => {
             beforeSpawn?.();
-            send({ type: "prepare", params });
+            if (initiateSpawn) {
+              send({ type: "prepare", params: publicParams });
+            } else {
+              send({ type: "start", params: publicParams }, authorizeLaunch);
+            }
+          };
+          beforeSpawn?.();
+          if (privateInput) {
+            void privateInput.deliverTo(child, { abortSignal: deliveryAbort.signal }).then(
+              () => {
+                try {
+                  start();
+                } catch (error) {
+                  fail(toErrorObject(error, "PTY launch denied"));
+                }
+              },
+              () => fail(new Error("Terminal private environment delivery failed")),
+            );
           } else {
-            send({ type: "start", params }, authorizeLaunch);
+            start();
           }
         } else {
           if (!initiateSpawn) {
@@ -213,6 +240,7 @@ export async function spawnNodeTerminalPty(
     }
   });
   child.once("exit", (code, signal) => {
+    deliveryAbort.abort();
     clearTimeout(timeout);
     clearTimeout(cleanupTimer);
     if (!reportedExit && ptyPid !== undefined) {

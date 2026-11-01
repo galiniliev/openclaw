@@ -5,6 +5,7 @@ import {
   captureGatewayDeviceRevocation,
 } from "../gateway/device-revocation.js";
 import { resolveRepositoryConnectionIdentity } from "../gateway/github-user-identity.js";
+import { createGatewayMethodRegistry } from "../gateway/methods/registry.js";
 import { repositoryDispatchCredentialReader } from "../gateway/repository-dispatch.js";
 import type { GatewayClient } from "../gateway/server-methods/client-types.js";
 import { createPluginRecord } from "./loader-records.js";
@@ -229,3 +230,15 @@ it.each([false, true])(
     }
   },
 );
+
+it("keeps private plugin RPCs callable but out of advertised discovery", () => {
+  const f = fixture();
+  f.api.registerGatewayMethod("repository.privateRedeem", ({ respond }) => respond(true, {}), {
+    scope: "operator.admin",
+    profileAccess: "independent",
+    advertise: false,
+  });
+  const methods = createGatewayMethodRegistry(f.builder.registry.gatewayMethodDescriptors);
+  expect(methods.listMethods()).toContain("repository.privateRedeem");
+  expect(methods.listAdvertisedMethods()).not.toContain("repository.privateRedeem");
+});

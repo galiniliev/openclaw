@@ -20,6 +20,7 @@ worker, storage, or embedding provider must satisfy. Part of the
 | `api.registerDecisionProvider(...)`              | Typed decision inference with V1 or prepared V2 execution                         |
 | `api.registerProvider(...)`                      | Text inference (LLM)                                                              |
 | `api.registerWorkerProvider(...)`                | Cloud-worker lifecycle leases                                                     |
+| `api.registerRepositoryIntegration(...)`         | Versioned repository identity, admission and publication policy                   |
 | `api.registerStorageProvider(...)`               | Opaque object storage for named locations                                         |
 | `api.registerModelCatalogProvider(...)`          | Model catalog rows for text and media generation                                  |
 | `api.registerAgentHarness(...)`                  | [Experimental](/plugins/sdk-agent-harness) native agent executor (Codex, Copilot) |

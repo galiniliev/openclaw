@@ -165,6 +165,7 @@ export function createNetworkRegistrars(state: PluginRegistryState) {
     handler: GatewayRequestHandler,
     opts?: {
       scope?: OperatorScope;
+      advertise?: boolean;
       profileAccess?: GatewayMethodProfileAccess;
       sessionAccess?: import("../gateway/methods/descriptor.js").GatewayMethodSessionAccess;
       shareKey?: import("../gateway/methods/descriptor.js").GatewayReadSharing["shareKey"];
@@ -198,6 +199,7 @@ export function createNetworkRegistrars(state: PluginRegistryState) {
         name: trimmed,
         handler: wrappedHandler,
         scope: normalizedScope.scope,
+        ...(opts?.advertise !== undefined ? { advertise: opts.advertise } : {}),
         ...(opts?.profileAccess ? { profileAccess: opts.profileAccess } : {}),
         ...(opts?.sessionAccess ? { sessionAccess: opts.sessionAccess } : {}),
         ...(opts?.shareKey

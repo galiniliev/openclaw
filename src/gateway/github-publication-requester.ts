@@ -1,14 +1,17 @@
 import { GATEWAY_OWNER_PROFILE_ID } from "../../packages/gateway-protocol/src/schema/users.js";
+import { resolveConfiguredGitHubToolIdentity } from "../agents/github-tool-identity.js";
 import {
   getGatewayToolCallerIdentity,
   resolveGatewayToolOperatorSelection,
 } from "../agents/tools/gateway-caller-context.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { PluginGatewayAccessAuthority } from "../plugins/gateway-access-policy.types.js";
+import { getRepositoryIntegration } from "../plugins/repository-integration-runtime.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { intersectOperatorScopes, roleScopesAllow } from "../shared/operator-scope-compat.js";
 import {
   decodeGitHubPublicationRequester,
+  encodeGitHubPublicationRequester,
   type GitHubPublicationRequesterSnapshot,
 } from "../state/github-publication-requester.js";
 import type { GitHubPublicationSourceSelector } from "../state/github-publication-source.types.js";
@@ -21,6 +24,7 @@ import {
   prepareGitHubPublicationSource,
   type GitHubPublicationSourceCapability,
 } from "./github-publication-source.js";
+import type { RepositoryCredentialSource } from "./github-user-identity.types.js";
 import {
   GatewayOperatorAccessDeniedError,
   resumeGatewayOperatorAccessGrant,
@@ -88,6 +92,8 @@ export type GitHubPublicationRequester = GitHubPublicationRequesterPolicy &
 export type GitHubPublicationRequesterPolicyV2 = GitHubPublicationRequesterPolicy &
   Readonly<{
     version: 2;
+    /** Live invocation source; deliberately absent from durable requester snapshots. */
+    repositoryCredentialSource?: RepositoryCredentialSource;
     signal: AbortSignal;
     prepareSource(
       selector: GitHubPublicationSourceSelector,
@@ -351,6 +357,7 @@ export async function prepareGitHubPublicationRequesterV2(
     };
     const requester: GitHubPublicationRequesterV2 = Object.freeze({
       version: 2 as const,
+      repositoryCredentialSource: source?.authority.repositoryCredentialSource,
       signal,
       snapshot,
       assertInvocationCurrent,
@@ -496,4 +503,33 @@ export async function restoreGitHubPublicationRequester(
     release();
     throw error;
   }
+}
+
+/** Reuse an exact live invocation; durable restoration cannot manufacture its credential source. */
+export async function prepareGitHubPublicationExecutionRequester(
+  json: string | null | undefined,
+  session: PublicationSession,
+  getCommittedRuntimeConfig: () => OpenClawConfig,
+  current?: GitHubPublicationRequesterPolicyV2,
+): Promise<{ requester: GitHubPublicationRequesterPolicyV2; release: () => void }> {
+  const config = getCommittedRuntimeConfig();
+  const selected =
+    resolveConfiguredGitHubToolIdentity({ config, agentId: session.agentId, scope: "agent" }) ??
+    resolveConfiguredGitHubToolIdentity({ config, agentId: session.agentId, scope: "system" });
+  if (
+    Boolean(getRepositoryIntegration(config)) &&
+    selected?.kind === "app-installation" &&
+    current?.repositoryCredentialSource &&
+    isGitHubPublicationRequesterV2(current) &&
+    encodeGitHubPublicationRequester(current.snapshot) === json
+  ) {
+    current.assertCurrent();
+    return { requester: current, release: () => {} };
+  }
+  const restored = await restoreGitHubPublicationRequester(
+    json,
+    session,
+    getCommittedRuntimeConfig,
+  );
+  return { requester: restored, release: restored.release };
 }

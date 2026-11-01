@@ -9,7 +9,7 @@ title: "Configuration — GitHub identity for agent tools"
 
 `tools.github` selects the shared managed GitHub CLI identity used by agent execution, and defines which execution paths receive its credential.
 
-## Session GitHub App reader
+## GitHub App readers and execution
 
 A configured `tools.github` (or complete agent override) with
 `kind: "app-installation"` selects a GitHub App installation for explicitly
@@ -20,11 +20,22 @@ The existing managed `profileId` identifies the selection.
 
 This reader verifies the configured issuer, App, installation, permissions, bot,
 and exact repository set before returning a short-lived token. The request owns
-revocation and must finish cleanup before returning private content. Existing
-publication, background, and shell execution paths do not acquire App tokens.
-Select a native or OAuth identity to run agent tools; App selections support
-foreground session reads only. OAuth and native GitHub selections retain their
-existing behavior.
+revocation and must finish cleanup before returning private content. Admitted
+publication and worker execution own their token cleanup separately. Workers
+receive the installation bot credential; the signing key stays on the Gateway.
+OAuth and native GitHub selections retain their existing behavior.
+
+Local foreground exec uses the same session-owned App grant as worker execution,
+including current operator and session admission. It delivers the launch credential
+privately to the command, without a disk-backed OAuth profile. Command cleanup
+revokes the grant; loss of authority cancels the command. A running local command
+keeps its launch credential and its original expiry. On Windows, local App
+exec currently requires `pty: true`; ordinary launches refuse before issuing a
+credential because PowerShell does not preserve the private credential descriptor.
+
+Status does not mint an App token. Before a successful foreground verification,
+or after its observation expires, the configured App is **Not verified**
+(`unverified`); this alone does not mean its credentials need reconnection.
 
 An individual repository read can select one configured repository by its full
 name. Admission and the installation token cover only that repository, even
@@ -33,12 +44,27 @@ App selection still invalidate the pending read. App signing-key SecretRefs
 from the system and every agent are excluded from agent execution, including
 when the executing agent selects OAuth or native credentials instead.
 
-In Factory GitHub mode, session reads additionally require the current person's
-verified account on the configured Enterprise host. A one-use, short-lived proof
-binds that account, profile, session lifetime, and item digest to the existing
-Factory repository-admission broker. Only an authenticated direct-local system
-administrator connection can redeem it. A request field cannot supply the
-person's identity, and admission never falls back to a human or native token.
+A selected [repository integration](/plugins/sdk-entrypoints)
+adds its admission policy to App-token issuance. Native owners retain current
+profile, session, operation, and credential lifetimes; the plugin owns external
+identity exchange and repository policy. Missing required integration denies
+admission rather than falling back to another credential.
+
+Without a selected integration, the existing Factory trusted-proxy contract still
+admits session item reads through its account-bound repository proof. Selecting
+an integration makes that plugin the admission owner for these operations.
+
+Long-running native worker turns renew App tokens for the same configured GitHub
+or GitHub Enterprise host, installation, repository, account, operator, and session.
+The existing private worker duplex installs each replacement and acknowledges its
+generation before the Gateway advances the installed credential's expiry.
+New commands use the installed token; commands already running keep their launch
+credential and its original validity. Terminal cleanup owns all issued tokens;
+re-reading the same bearer never extends its expiry. Temporary issuer failures can retry only while that credential remains
+valid. Missing installation acknowledgment, lost authority, or terminal issuer
+rejection closes the credential grant without replaying commands. Gateway and
+worker bundles must both support the private installer; startup refuses an
+unmatched worker before starting a user turn.
 
 ## `tools.github`
 
@@ -80,15 +106,15 @@ Managed profiles and personal publication use `github.com` and its public accoun
 }
 ```
 
-Omitting `agents.entries.<id>.tools.github` inherits the system identity. An agent object is a complete managed override. Settings shows the effective identity and the selected configuration scope separately, so editing **System** never masquerades as an agent override. If a configured managed profile is missing, tokenless, or corrupt, GitHub status reports `configured_unavailable` rather than reporting the native account. Gateway-brokered publication verifies the selected profile's own credential and pins it for each child operation; a missing profile cannot redirect publication to native authentication. Ordinary agent shell execution continues to use the shared or per-agent selection, with the execution boundaries described below.
+Omitting `agents.entries.<id>.tools.github` inherits the system identity. An agent object is a complete managed override. Settings shows the effective identity and the selected configuration scope separately, so editing **System** never masquerades as an agent override. If a configured OAuth profile is missing, tokenless, or corrupt, GitHub status reports `configured_unavailable` rather than reporting the native account. Gateway-brokered publication verifies the selected profile's own credential and pins it for each child operation; a missing profile cannot redirect publication to native authentication. Ordinary agent shell execution continues to use the shared or per-agent selection, with the execution boundaries described below.
 
 Managed identity selects the `gh` CLI/API account and optional Git author/committer metadata. OpenClaw prepares a non-secret overlay containing the private `GH_CONFIG_DIR`, ambient token scrubs, and configured author fields. For local execution, it does not install a credential helper, rewrite SSH remotes, add HTTP authorization headers, or otherwise override an existing repository's Git network credentials. Commands still use the existing `gh` on `PATH`, including any operator-managed protection or caching wrapper.
 
-For OpenClaw-owned `exec` with `host=gateway`, including Pi `exec` and Codex `gateway_exec`, the local launch owner reads and validates the selected profile immediately before each process launch. It pins `GH_HOST` to that profile's host and places the access token only in the matching private child credential family: `GH_TOKEN` for `github.com` and `*.ghe.com`, or `GH_ENTERPRISE_TOKEN` for GitHub Enterprise Server. The other family and both `GITHUB_TOKEN` and `GITHUB_ENTERPRISE_TOKEN` are cleared; `GH_HOST` is a default, not a restriction on explicit CLI host selection. Approval payloads and shared run environments remain non-secret. A missing, tokenless, wrong-host, or insecure profile refuses the local execution before the command starts instead of permitting native-keyring fallback. This also applies to commands that might invoke `gh` indirectly. Reconnect or change the GitHub Identity selection before retrying. A launched command retains its selected credential even if the profile later disappears; the next exec launch reads the profile again.
+For OpenClaw-owned `exec` with `host=gateway`, including Pi `exec` and Codex `gateway_exec`, the local launch owner validates the selected credential immediately before each process launch. OAuth uses the selected private profile; App execution uses the foreground grant described above. It pins `GH_HOST` to that profile's host and places the access token only in the matching private child credential family: `GH_TOKEN` for `github.com` and `*.ghe.com`, or `GH_ENTERPRISE_TOKEN` for GitHub Enterprise Server. The other family and both `GITHUB_TOKEN` and `GITHUB_ENTERPRISE_TOKEN` are cleared; `GH_HOST` is a default, not a restriction on explicit CLI host selection. Approval payloads and shared run environments remain non-secret. A missing, tokenless, wrong-host, or insecure OAuth profile refuses the local execution before the command starts instead of permitting native-keyring fallback. This also applies to commands that might invoke `gh` indirectly. Reconnect or change the GitHub Identity selection before retrying. A launched command retains its selected credential even if the profile later disappears; the next exec launch reads the profile again.
 
 **Managed Codex execution uses the same host-owned boundary.** When a managed GitHub identity is selected for a run, OpenClaw disables Codex-native shell execution and routes commands through its host-owned execution tools. These tools retain the executing agent's selected profile, caller authority, approval checks, and cancellation lifecycle. A missing or unavailable managed profile refuses execution rather than falling back to a native account; reconnect or change the identity in Settings before retrying. Without a managed selection, native Codex defaults remain unchanged. This routing does not export Gateway credentials to ordinary paired-node execution.
 
-Choosing a different identity or inheritance target selects another profile for new runs. An admitted run keeps its prior profile selection, and already-launched local exec processes keep their launch token until they exit. Retired profile files are cleaned on the next Gateway restart, so changing this setting is not immediate credential revocation.
+For OAuth, choosing a different identity or inheritance target selects another profile for new runs. An admitted run keeps its prior profile selection, and already-launched local exec processes keep their launch token until they exit. Retired profile files are cleaned on the next Gateway restart, so changing this setting is not immediate credential revocation.
 
 If cleanup cannot read a directory's identity, it leaves that directory untouched, logs a warning with the path and reason, and continues checking the remaining profiles. Missing directories are skipped without a warning.
 

@@ -164,6 +164,7 @@ export type {
   WorkerMachineOption,
   WorkerProfile,
   WorkerProvider,
+  WorkerRetainedLeaseRequest,
   WorkerSshEndpoint,
   WorkerSshIdentity,
   WorkerSshIdentityRequest,
@@ -275,6 +276,13 @@ export type {
   PluginHookBeforeChannelIngressEvent,
   PluginHookBeforeChannelIngressResult,
 } from "../plugins/hook-message.types.js";
+
+export type {
+  WorkerDiskRetentionPolicy,
+  WorkerRetainedLeaseIdentity,
+  WorkerRetainedLeaseReceipt,
+  WorkerSessionDiskRetention,
+} from "../plugins/worker-retention.types.js";
 
 export type {
   RepositoryIntegration,

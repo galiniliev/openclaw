@@ -1,5 +1,7 @@
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { emitAgentEvent } from "../infra/agent-events.js";
+import { emitTrustedSecurityEvent } from "../infra/diagnostic-events.js";
+import type { ExecAsk, ExecSecurity } from "../infra/exec-approvals.js";
 import type { ExecAutoReviewDecision } from "../infra/exec-auto-review.js";
 import { tail } from "./bash-process-registry.js";
 import { formatExecApprovalContinuationSourceOutput } from "./bash-tools.exec-approval-output.js";
@@ -211,4 +213,59 @@ export function publishGatewayGuardianReview(
       review,
     },
   });
+}
+
+/** Projects approval outcomes without exposing command text or agent identity. */
+export function createGatewayExecApprovalEventEmitter(context: {
+  hostSecurity: ExecSecurity;
+  hostAsk: ExecAsk;
+  segments: readonly unknown[];
+  params: Pick<ProcessGatewayAllowlistParams, "agentId" | "trigger">;
+}) {
+  return (event: {
+    action: "exec.approval.requested" | "exec.approval.approved" | "exec.approval.denied";
+    outcome: "success" | "denied" | "error";
+    severity: "low" | "medium" | "high";
+    reason?: string;
+    decision?: string | null;
+  }) => {
+    emitTrustedSecurityEvent({
+      category: "approval",
+      action: event.action,
+      outcome: event.outcome,
+      severity: event.severity,
+      actor: {
+        kind: "agent",
+      },
+      target: {
+        kind: "tool",
+        name: "system.exec",
+        owner: "gateway",
+      },
+      policy: {
+        id: "exec.approval",
+        decision:
+          event.action === "exec.approval.requested"
+            ? "ask"
+            : event.outcome === "success"
+              ? "allow"
+              : "deny",
+        ...(event.reason ? { reason: event.reason } : {}),
+      },
+      control: {
+        id: "exec.approval",
+        family: "approval",
+      },
+      ...(event.reason ? { reason: event.reason } : {}),
+      attributes: {
+        host: "gateway",
+        security: context.hostSecurity,
+        ask: context.hostAsk,
+        segment_count: context.segments.length,
+        has_agent_id: Boolean(context.params.agentId?.trim()),
+        ...(context.params.trigger ? { trigger: context.params.trigger } : {}),
+        ...(event.decision ? { decision: event.decision } : {}),
+      },
+    });
+  };
 }

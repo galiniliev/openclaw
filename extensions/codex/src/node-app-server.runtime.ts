@@ -5,6 +5,7 @@ import { once } from "node:events";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
+import type { WorkerGitHubLaunchBinding } from "openclaw/plugin-sdk/github-worker-runtime";
 import type {
   OpenClawPluginNodeHostCommandIo,
   OpenClawPluginNodeWorkspaceLease,
@@ -19,12 +20,17 @@ import {
   isManagedCodexDesktopCommand,
 } from "./app-server/managed-binary.js";
 import { createStdioTransport } from "./app-server/transport-stdio.js";
+import { createWorkerDiagnosticForwarder } from "./app-server/worker-diagnostics.js";
 import {
   deriveCodexWorkerConfigurationVersion,
   resolveCodexWorkerAuthHelper,
 } from "./node-app-server-command.js";
 import { createCodexNodeAppServerProcessOwner } from "./node-app-server-process-owner.js";
 import { createCodexNodeWorkspaceEnvironment } from "./node-app-server-workspace-environment.js";
+import {
+  createCodexNodeGitHubCredential,
+  type CodexNodeGitHubCredential,
+} from "./node-github-credential.js";
 import { createCodexNodeResourceReadiness } from "./node-resource-readiness.js";
 
 const MAX_FRAME_BYTES = 64 * 1024 * 1024;
@@ -97,6 +103,9 @@ export async function runCodexNodeAppServer(params: {
   io: OpenClawPluginNodeHostCommandIo;
   activeProcesses: Set<() => Promise<void>>;
   assertExecAuthorized: () => void;
+  github?: WorkerGitHubLaunchBinding;
+  retainedSession?: true;
+  requireExistingNativeState?: true;
   sessionId: string;
   resourcePreparationRequired?: boolean;
 }): Promise<string> {
@@ -117,6 +126,9 @@ export async function runCodexNodeAppServer(params: {
   let child: ChildProcessWithoutNullStreams | undefined;
   let unsubscribe: (() => void) | undefined;
   let environment: Awaited<ReturnType<typeof createCodexNodeWorkspaceEnvironment>> | undefined;
+  let github: CodexNodeGitHubCredential | undefined;
+  let tempGitHub: string | undefined;
+  let diagnostics: ReturnType<typeof createWorkerDiagnosticForwarder> | undefined;
   let writes = Promise.resolve();
   const effects = new Set<Promise<void>>();
   const internal = new Map<string, ReturnType<typeof createDeferred<unknown>>>();
@@ -134,6 +146,10 @@ export async function runCodexNodeAppServer(params: {
       await writes.catch(() => {});
       await Promise.allSettled(effects);
       await environment?.close();
+      await diagnostics?.finish();
+      if (tempGitHub) {
+        await fs.rm(tempGitHub, { recursive: true, force: true });
+      }
       workspace.release();
     },
     activeProcesses: params.activeProcesses,
@@ -155,8 +171,35 @@ export async function runCodexNodeAppServer(params: {
       "codex",
       createHash("sha256").update(params.sessionId).digest("hex"),
     );
+    const priorHome =
+      params.retainedSession || params.requireExistingNativeState
+        ? await fs.lstat(home).catch((error: unknown) => {
+            if (isRecord(error) && error.code === "ENOENT") {
+              return undefined;
+            }
+            throw error;
+          })
+        : undefined;
+    let retainedThreadStarted = Boolean(priorHome);
+    if (
+      params.requireExistingNativeState &&
+      (!priorHome?.isDirectory() || priorHome.isSymbolicLink())
+    ) {
+      throw new Error(
+        "Retained Codex session home is missing; no input was submitted and replacement is refused",
+      );
+    }
     await fs.mkdir(home, { recursive: true, mode: 0o700 });
     await fs.writeFile(path.join(home, "config.toml"), runtime.config, { mode: 0o600 });
+    if (params.github) {
+      tempGitHub = await fs.mkdtemp(path.join(runtime.directory, "github-"));
+      await fs.chmod(tempGitHub, 0o700);
+      github = await createCodexNodeGitHubCredential({
+        profileDir: tempGitHub,
+        binding: params.github,
+        assertCurrent,
+      });
+    }
     const resolved = await resolveManagedCodexAppServerStartOptions(
       {
         transport: "stdio",
@@ -195,6 +238,8 @@ export async function runCodexNodeAppServer(params: {
           env: {
             HOME: workspace.homeDir,
             CODEX_HOME: home,
+            LOG_FORMAT: "json",
+            ...github?.environment,
             ...(process.platform === "win32" ? { USERPROFILE: workspace.homeDir } : {}),
           },
           clearEnv: ["NODE_OPTIONS", "OPENAI_API_KEY", "OPENAI_API_PROXY_KEY", "CODEX_API_KEY"],
@@ -207,8 +252,9 @@ export async function runCodexNodeAppServer(params: {
           spawned.once("close", (code, exitSignal) => closed.resolve({ code, signal: exitSignal }));
           spawned.once("error", failed.reject);
           spawned.stdin.on("error", failed.reject);
-          // Native stderr may include prompts or credentials. Drain it, never export raw content.
-          spawned.stderr.resume();
+          diagnostics = createWorkerDiagnosticForwarder((frame) => frames.send(frame));
+          spawned.stderr.on("data", (chunk: Buffer) => diagnostics?.append(chunk));
+          spawned.once("exit", (code, exitSignal) => diagnostics?.nativeExit(code, exitSignal));
           outgoing = (async () => {
             const framer = createBoundedLineFramer(
               MAX_FRAME_BYTES,
@@ -247,6 +293,12 @@ export async function runCodexNodeAppServer(params: {
       const activeChild = child;
       const send = async (request: Record<string, unknown>) => {
         assertCurrent();
+        if (github && request.method === "command/exec" && isRecord(request.params)) {
+          request.params.env = {
+            ...(isRecord(request.params.env) ? request.params.env : {}),
+            ...github.launchEnvironment(),
+          };
+        }
         if (!activeChild.stdin.write(JSON.stringify(request) + "\n")) {
           await once(activeChild.stdin, "drain", { signal });
         }
@@ -258,6 +310,7 @@ export async function runCodexNodeAppServer(params: {
             workspace,
             signal,
             assertExecAuthorized: assertCurrent,
+            commandEnvironment: github,
           });
           const id = "openclaw-environment-" + randomUUID();
           const response = createDeferred<unknown>();
@@ -272,6 +325,19 @@ export async function runCodexNodeAppServer(params: {
         })());
       unsubscribe = frames.onMessage((frame) => {
         const request = decodeFrame(frame);
+        if (request.method === "openclaw/github/refresh") {
+          const operation = writes.then(async () => {
+            assertCurrent();
+            if (!github || (typeof request.id !== "string" && !Number.isSafeInteger(request.id))) {
+              throw new Error("Worker GitHub refresh has no admitted profile");
+            }
+            const result = await github.install(request.params);
+            assertCurrent();
+            await frames.send(Buffer.from(JSON.stringify({ id: request.id, result })));
+          });
+          writes = operation.catch(failed.reject);
+          return operation;
+        }
         const settled = resources.settle(request);
         if (settled) {
           return frames.send(Buffer.from(JSON.stringify(settled)));
@@ -313,6 +379,25 @@ export async function runCodexNodeAppServer(params: {
           return undefined;
         }
         const operation = writes.then(async () => {
+          if (params.retainedSession && request.method === "thread/start") {
+            if (retainedThreadStarted) {
+              await frames.send(
+                Buffer.from(
+                  JSON.stringify({
+                    id: request.id,
+                    error: {
+                      code: -32001,
+                      message:
+                        "Retained Codex session requires its existing thread; a fresh thread was refused before input submission.",
+                    },
+                  }),
+                ),
+              );
+              return;
+            }
+            // An uncertain first start never permits a second native conversation.
+            retainedThreadStarted = true;
+          }
           // Resume has no environment field in the pinned protocol; turn/start selects the fresh carrier.
           if (["thread/start", "turn/start"].includes(String(request.method))) {
             await ensureEnvironment();

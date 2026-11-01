@@ -7,7 +7,6 @@ import { emitAgentEvent } from "../infra/agent-events.js";
 import { describeInterpreterInlineEval } from "../infra/command-analysis/inline-eval.js";
 import { detectInlineEvalInSegments } from "../infra/command-analysis/risks.js";
 import { lookupCronRunExecSource } from "../infra/cron-run-exec-source.js";
-import { emitTrustedSecurityEvent } from "../infra/diagnostic-events.js";
 import {
   type AllowAlwaysPersistenceDecision,
   commitExecAuthorizationLocked,
@@ -66,6 +65,7 @@ import {
 } from "./bash-tools.exec-approval-request.js";
 import { prepareCronStandingGrantConsumption } from "./bash-tools.exec-cron-grant.js";
 import {
+  createGatewayExecApprovalEventEmitter,
   buildGatewayExecApprovalFollowupSummary,
   publishGatewayGuardianReview,
   buildGatewayExecApprovalDeniedToolResult,
@@ -171,52 +171,12 @@ export async function processGatewayAllowlist(
     hostSecurity === "allowlist" &&
     (!analysisOk || !allowlistSatisfied) &&
     !durableApprovalSatisfied;
-  function emitApprovalEvent(event: {
-    action: "exec.approval.requested" | "exec.approval.approved" | "exec.approval.denied";
-    outcome: "success" | "denied" | "error";
-    severity: "low" | "medium" | "high";
-    reason?: string;
-    decision?: string | null;
-  }) {
-    emitTrustedSecurityEvent({
-      category: "approval",
-      action: event.action,
-      outcome: event.outcome,
-      severity: event.severity,
-      actor: {
-        kind: "agent",
-      },
-      target: {
-        kind: "tool",
-        name: "system.exec",
-        owner: "gateway",
-      },
-      policy: {
-        id: "exec.approval",
-        decision:
-          event.action === "exec.approval.requested"
-            ? "ask"
-            : event.outcome === "success"
-              ? "allow"
-              : "deny",
-        ...(event.reason ? { reason: event.reason } : {}),
-      },
-      control: {
-        id: "exec.approval",
-        family: "approval",
-      },
-      ...(event.reason ? { reason: event.reason } : {}),
-      attributes: {
-        host: "gateway",
-        security: hostSecurity,
-        ask: hostAsk,
-        segment_count: allowlistEval.segments.length,
-        has_agent_id: Boolean(params.agentId?.trim()),
-        ...(params.trigger ? { trigger: params.trigger } : {}),
-        ...(event.decision ? { decision: event.decision } : {}),
-      },
-    });
-  }
+  const emitApprovalEvent = createGatewayExecApprovalEventEmitter({
+    hostSecurity,
+    hostAsk,
+    segments: allowlistEval.segments,
+    params,
+  });
   const inlineEvalHit =
     params.strictInlineEval === true ? detectInlineEvalInSegments(allowlistEval.segments) : null;
   const allowAlwaysPersistence = resolveAllowAlwaysPersistenceDecision({
@@ -1103,6 +1063,7 @@ export async function processGatewayAllowlist(
               durable: params.durable,
               sessionId: params.sessionId,
               githubProfileDir: params.githubProfileDir,
+              githubApp: params.githubApp,
               pathPrepend: params.pathPrepend,
               sandbox: undefined,
               containerWorkdir: null,

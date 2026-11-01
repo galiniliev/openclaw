@@ -1,3 +1,4 @@
+import type { NativeWorkerLossRecovery } from "../../agents/harness/native-session/worker-placement.js";
 import { sessionChanges } from "../../sessions/session-row-changes.js";
 import { DEVICE_FOLDER_MANIFEST_REF } from "../../worker/device-folder.js";
 import type { WorkerSessionPlacementState } from "./placement-state.js";
@@ -180,7 +181,10 @@ type PlacementRecordsByState = {
 };
 
 export type WorkerSessionPlacementRecord = {
-  [State in WorkerSessionPlacementState]: PlacementRecordsByState[State] & { state: State };
+  [State in WorkerSessionPlacementState]: PlacementRecordsByState[State] & {
+    state: State;
+    confirmedLossRecovery?: NativeWorkerLossRecovery;
+  };
 }[WorkerSessionPlacementState];
 
 export type WorkerSessionTurnClaimFacts = Pick<

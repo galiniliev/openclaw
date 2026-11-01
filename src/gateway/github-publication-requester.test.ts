@@ -17,6 +17,14 @@ import fs from "node:fs/promises";
 import nodePath from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { setRuntimeConfigSnapshot } from "../config/config.js";
+import { createPluginRecord } from "../plugins/loader-records.js";
+import { createTestPluginRegistry } from "../plugins/registry-runtime.test-helpers.js";
+import {
+  captureActivePluginRegistrySnapshot,
+  rollbackStagedPluginRegistry,
+  stageActivePluginRegistry,
+} from "../plugins/runtime.js";
+import { encodeGitHubPublicationRequester } from "../state/github-publication-requester.js";
 import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import {
   ensureCanonicalUserProfileForEmail,
@@ -26,7 +34,10 @@ import {
 import { GitHubPublicationRequesterUnavailableError } from "./github-publication-failure.js";
 import { GitHubPublicationRecoveryPendingError } from "./github-publication-git-index.js";
 import { createGitHubPublicationRecoveryBackoff } from "./github-publication-recovery.js";
-import { prepareGitHubPublicationRequesterV2 } from "./github-publication-requester.js";
+import {
+  prepareGitHubPublicationRequesterV2,
+  prepareGitHubPublicationExecutionRequester,
+} from "./github-publication-requester.js";
 import {
   createGitHubPublicationRequesterFixture,
   capturePublicationGuest as guestRequester,
@@ -117,6 +128,88 @@ describe("shared GitHub publication requester authority", () => {
     creatorEmail: email,
     sandbox: "required",
     realWorktree: true,
+  });
+
+  it("retains only the original live repository source and never reconstructs it from durable actor facts", async () => {
+    const f = await fixture("local");
+    const credentialSource = Object.freeze({
+      id: `browser:${"a".repeat(64)}`,
+      expiresAtMs: Date.now() + 300_000,
+    });
+    f.guestSource.client.authenticatedRepositoryCredentialSource = credentialSource;
+    const builder = createTestPluginRegistry();
+    const record = createPluginRecord({
+      id: "requester-repository-policy",
+      source: "requester-policy-fixture",
+      origin: "workspace",
+      enabled: true,
+      configSchema: false,
+      contracts: { repositoryIntegrations: ["repository"] },
+    });
+    builder.registry.plugins.push(record);
+    builder.createApi(record, { config: {} }).registerRepositoryIntegration({
+      version: 1,
+      preparedCapacity: "image",
+      resolveConnectionIdentity: () => undefined,
+      async withIdentity() {
+        throw new Error("Requester retention must not issue credentials");
+      },
+    });
+    const previous = captureActivePluginRegistrySnapshot();
+    stageActivePluginRegistry(builder.registry, null, "default");
+    onTestFinished(() => {
+      rollbackStagedPluginRegistry(previous);
+    });
+    const config = f.guestSource.context.getRuntimeConfig();
+    setRuntimeConfigSnapshot({
+      ...config,
+      gateway: { ...config.gateway, repositoryIntegration: record.id },
+      tools: {
+        github: {
+          kind: "app-installation",
+          profileId: "ghp_11111111111111111111111111111111",
+          app: {
+            appId: 10,
+            installationId: 20,
+            accountId: 42,
+            repositories: [{ id: 30, fullName: "example/project" }],
+            permissions: { contents: "write" },
+            privateKey: "synthetic",
+            keyVersion: "v1",
+          },
+        },
+      },
+    });
+
+    const captured = await prepareGitHubPublicationRequesterV2(
+      { client: f.guestSource.client, context: f.guestSource.context },
+      f.guestSource.session,
+    );
+    onTestFinished(captured.release);
+    expect(captured.requester.repositoryCredentialSource).toBe(credentialSource);
+    const stored = encodeGitHubPublicationRequester(captured.requester.snapshot);
+    expect(stored).not.toContain(credentialSource.id);
+    const current = await prepareGitHubPublicationExecutionRequester(
+      stored,
+      f.guestSource.session,
+      f.guestSource.context.getRuntimeConfig,
+      captured.requester,
+    );
+    onTestFinished(current.release);
+    expect(current.requester).toBe(captured.requester);
+    expect(current.requester.repositoryCredentialSource).toBe(credentialSource);
+    const restored = await prepareGitHubPublicationExecutionRequester(
+      stored,
+      f.guestSource.session,
+      f.guestSource.context.getRuntimeConfig,
+    );
+    onTestFinished(restored.release);
+    expect(restored.requester.repositoryCredentialSource).toBeUndefined();
+    f.guestSource.client.authenticatedRepositoryCredentialSource = Object.freeze({
+      ...credentialSource,
+      id: `browser:${"b".repeat(64)}`,
+    });
+    expect(current.requester.assertCurrent).toThrow(GitHubPublicationRequesterUnavailableError);
   });
 
   it("distinguishes explicit System authority from missing, unclassified, and closed sources", async () => {

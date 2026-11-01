@@ -37,4 +37,33 @@ describe("github_identity_status tool", () => {
     });
     expect(JSON.stringify(result)).toContain("Ask the operator");
   });
+  it("explains unobserved App status without requesting reconnection or minting a token", async () => {
+    const callGateway = vi.spyOn(gateway, "callInProcessGatewayTool").mockResolvedValue({
+      agentId: "main",
+      selectedScope: "agent" as const,
+      selected: { scope: "agent" as const, configured: false, identity: null },
+      effective: {
+        source: "system-configured" as const,
+        credentialKind: "app-installation" as const,
+        credentialState: "unverified" as const,
+        account: null,
+        gitAuthor: { name: null, email: null },
+        evidence: "none" as const,
+        accessExpiresAtMs: null,
+        refreshState: "not_applicable" as const,
+        oauthScopes: [],
+        repositoryGrants: "unknown" as const,
+      },
+    });
+    const tool = createGitHubIdentityStatusTool();
+    const result = await withGatewayToolCallerIdentity(
+      { agentId: "main", sessionKey: "agent:main:status" },
+      async () => await tool.execute("status-app", {}),
+    );
+    expect(JSON.stringify(result)).toContain(
+      "verified during an authorized operation, including scheduled automation",
+    );
+    expect(JSON.stringify(result)).not.toContain("reconnect");
+    expect(callGateway).toHaveBeenCalledTimes(1);
+  });
 });

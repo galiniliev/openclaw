@@ -278,6 +278,8 @@ export type OpenClawPluginApi = {
     handler: GatewayRequestHandler,
     opts?: {
       scope?: OperatorScope;
+      /** Hide private RPCs from discovery; authorization remains enforced. */
+      advertise?: boolean;
       profileAccess?: "independent" | "required";
       /** Require a top-level sessionKey (and optional agentId) naming an existing session. */
       sessionAccess?: import("../gateway/methods/descriptor.js").GatewayMethodSessionAccess;
@@ -286,12 +288,12 @@ export type OpenClawPluginApi = {
       shareMaxAgeMs?: number;
     },
   ) => void;
-  /** Register repository preparation policy, selected by gateway.repositoryIntegration. */
+  /** Add a plugin-owned lifetime requirement to authenticated person admission. */
+  registerGatewayAccessPolicy: (policy: PluginGatewayAccessPolicy) => void;
+  /** Register repository policy; selected explicitly by gateway.repositoryIntegration. */
   registerRepositoryIntegration: (
     integration: import("./repository-integration.types.js").RepositoryIntegration,
   ) => void;
-  /** Add a plugin-owned lifetime requirement to authenticated person admission. */
-  registerGatewayAccessPolicy: (policy: PluginGatewayAccessPolicy) => void;
   /** Register a sandboxed board widget source kind owned by this plugin. */
   /** Register a read-only external-session catalog with optional native adoption actions. */
   registerSessionCatalog: (provider: SessionCatalogProvider) => void;

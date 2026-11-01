@@ -171,6 +171,8 @@ export type SpawnInput =
   | (SpawnBaseInput & {
       mode: "pty";
       argv: string[];
+      /** Materialize child-only environment outside supervisor IPC. */
+      privateEnv?: () => Readonly<Record<string, string>>;
     })
   | (SpawnBaseInput & {
       mode: "anchored-shell";

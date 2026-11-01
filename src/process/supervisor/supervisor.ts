@@ -403,6 +403,7 @@ export function createProcessSupervisor(): ProcessSupervisor & {
               ...construction,
               shell: expectDefined(argv[0], "spawn executable"),
               args: argv.slice(1),
+              privateEnv: input.privateEnv,
             }).then((adapter) => ({ adapter, ready: Promise.resolve() }))
           : input.mode === "anchored-shell"
             ? createChildAdapter({

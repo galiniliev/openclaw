@@ -55,6 +55,8 @@ export type TerminalPtySpawnParams = {
   args: string[];
   cwd?: string;
   env?: Record<string, string>;
+  /** Resolve only in the owning host; deliver to the native child outside public spawn parameters. */
+  privateEnv?: () => Readonly<Record<string, string>>;
   name?: string;
   cols: number;
   rows: number;
@@ -92,7 +94,7 @@ export async function spawnTerminalPty(
       "Agent exec isolation is partial: Node is unavailable for the terminal helper; native PTY commands remain in the Gateway cgroup. Add node to PATH to isolate them.",
     );
   }
-  if (getSpawnBroker() || canIsolate || needsNodeFlowControl) {
+  if (params.privateEnv || getSpawnBroker() || canIsolate || needsNodeFlowControl) {
     const recordSpawn = prepareChildProcessSpawnRecorder(params.file, params.args);
     // The broker launches the existing helper, which owns PTY I/O and exec cgroup placement.
     const { spawnNodeTerminalPty } = await import("./terminal-pty-node.js");

@@ -301,6 +301,13 @@ Formatted health failures, Doctor Gateway connection notes, diagnostics exports,
 
 ## Gateway WebSocket logs
 
+Failed worker dispatch responses can include a private `githubIdentityOrigin`
+log field: `app-not-admitted`, `repository-not-selected`, `native-reader-missing`,
+`native-reader-failed`, `issuer-key-unresolved`, or `issuer-failed`. These fixed
+origin tags inherit the request trace and distinguish App admission from reader
+and issuer failures. They contain no credential or repository values, add no
+exporter, and do not change the public RPC error or authorize a retry.
+
 The gateway prints WebSocket protocol logs in two modes:
 
 - **Normal mode (no `--verbose`)**: failed RPC results (`ok=false`), slow calls (`>= 1,000ms`), and parse errors remain visible at the default log level. Successful responses below one second, including large session lists, log at `debug`. Set `logging.level: "debug"` to retain them in file logs or `logging.consoleLevel: "debug"` to print them.

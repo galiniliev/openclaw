@@ -1,5 +1,6 @@
 import type { SchemaContract } from "../../packages/gateway-protocol/src/schema-contract.js";
 import { dispatchGatewayMethodInProcessRaw } from "../gateway/server-plugins.js";
+import { pluginInstanceInvocation } from "../plugins/plugin-instance-invocation.js";
 import { getPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
 
 /** Error envelope returned by in-process Gateway method dispatch. */
@@ -48,4 +49,37 @@ export async function dispatchGatewayMethod(
     ...(options?.expectFinal !== undefined ? { expectFinal: options.expectFinal } : {}),
     ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
   });
+}
+
+/** Capture the host's direct-local authenticated system RPC provenance, never caller metadata. */
+export function capturePrivateGatewayRequestAuthority(): () => void {
+  const invocation = pluginInstanceInvocation.getStore();
+  const scope = getPluginRuntimeGatewayRequestScope();
+  const client = scope?.client;
+  const context = scope?.context;
+  const assertCurrent = () => {
+    scope?.signal?.throwIfAborted();
+    invocation?.instance.lifecycle.signal.throwIfAborted();
+    if (
+      !invocation ||
+      !pluginInstanceInvocation.run(invocation, () => invocation.instance.hasActiveCall) ||
+      !scope ||
+      !context ||
+      !client ||
+      scope.hasCurrentClientAuthority?.() === false ||
+      client.invalidated ||
+      client.connectionSignal?.aborted ||
+      client.internal?.isLocalClient !== true ||
+      client.internal.authenticatedOperator !== true ||
+      client.internal.operatorRoleActor?.kind !== "system" ||
+      client.connect.role !== "operator" ||
+      !client.connect.scopes?.includes("operator.admin") ||
+      !client.connId ||
+      context.isConnectionActive?.(client.connId) === false
+    ) {
+      throw new Error("Private Gateway RPC authority is unavailable");
+    }
+  };
+  assertCurrent();
+  return assertCurrent;
 }

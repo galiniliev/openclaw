@@ -593,7 +593,11 @@ Connection authority is resolved in this order:
    device enrollment or upgrade requests. Device authorization then establishes
    the persistent scopes. A device-less session contributes no self-declared
    scopes.
-2. OpenClaw unions a matching server-side identity grant with those scopes.
+2. OpenClaw unions a matching server-side identity grant with those scopes. An
+   effective role with `verifiedIdentityWrite: true` also contributes read/write
+   for a current verified profile authenticated by trusted proxy or Tailscale.
+   This opt-in does not grant administrator scopes or alter device pairing;
+   changing it retires the role authority captured by existing work.
 3. OpenClaw applies `x-openclaw-scopes` to the final union as the session cap.
    An absent header means no cap. A present-but-empty header yields no scopes.
    The intersection honors scope implications: an `operator.write` grant with

@@ -15,6 +15,8 @@ export function captureAgentTurnPrincipal(client: GatewayClient | null): AgentTu
   const principal: AgentTurnPrincipal = {
     authenticatedUserId: client.authenticatedUserId,
     authenticatedUserProfile: client.authenticatedUserProfile,
+    authenticatedGitHubAccountId: client.authenticatedGitHubAccountId,
+    authenticatedRepositoryCredentialSource: client.authenticatedRepositoryCredentialSource,
     authPolicy: client.authPolicy,
     connId: client.connId,
     connect: client.connect,

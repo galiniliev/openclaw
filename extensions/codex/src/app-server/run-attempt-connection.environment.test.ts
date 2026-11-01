@@ -204,7 +204,7 @@ describe("Codex local tool environment placement", () => {
 });
 
 it.each(["api-key", "subscription"] as const)(
-  "keeps worker %s route constraints through actual client startup without local login",
+  "keeps worker %s route constraints through actual startup without GitHub credentials or local login",
   async (authRequirement) => {
     provisionWorker();
     const params = createParams(
@@ -219,6 +219,7 @@ it.each(["api-key", "subscription"] as const)(
       placementNodeId: "worker-node",
       placementEnvironmentId: "worker-environment",
       placementSessionId: params.sessionId,
+      sessionKey: params.sessionKey!,
       placementOwnerEpoch: 1,
     };
     params.sandbox = sandbox;

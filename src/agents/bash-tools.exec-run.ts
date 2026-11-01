@@ -39,6 +39,7 @@ import {
   createExecRequestPreparation,
   type ExecToolArgs,
   resolveExecPreparedRunEnvironment,
+  prepareLocalGitHubAppExecution,
   resolveExecNotificationDefaults,
   resolvePreparedExecEnvironment,
 } from "./bash-tools.exec-request-preparation.js";
@@ -47,7 +48,6 @@ import {
   DEFAULT_PENDING_MAX_OUTPUT,
   type ExecProcessHandle,
   normalizePathPrepend,
-  resolveApprovalRunningNoticeMs,
   runExecProcess,
 } from "./bash-tools.exec-runtime.js";
 import {
@@ -58,6 +58,8 @@ import {
   attachExecApprovalReview,
   buildExecForegroundResult,
   resolveExecReviewerDefaults,
+  resolveApprovalRunningNoticeMs,
+  buildExecRunningResult,
 } from "./bash-tools.exec-support.js";
 import { resolveExecElevatedMode, resolveExecHost } from "./bash-tools.exec-target.js";
 import type {
@@ -502,6 +504,11 @@ export function createExecTool(defaults?: ExecToolDefaults) {
             ? preparedRunEnvironment.localIdentityEnv.GH_CONFIG_DIR
             : undefined;
 
+        const githubApp = prepareLocalGitHubAppExecution(
+          defaults,
+          host === "gateway" ? preparedRunEnvironment.appInstallationProfileId : undefined,
+        );
+
         if (host === "gateway" && !bypassApprovals) {
           gatewayApproval = await processGatewayAllowlist({
             ...hostApprovalParams(),
@@ -509,6 +516,7 @@ export function createExecTool(defaults?: ExecToolDefaults) {
             secretEgressBindings,
             durable: params.durable ? durableNotifications : undefined,
             githubProfileDir,
+            githubApp,
             pathPrepend: defaultPathPrepend,
             pty: params.pty === true && !sandbox,
             safeBins,
@@ -567,6 +575,7 @@ export function createExecTool(defaults?: ExecToolDefaults) {
           durable: params.durable ? durableNotifications : undefined,
           sessionId: defaults?.sessionId,
           githubProfileDir,
+          githubApp,
           pathPrepend: defaultPathPrepend,
           sandbox,
           containerWorkdir,
@@ -707,28 +716,14 @@ export function createExecTool(defaults?: ExecToolDefaults) {
                 aggregateOutputDropped:
                   run.session.totalOutputChars > run.session.aggregated.length,
               })
-            : {
-                content: [
-                  {
-                    type: "text",
-                    text: `${getWarningText()}Command still running (session ${run.session.id}, pid ${
-                      run.session.pid ?? "n/a"
-                    }). ${followUp}`,
-                  },
-                ],
-                details: {
-                  status: "running",
-                  sessionId: run.session.id,
-                  pid: run.session.pid ?? undefined,
-                  startedAt: run.startedAt,
-                  ...(deadlineAtMs === undefined ? {} : { deadlineAtMs }),
-                  cwd: run.session.cwd,
-                  tail: run.session.tail,
-                  ...(warnings.length ? { warningText: warnings.join("\n") } : {}),
-                  // Structured callers receive details without the visible content.
-                  followUp,
-                },
-              },
+            : buildExecRunningResult({
+                session: run.session,
+                startedAt: run.startedAt,
+                deadlineAtMs,
+                warningText: getWarningText(),
+                followUp,
+                warnings,
+              }),
           approvalReview,
         );
       } catch (error) {

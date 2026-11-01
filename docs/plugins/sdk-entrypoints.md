@@ -26,6 +26,43 @@ Migrate wrappers and lifecycle calls using the
 [GitHub publication method mapping](/plugins/sdk-migration/how-to-migrate#await-github-publication-operations),
 without adding imports from Gateway internals.
 
+Bundled native worker adapters use the private `github-worker-runtime` entrypoint
+for `prepareWorkerGitHubBindingGrant`, launch binding parsing, and isolated `gh`
+profile files. Retain the grant only for the admitted session execution, check its
+live authority before commands, and await `revoke()` when execution ends. A worker
+receives a scoped execution token; GitHub App signing keys stay with the Gateway.
+The grant's abort signal closes authority on cancellation or token expiration.
+
+Repository integration plugins use `OpenClawPluginApi` from `openclaw/plugin-sdk/plugin-entry`
+and call the typed `api.registerRepositoryIntegration(...)`. Its version-1
+parameter contract is available as
+`Parameters<OpenClawPluginApi["registerRepositoryIntegration"]>[0]`; no separate
+type-only entrypoint is required. Declare
+`contracts.repositoryIntegrations: ["repository"]` in the plugin manifest. The
+enabled manifest declares policy ownership. Select its plugin ID with
+`gateway.repositoryIntegration` when that policy is required. The host retains
+this expectation independently of discovery: a missing manifest, failed
+registration, multiple enabled owners or a closed plugin cannot silently fall
+back to native repository policy. An omitted selection preserves native defaults.
+
+The host supplies authenticated connection facts, current profile access and
+purpose-specific operation bindings. `readCurrentProfile()` returns verified
+`emails` and the current `assignedRole` (or `null`); older hosts may omit the
+role. An integration requiring a role must deny admission when it is absent.
+These facts accompany the host-held live assertion; role or schedule metadata
+alone does not authorize an operation. The plugin owns external identity exchange,
+repository admission and publication policy; native owners retain session
+currentness, token issue/revoke/delivery, placement, cancellation and recovery.
+Retained scopes must fail after identity, source, session or plugin invalidation.
+Never import a private Gateway identity store or reconstruct a caller from request
+metadata.
+
+The existing `openclaw/plugin-sdk/gateway-method-runtime` provides
+`capturePrivateGatewayRequestAuthority()` for a registered method that requires
+direct-local authenticated system/admin provenance. It returns a currentness
+assertion scoped to that admitted handler. Loopback transport or an arbitrary
+authenticated HTTP route does not supply this authority.
+
 <Tip>
   **Looking for a walkthrough?** See [Tool Plugins](/plugins/tool-plugins),
   [Channel Plugins](/plugins/sdk-channel-plugins), or

@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { sha256Hex } from "@openclaw/normalization-core/node-crypto";
 import { ok, type Result } from "@openclaw/normalization-core/result";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import {
@@ -292,6 +293,7 @@ export function prepareSessionWorkspace(params: {
     entry,
     runId: clientRunId,
     context,
+    client,
     signal,
     assertCurrent: assertRunOwnership,
     runSetupScript: client?.connect?.scopes?.includes(ADMIN_SCOPE) === true,
@@ -357,6 +359,7 @@ export async function prepareSessionWorkspaceForRun(params: {
   signal: AbortSignal;
   assertCurrent: SessionSourceAssertion;
   runSetupScript: boolean;
+  client?: GatewayRequestHandlerOptions["client"];
   onPromptReady?: () => void;
 }): Promise<void> {
   const {
@@ -430,16 +433,32 @@ export async function prepareSessionWorkspaceForRun(params: {
         return;
       }
       const configuredToken = gitUrl ? githubApiToken(process.env, cfg) : undefined;
-      const projectIdentity =
-        gitUrl && !configuredToken
-          ? await prepareGatewayProjectGitHubIdentity({
-              agentId,
-              assertActive: assertRunOwnership,
-              config: cfg,
-              context,
-            })
-          : undefined;
-      const projectToken = configuredToken ?? projectIdentity?.token;
+      const projectIdentity = gitUrl
+        ? await prepareGatewayProjectGitHubIdentity({
+            agentId,
+            assertActive: assertRunOwnership,
+            config: cfg,
+            context,
+            client: params.client,
+            repositoryCredential: {
+              assertCurrent: assertRunOwnership,
+              claim: {
+                purpose: "session-create-project",
+                binding: {
+                  kind: "session-create",
+                  agentId,
+                  sessionKey,
+                  sessionId: entry.sessionId,
+                  requestDigest: sha256Hex(gitUrl),
+                },
+              },
+            },
+          })
+        : undefined;
+      await using _ = {
+        [Symbol.asyncDispose]: async () => projectIdentity?.revoke?.(),
+      };
+      const projectToken = projectIdentity?.token ?? configuredToken;
       const assertProjectCurrent = () => {
         assertRunOwnership();
         if (metadata) {

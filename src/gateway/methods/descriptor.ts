@@ -73,6 +73,7 @@ export function createPluginGatewayMethodDescriptor(
     name: string;
     handler: GatewayMethodHandler;
     scope?: OperatorScope;
+    advertise?: boolean;
     profileAccess?: GatewayMethodProfileAccess;
     sessionAccess?: GatewayMethodSessionAccess;
   } & Partial<GatewayReadSharing>,
@@ -83,6 +84,7 @@ export function createPluginGatewayMethodDescriptor(
     handler: params.handler,
     owner: { kind: "plugin", pluginId: params.pluginId },
     profileAccess: params.profileAccess ?? "required",
+    ...(params.advertise !== undefined ? { advertise: params.advertise } : {}),
     ...(params.sessionAccess ? { sessionAccess: params.sessionAccess } : {}),
     ...(params.shareKey
       ? {

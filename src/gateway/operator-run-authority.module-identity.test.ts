@@ -24,7 +24,12 @@ it.each(["assertion", "abort"] as const)(
     const failure = new Error("original source retired");
     let current = true;
     let holds = 0;
+    const credentialSource = Object.freeze({
+      id: `ahp:${"c".repeat(64)}`,
+      expiresAtMs: Date.now() + 60_000,
+    });
     const original = issue({
+      repositoryCredentialSource: credentialSource,
       profileId: "module-owner",
       scopes: ["operator.read", "operator.write"],
       signal: controller.signal,
@@ -47,6 +52,8 @@ it.each(["assertion", "abort"] as const)(
       expect(narrowed?.authority).not.toBe(original);
       expect(narrowed?.authority.scopes).toEqual(["operator.read"]);
       expect(narrowed?.authority.source).toBe(original.source);
+      expect(inherited?.authority.repositoryCredentialSource).toBe(credentialSource);
+      expect(narrowed?.authority.repositoryCredentialSource).toBe(credentialSource);
       expect(narrowed?.authority.signal).toBe(controller.signal);
       expect(holds).toBe(2);
       expect(() => narrowed?.authority.assertCurrent()).not.toThrow();

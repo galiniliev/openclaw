@@ -26,17 +26,25 @@ export function createGitHubIdentityStatusTool(
         agentId: caller.agentId,
         selectedScope: "agent",
       });
+      const unverifiedApp =
+        status.effective.credentialKind === "app-installation" &&
+        status.effective.credentialState === "unverified";
       const reconnect =
         status.effective.credentialState !== "available" ||
         ["expired", "failed", "unavailable"].includes(status.effective.refreshState);
       return jsonResult({
         ...status,
-        ...(reconnect
+        ...(unverifiedApp
           ? {
               nextAction:
-                "Ask the operator to connect or reconnect GitHub under Settings → Agents → Tools.",
+                "The configured GitHub App will be verified during an authorized operation, including scheduled automation.",
             }
-          : {}),
+          : reconnect
+            ? {
+                nextAction:
+                  "Ask the operator to connect or reconnect GitHub under Settings → Agents → Tools.",
+              }
+            : {}),
       });
     },
   };

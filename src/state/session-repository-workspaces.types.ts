@@ -1,3 +1,21 @@
+import type { RetainedWorkspaceAuthority } from "./retained-workspace-authority.js";
+
+/** Most recent lossy source replacement; later checkpoints retain this provenance. */
+export type RepositoryWorkspaceRecovery = {
+  reason: "missing-checkpoint-artifact" | "missing-worker";
+  atMs: number;
+  original: {
+    revision: number;
+    baseCommit: string | null;
+    baseManifestHash: string | null;
+    checkpointRef: string | null;
+    manifestHash: string | null;
+  };
+  sourceCommit: string;
+  source: "published-branch" | "recorded-base";
+  unrecoverablePrivateContent: true;
+};
+
 export type SessionRepositoryWorkspaceRecord = {
   workspaceId: string;
   agentId: string;
@@ -13,6 +31,8 @@ export type SessionRepositoryWorkspaceRecord = {
   revision: number;
   createdAtMs: number;
   updatedAtMs: number;
+  recovery?: RepositoryWorkspaceRecovery;
+  diskAuthority?: RetainedWorkspaceAuthority;
 };
 
 export type RepositoryWorkspaceOwner = { agentId: string; sessionKey: string };
@@ -24,7 +44,12 @@ export type RepositoryWorkspaceCreate = RepositoryWorkspaceOwner & {
   branch?: string;
 };
 export type RepositoryWorkspaceMutation = { workspaceId: string; expectedRevision: number };
+export type RepositoryWorkspaceBranchReset = RepositoryWorkspaceMutation & {
+  sourceCommit: string;
+  recovery?: Pick<RepositoryWorkspaceRecovery, "reason" | "source">;
+};
 export type RepositoryWorkspaceBase = RepositoryWorkspaceMutation & {
+  diskAuthority?: RetainedWorkspaceAuthority;
   baseCommit: string;
   baseManifestHash?: string;
 };

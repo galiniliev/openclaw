@@ -6,7 +6,11 @@ import { decodeGitHubPublicationRequester } from "../state/github-publication-re
 import { readGitHubPublicationInWorker } from "../state/github-publication-worker.js";
 import { executeExistingOpenClawStateRead } from "../state/openclaw-state-db-readonly.js";
 import { OpenClawStateLeaseAcquisitionError } from "../state/openclaw-state-lease-error.js";
-import { createGitHubPublicationExecutionIdentity } from "./github-publication-execution-identity.js";
+import { matchesCurrentGitHubPublicationIdentity } from "./github-publication-availability.js";
+import {
+  createGitHubPublicationExecutionIdentity,
+  prepareGitHubPublicationExecutionIdentity,
+} from "./github-publication-execution-identity.js";
 import { GitHubPublicationRequesterUnavailableError } from "./github-publication-failure.js";
 import { GitHubPublicationRecoveryPendingError } from "./github-publication-git-index.js";
 import { reconcileGitHubPublicationPullRequest } from "./github-publication-pull-requests.js";
@@ -79,8 +83,29 @@ export async function observeRepositoryGitHubPublication(params: {
     using _ = { [Symbol.dispose]: () => preparedOwner.release() };
 
     assertCustody();
-    const { assertCurrent, refreshIdentity } = createGitHubPublicationExecutionIdentity({
+    await using executionIdentity = createGitHubPublicationExecutionIdentity({
       row,
+      identity: {
+        prepare: async () => {
+          const actor = requester?.actor;
+          const ownerId = execution.row.execution_id;
+          if (!ownerId) {
+            throw new GitHubPublicationRecoveryPendingError(
+              "GitHub publication execution custody is unavailable.",
+            );
+          }
+          return await prepareGitHubPublicationExecutionIdentity({
+            row,
+            actor,
+            lifecycleRevision: row.session_lifecycle_revision,
+            executionKind: "repository",
+            ownerId,
+            assertCurrent: assertCustody,
+          });
+        },
+        isCurrent: (identity) =>
+          matchesCurrentGitHubPublicationIdentity({ agentId: row.agent_id, identity }),
+      },
       validateAuthority: () => {
         assertCustody();
         return execution.ownsExecution();
@@ -89,6 +114,7 @@ export async function observeRepositoryGitHubPublication(params: {
         assertReceiptOwner(row, preparedOwner);
       },
     });
+    const { assertCurrent, refreshIdentity } = executionIdentity;
     let url: string | undefined;
     try {
       assertCurrent();
@@ -171,24 +197,28 @@ export function createRepositoryGitHubPublicationRecovery(params: {
   ) => Promise<SessionGitHubPublicationResult>;
 }) {
   const { placements } = params;
+  const pendingForClaim = async (claim: WorkerSessionTurnClaim) =>
+    (
+      await listRepositoryGitHubPublicationsAsync({
+        sessionId: claim.sessionId,
+        ownerProfileId: null,
+        pending: true,
+      })
+    ).filter(
+      (candidate) =>
+        !candidate.checkpoint_ref &&
+        (candidate.claim_id === null || matchesRepositoryGitHubPublicationClaim(candidate, claim)),
+    );
   return {
+    needsClaimWorkspaceCapture: async (claim: WorkerSessionTurnClaim) =>
+      (await pendingForClaim(claim)).length > 0,
     async prepareClaimWorkspace(claim: WorkerSessionTurnClaim): Promise<void> {
       const assertCurrent = () => {
         if (!placements.validateWorkspaceResultClaim(claim)) {
           throw new Error("GitHub publication lost its workspace result claim.");
         }
       };
-      const pending = await listRepositoryGitHubPublicationsAsync({
-        sessionId: claim.sessionId,
-        ownerProfileId: null,
-        pending: true,
-      });
-      for (const row of pending.filter(
-        (candidate) =>
-          !candidate.checkpoint_ref &&
-          (candidate.claim_id === null ||
-            matchesRepositoryGitHubPublicationClaim(candidate, claim)),
-      )) {
+      for (const row of await pendingForClaim(claim)) {
         try {
           await placements.prepareWorkspaceResultClaim(claim);
           const requester = await restoreGitHubPublicationRequester(
@@ -271,40 +301,51 @@ export function createRepositoryGitHubPublicationRecovery(params: {
           ) {
             continue;
           }
-          await placements.withRepositoryWorkspaceReservation(
-            { sessionId: row.session_id, sessionKey: row.session_key, agentId: row.agent_id },
-            async (assertCurrent) => {
-              const execute = async () => {
-                const preparedOwner = await prepareReceiptOwner(row);
-                using _ = { [Symbol.dispose]: () => preparedOwner.release() };
-                assertCurrent();
-                const owner = resolveReceiptOwner(row, preparedOwner);
-                if (!owner) {
-                  // Keep the reservation through settlement; retirement needs only owner custody.
-                  await failStaleRepositoryGitHubPublicationAsync(row, params.assertCurrent);
-                  return undefined;
-                }
-                const result = await params.execute(row, assertCurrent);
-                // Execution validates the requester before returning an ordinary checkpoint wait.
-                return result.status === "requested" &&
-                  !row.checkpoint_ref &&
-                  !owner.workspace.checkpointRef
-                  ? undefined
-                  : result;
-              };
-              return params.recovery
-                ? await params.recovery.run(row, execute, async (result) => {
-                    // The failed attempt can replace the execution claim before settlement.
-                    const current = await readRepositoryGitHubPublicationInWorker(row.request_id);
-                    assertCurrent();
-                    if (!current) {
-                      throw new Error("GitHub repository publication receipt is unavailable.");
-                    }
-                    return params.execute(current, assertCurrent, result);
-                  })
-                : await execute();
-            },
-          );
+          const publish = async (assertCurrent: () => void) => {
+            const execute = async () => {
+              const preparedOwner = await prepareReceiptOwner(row);
+              using _ = { [Symbol.dispose]: () => preparedOwner.release() };
+              assertCurrent();
+              const owner = resolveReceiptOwner(row, preparedOwner);
+              if (!owner) {
+                // Keep the reservation through settlement; retirement needs only owner custody.
+                await failStaleRepositoryGitHubPublicationAsync(row, params.assertCurrent);
+                return undefined;
+              }
+              const result = await params.execute(row, assertCurrent);
+              // Execution validates the requester before returning an ordinary checkpoint wait.
+              return result.status === "requested" &&
+                !row.checkpoint_ref &&
+                !owner.workspace.checkpointRef
+                ? undefined
+                : result;
+            };
+            return params.recovery
+              ? await params.recovery.run(row, execute, async (result) => {
+                  // The failed attempt can replace the execution claim before settlement.
+                  const current = await readRepositoryGitHubPublicationInWorker(row.request_id);
+                  assertCurrent();
+                  if (!current) {
+                    throw new Error("GitHub repository publication receipt is unavailable.");
+                  }
+                  return params.execute(current, assertCurrent, result);
+                })
+              : await execute();
+          };
+          if (row.checkpoint_ref) {
+            // Admit the original workspace first; the bound snapshot then needs only
+            // publication/move exclusion while later worker turns use the live workspace.
+            await placements.withRepositoryWorkspaceReservation(
+              { sessionId: row.session_id, sessionKey: row.session_key, agentId: row.agent_id },
+              async (assertCurrent) => assertCurrent(),
+            );
+            await placements.withWorkspaceExclusion(row.session_id, publish);
+          } else {
+            await placements.withRepositoryWorkspaceReservation(
+              { sessionId: row.session_id, sessionKey: row.session_key, agentId: row.agent_id },
+              publish,
+            );
+          }
         } catch (error) {
           if (
             error instanceof SessionWorkspaceReservationBusyError ||

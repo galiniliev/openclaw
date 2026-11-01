@@ -97,6 +97,8 @@ export const GatewayOperatorRoleDefinitionSchema = z.strictObject({
   ]),
   /** Cloud profiles this role may explicitly dispatch its own sessions to. */
   workerProfiles: z.array(z.string().trim().min(1)).transform(uniqueValues).optional(),
+  /** Grant read/write to a currently verified identity within role and transport ceilings. */
+  verifiedIdentityWrite: z.boolean().optional(),
   /** Optional model ceiling for this role; defaults to the source agent's primary and fallbacks. */
   modelPolicy: z
     .strictObject({

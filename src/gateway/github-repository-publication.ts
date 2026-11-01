@@ -25,6 +25,8 @@ import {
 import {
   assertExpectedSharedGitHubPublisher,
   prepareCurrentGitHubPublicationIdentity,
+  repositoryPublicationPreflightCredential,
+  repositoryPublicationPreflightActor,
   sameGitHubPublicationWorkspace,
   prepareGitHubPublicationSession,
 } from "./github-publication-availability.js";
@@ -57,6 +59,7 @@ import {
 } from "./github-repository-publication-store.js";
 import { prepareRepositoryOwner } from "./github-repository-publication-workspace.js";
 import { matchesRepositoryGitHubPublicationClaim } from "./github-repository-publication.kernel.js";
+import type { PrepareRepositoryPublicationCheckpoint } from "./repository-publication-checkpoint.js";
 import { resolvePlacementTurnEnvironment } from "./worker-environments/placement-record.js";
 import type {
   WorkerSessionPlacementStore,
@@ -66,6 +69,7 @@ import type {
 export function createRepositoryGitHubPublicationCoordinator(params: {
   placements: WorkerSessionPlacementStore;
   getCommittedRuntimeConfig: () => OpenClawConfig;
+  prepareRepositoryCheckpoint?: PrepareRepositoryPublicationCheckpoint;
   assertCurrent: () => void;
   signal: AbortSignal;
   recovery?: GitHubPublicationRecoveryBackoff;
@@ -95,6 +99,7 @@ export function createRepositoryGitHubPublicationCoordinator(params: {
     instanceId,
     active,
     prepareSource,
+    prepareRepositoryCheckpoint: params.prepareRepositoryCheckpoint,
     getCommittedRuntimeConfig,
     assertCurrent: params.assertCurrent,
   });
@@ -241,11 +246,27 @@ export function createRepositoryGitHubPublicationCoordinator(params: {
         throw new Error("GitHub publication idempotency key was reused by a different requester.");
       }
     }
-    const identity = await prepareCurrentGitHubPublicationIdentity(input.agentId);
+    const identity = await prepareCurrentGitHubPublicationIdentity(
+      input.agentId,
+      repositoryPublicationPreflightActor(requester, session.sessionKey, assertCurrent),
+      repositoryPublicationPreflightCredential({
+        agentId: input.agentId,
+        sessionKey: session.sessionKey,
+        sessionId: session.sessionId,
+        lifecycleRevision: session.lifecycleRevision ?? null,
+        assertCurrent,
+      }),
+    );
+    await using identityLifetime = {
+      identity,
+      [Symbol.asyncDispose]: async () => {
+        await identity.revoke?.();
+      },
+    };
     assertCurrent();
     assertExpectedSharedGitHubPublisher(
       expected,
-      { source: identity.source, ...identity.account },
+      { source: identityLifetime.identity.source, ...identityLifetime.identity.account },
       existing
         ? undefined
         : { idempotencyKey: input.idempotencyKey, hasRequest: () => Boolean(existing) },

@@ -15,6 +15,7 @@ export async function createPtyAdapter(
     args: string[];
     cwd?: string;
     env?: NodeJS.ProcessEnv;
+    privateEnv?: () => Readonly<Record<string, string>>;
     cols?: number;
     rows?: number;
     name?: string;
@@ -49,6 +50,7 @@ export async function createPtyAdapter(
       args: preparedSpawn.args,
       cwd: params.cwd,
       env: spawnEnv,
+      privateEnv: params.privateEnv,
       name: terminalName,
       cols: params.cols ?? 120,
       rows: params.rows ?? 30,

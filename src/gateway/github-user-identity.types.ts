@@ -11,3 +11,6 @@ export type GitHubIdentityPreparationTiming =
   | "profileGitHubMetadataMs"
   | "profileBindingReadMs"
   | "profileWriteMs";
+
+export type RepositoryCredentialSource =
+  import("../plugins/repository-integration.types.js").RepositoryConnectionIdentity["credentialSource"];

@@ -324,6 +324,7 @@ export async function prepareBoundGitHubPublication(params: {
       pullRequestUrl: binding.url,
       session: { agentId: row.agent_id, sessionKey: row.session_key, sessionId: row.session_id },
       requester: params.requester,
+      identity: await params.refreshIdentity(),
       assertCurrent: params.assertCurrent,
     }).catch(() => {
       throw new GitHubPublicationRequesterUnavailableError();

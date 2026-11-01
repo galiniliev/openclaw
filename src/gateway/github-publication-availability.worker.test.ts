@@ -25,12 +25,15 @@ import { observeMainThreadSql } from "../test-utils/main-thread-sql-spies.test-s
 import {
   qualifyGitHubPublicationSource,
   prepareGitHubPublicationSession,
+  prepareCurrentGitHubPublicationIdentity,
   prepareGitHubPublicationWorkspaceOwner,
 } from "./github-publication-availability.js";
 import {
   readGitHubPublicationFact,
   startGitHubPublicationDiscovery,
 } from "./github-publication-discovery.js";
+import { prepareGitHubPublicationExecutionIdentity } from "./github-publication-execution-identity.js";
+import { GitHubPublicationRecoveryPendingError } from "./github-publication-git-index.js";
 import type { loadGatewaySessionEntryReadOnlyInWorker } from "./session-utils-store-worker.js";
 import { prepareGitHubPublicationFact } from "./worker-environments/worker-github-binding.js";
 
@@ -51,6 +54,7 @@ const mocks = vi.hoisted(() => ({
   admittedSessionRead: vi.fn(),
   config: vi.fn(),
   identity: vi.fn(),
+  selection: vi.fn(),
 }));
 // mock-isolation: Exclude session SQL, credentials, and config from worktree-read measurement.
 vi.mock("./session-utils.js", () => ({
@@ -144,7 +148,7 @@ vi.mock("../agents/github-tool-identity.js", () => ({
   prepareGitHubPublicationIdentity: mocks.identity,
   prepareGitHubPublicationOptionsIdentity: mocks.identity,
   matchesPreparedGitHubPublicationIdentity: () => true,
-  resolveConfiguredGitHubToolIdentity: () => undefined,
+  resolveConfiguredGitHubToolIdentity: mocks.selection,
   onManagedGitHubProfileChanged: () => () => {},
 }));
 // mock-isolation: Exclude OAuth credentials and network activity from this reader fixture.
@@ -253,6 +257,7 @@ beforeEach(async () => {
     entries: [{ sessionKey: session.sessionKey, entry: mocks.session().entry }],
   }));
   mocks.identity.mockReset().mockResolvedValue(identity);
+  mocks.selection.mockReset().mockReturnValue(undefined);
   await insertRegistryWorktree(process.env, worktree);
 });
 
@@ -260,6 +265,45 @@ afterEach(async () => {
   await closeOpenClawStateDatabaseAsync();
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+});
+
+it("keeps Factory App publication pending without a current credential source", async () => {
+  vi.stubEnv("FACTORY_AUTH_MODE", "github");
+  mocks.selection.mockReturnValue({ kind: "app-installation", profileId: "system-app" });
+  await expect(
+    prepareGitHubPublicationExecutionIdentity({
+      row: {
+        agent_id: "main",
+        session_key: "agent:main:publication",
+        session_id: "session",
+        request_id: "request",
+        request_digest: "digest",
+      },
+      actor: { kind: "operator", profileId: "profile" },
+      lifecycleRevision: null,
+      executionKind: "worktree",
+      ownerId: "owner",
+      assertCurrent() {},
+    }),
+  ).rejects.toBeInstanceOf(GitHubPublicationRecoveryPendingError);
+  expect(mocks.identity).not.toHaveBeenCalled();
+});
+
+it("preserves native Factory publication without a foreground credential source", async () => {
+  vi.stubEnv("FACTORY_AUTH_MODE", "github");
+  await expect(prepareCurrentGitHubPublicationIdentity("main")).resolves.toBe(identity);
+  expect(mocks.identity).toHaveBeenCalledOnce();
+});
+
+it("uses an agent OAuth override when the system selects an App in Factory mode", async () => {
+  vi.stubEnv("FACTORY_AUTH_MODE", "github");
+  mocks.selection.mockImplementation(({ scope }: { scope: "agent" | "system" }) =>
+    scope === "agent"
+      ? { kind: "oauth", profileId: "agent-oauth" }
+      : { kind: "app-installation", profileId: "system-app" },
+  );
+  await expect(prepareCurrentGitHubPublicationIdentity("main")).resolves.toBe(identity);
+  expect(mocks.identity).toHaveBeenCalledOnce();
 });
 
 it.each([true, false])(

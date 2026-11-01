@@ -152,6 +152,10 @@ its direct credential and Git author environment are bound at launch. Running
 commands retain that token without refresh, so a very long process can outlive a
 short-lived credential.
 
+GitHub App installation identities require non-durable execution. Durable commands
+reject them before token issuance; use a managed GitHub user identity or ordinary
+background execution instead.
+
 Stdout and stderr append to a per-process log under
 `$OPENCLAW_STATE_DIR/processes/`. A small ownership row in the
 [shared state database](/reference/database-schemas/layout#durable-background-processes)

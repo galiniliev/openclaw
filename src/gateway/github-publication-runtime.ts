@@ -11,6 +11,7 @@ import {
 } from "./github-publication-store-async.js";
 import { reportGitHubPublicationTranscript } from "./github-publication-transcript.js";
 import { createGitHubPublicationCoordinator } from "./github-publication.js";
+import type { PrepareRepositoryPublicationCheckpoint } from "./repository-publication-checkpoint.js";
 import type {
   WorkerSessionPlacementStore,
   WorkerSessionTurnClaim,
@@ -19,6 +20,7 @@ import type {
 export function createGitHubPublicationRuntime(params: {
   placements: WorkerSessionPlacementStore;
   getCommittedRuntimeConfig: () => OpenClawConfig;
+  prepareRepositoryCheckpoint?: PrepareRepositoryPublicationCheckpoint;
   loadSessionRuntime: Parameters<typeof reportGitHubPublicationTranscript>[0];
   warn: (message: string) => void;
 }) {
@@ -125,6 +127,10 @@ export function createGitHubPublicationRuntime(params: {
       return false;
     }
   };
+  const needsAcceptedWorkspacePublication = async (claim: WorkerSessionTurnClaim) => {
+    await ready;
+    return coordinator.needsClaimWorkspaceCapture(claim);
+  };
   const prepareAcceptedWorkspacePublication = async (claim: WorkerSessionTurnClaim) => {
     await ready;
     try {
@@ -135,31 +141,11 @@ export function createGitHubPublicationRuntime(params: {
   };
   const publishAcceptedWorkspace = async (claim: WorkerSessionTurnClaim) => {
     await ready;
-    const placement = await params.placements.getAsync(claim.sessionId);
-    if (!placement) {
-      params.warn(`GitHub publication deferred because placement ${claim.sessionId} disappeared.`);
-      return;
-    }
-    let results;
-    try {
-      results = await coordinator.processClaim(claim);
-    } catch (error) {
-      params.warn(
-        `GitHub publication deferred for ${claim.sessionId}: ${formatErrorMessage(error)}`,
-      );
-      throw error;
-    }
-    for (const result of results) {
-      if (result.status !== "published" && result.status !== "failed") {
-        continue;
-      }
-      await reportDeferred({
-        sessionId: placement.sessionId,
-        sessionKey: placement.sessionKey,
-        agentId: placement.agentId,
-        result,
-      });
-    }
+    // The accepted checkpoint/snapshot is durable before this handoff. Release its
+    // claim binding through the existing writer; the lifecycle-owned sweep performs
+    // network publication after result settlement, including after a restart.
+    await coordinator.deferClaimPreparationAsync(claim);
+    reconcileNeeded = true;
   };
   const reconcilePublications = async (isStopping?: () => boolean) => {
     if (isStopping?.()) {
@@ -220,6 +206,7 @@ export function createGitHubPublicationRuntime(params: {
       return scope.close();
     },
     coordinator,
+    needsAcceptedWorkspacePublication,
     prepareAcceptedWorkspacePublication,
     publishAcceptedWorkspace,
     reconcilePublications,
