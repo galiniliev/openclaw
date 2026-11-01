@@ -101,7 +101,8 @@ function useBoard() {
   return store;
 }
 
-async function admitChildRun() {
+// Admits one scheduled occurrence the way cron does and builds the run's tools from it.
+async function admitChildRun(rememberedInlineClient = false) {
   const occurrence = await admitScheduledOccurrence({
     cfg: {},
     job: LINKED_JOB,
@@ -128,6 +129,8 @@ async function admitChildRun() {
     agentSessionKey: "agent:main:cron:job-1",
     runSessionKey: RUN_KEY,
     gatewayCallerScheduled: true,
+    listingClientCaps: rememberedInlineClient ? ["inline-widgets"] : undefined,
+    clientCaps: [],
     runtimeToolAllowlist: TOOLS,
     scheduledToolTargets: readScheduledToolTargets(admitted),
   });
@@ -163,9 +166,9 @@ const scopedTools = (
 
 it("authors the parent's board while the parent conversation is current", async () => {
   const store = useBoard();
-  const run = await admitChildRun();
+  const run = await admitChildRun(true);
   await run.dashboard.execute("tab", createTab);
-  await run.widget.execute("pin", pinReport);
+  await run.widget.execute("pin", { ...pinReport, presentation: { frame: "full-bleed" } });
   const board = await store.getSnapshot(PARENT);
   expect(board.tabs.map((tab) => tab.tabId)).toContain("report");
   expect(board.widgets.map((widget) => widget.title)).toEqual(["Status"]);

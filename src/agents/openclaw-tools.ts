@@ -248,8 +248,6 @@ function* createOpenClawToolsSteps(
     widgetPresenters,
     widgetPresenterContext,
   );
-  const inlineWidgetClientAvailable =
-    (options?.listingClientCaps ?? options?.clientCaps)?.includes("inline-widgets") === true;
   const sessionKey = normalizeOptionalString(options?.runSessionKey ?? options?.agentSessionKey);
   const gatewayCallerAccountId = options?.gatewayCallerAccountId ?? options?.agentAccountId;
   const deliveryContext = {
@@ -433,6 +431,11 @@ function* createOpenClawToolsSteps(
   // A run admitted with scheduled tool targets is a scheduled turn on every runtime.
   const scheduledCaller =
     options?.gatewayCallerScheduled === true || scheduledTargets !== undefined;
+  const inlineWidgetClientAvailable =
+    (scheduledCaller
+      ? options?.clientCaps
+      : (options?.listingClientCaps ?? options?.clientCaps)
+    )?.includes("inline-widgets") === true;
   const pinnedWidgetAuthoringAdmitted =
     (options?.pinnedWidgetAuthoring === true ||
       (scheduledCaller && scheduledWidgetExplicitlyAllowed)) &&
