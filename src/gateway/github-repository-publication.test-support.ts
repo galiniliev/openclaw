@@ -266,12 +266,14 @@ export async function createRepositoryPublicationFixture(
       return jsonResult({ sha, tree, truncated: false });
     }
     if (endpoint.endsWith("/git/trees")) {
-      expect(body.base_tree).toBe(baseTree);
-      const sha = writeTree(baseTree, body.tree);
+      const sha = writeTree(body.base_tree, body.tree);
       return jsonResult({ sha });
     }
     if (endpoint.endsWith("/git/commits")) {
-      const sha = git(["commit-tree", body.tree, "-p", body.parents[0]], body.message);
+      const sha = git(
+        ["commit-tree", body.tree, ...body.parents.flatMap((parent: string) => ["-p", parent])],
+        body.message,
+      );
       const commit = {
         sha,
         tree: { sha: body.tree },

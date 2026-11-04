@@ -23,3 +23,19 @@ export function terminalRepositoryGitHubPublication(
 ): boolean {
   return row.status === "published" || row.status === "failed";
 }
+
+/** Only an explicit retry can reclaim a captured request that never dispatched a ref or PR. */
+export function retryableRepositoryGitHubPublication(row: RepositoryGitHubPublicationRow): boolean {
+  return (
+    row.owner_profile_id === null &&
+    row.status === "failed" &&
+    row.error_code === "unavailable" &&
+    row.checkpoint_ref !== null &&
+    row.checkpoint_digest !== null &&
+    row.head_commit === null &&
+    row.last_effect === null &&
+    row.effect_state === null &&
+    row.pushed_head_commit === null &&
+    row.pull_request_url === null
+  );
+}

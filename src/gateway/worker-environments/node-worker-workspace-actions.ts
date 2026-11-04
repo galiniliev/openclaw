@@ -9,6 +9,7 @@ import {
 import { NODE_WORKSPACE_EMPTY_MANIFEST_REF } from "../../worker/node-workspace-transfer-protocol.js";
 import {
   createNodeWorkerRepositoryPreparation,
+  prepareNodeWorkerPublicationIntegration,
   restoreNodeWorkerRepositoryCheckpoint,
 } from "./node-worker-repository-preparation.js";
 import type { NodeWorkerWorkspaceBinding } from "./node-worker-tunnel.types.js";
@@ -54,6 +55,7 @@ export function createNodeWorkerWorkspaceActions(params: {
   restoredWorkspace?: NodeWorkerWorkspaceBinding;
   supportsNativeQuiescence?: () => Promise<boolean>;
   supportsGitResults?: () => Promise<boolean>;
+  supportsPublicationIntegration?: () => Promise<boolean>;
   workspaceTransfer: NodeWorkspaceTransferService;
   runWorkspaceCommand: (
     command: WorkerWorkspaceCommand & {
@@ -553,6 +555,17 @@ export function createNodeWorkerWorkspaceActions(params: {
     getSessionKey: () => sessionKey,
     validateRestoredWorkspace,
     runWorkspaceCommand: exec,
+    integratePublication: (input: Parameters<typeof prepareNodeWorkerPublicationIntegration>[1]) =>
+      prepareNodeWorkerPublicationIntegration(
+        {
+          environmentId: params.environmentId,
+          signal: params.ownerSignal,
+          workspaceTransfer: params.workspaceTransfer,
+          supportsIntegration: params.supportsPublicationIntegration,
+          transfer,
+        },
+        input,
+      ),
     stageAttachments: async (
       request: Parameters<NonNullable<WorkerWorkspaceTunnelHandle["stageAttachments"]>>[0],
     ) => {

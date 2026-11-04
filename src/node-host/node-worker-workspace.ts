@@ -500,8 +500,7 @@ export class NodeWorkerWorkspaceRuntime {
     gateway?: NodeWorkerTransferGateway,
   ): Promise<NodeWorkerWorkspaceExecResult> {
     signal?.throwIfAborted();
-    // Logical drain joins the private operation queue without opening user files.
-    // It must still succeed after the user moves the folder or revokes its roots.
+    // Drain joins prior work without reopening a moved folder or retiring prepared registration.
     const draining = input.argv[0] === NODE_WORKSPACE_DRAIN_COMMAND;
     const deviceFolder = draining ? input.deviceFolder : this.deviceFolders.validateCommand(input);
     if (input.argv[0] === NODE_WORKSPACE_VALIDATE_DEVICE_FOLDER_COMMAND) {
@@ -527,7 +526,7 @@ export class NodeWorkerWorkspaceRuntime {
     }
     const finishOperation = this.beginWorkspaceOperation(input.gatewayNamespace, generationKey);
     try {
-      const result = await serializeNodeWorkerWorkspace(sessionRootCandidate, async () => {
+      const admitted = await serializeNodeWorkerWorkspace(sessionRootCandidate, async () => {
         signal?.throwIfAborted();
         const prepared = deviceFolder
           ? undefined
@@ -539,8 +538,6 @@ export class NodeWorkerWorkspaceRuntime {
         ) {
           throw new Error("INVALID_REQUEST: prepared workspace registration is missing or changed");
         }
-        // Drain proves prior queued work settled, including an interrupted prepared
-        // mutation whose durable row is now retiring; it does not reopen that workspace.
         if (input.argv[0] === NODE_WORKSPACE_DRAIN_COMMAND) {
           return projectWorkspaceOperationResult(
             deviceFolder
@@ -612,31 +609,37 @@ export class NodeWorkerWorkspaceRuntime {
           if (!gateway?.url) {
             throw new Error("INVALID_REQUEST: workspace transfer gateway is unavailable");
           }
-          const stdout = await runNodeWorkerWorkspaceTransfer({
-            seedsRoot: this.seedsRoot,
-            gatewayNamespace: input.gatewayNamespace,
-            gatewayUrl: gateway.url,
-            gatewayTlsFingerprint: gateway.tlsFingerprint,
-            gatewayCloudflareAccess: gateway.cloudflareAccess,
-            environmentId: input.environmentId,
-            workspaceDir: workspacePath,
-            manifestHome: homeDir,
-            ...(prepared && this.prepared.store
-              ? { prepared: { row: prepared, store: this.prepared.store } }
-              : {}),
-            transfer: input.transfer,
-            hashMemo: takeWorkspaceHashMemo(this.workspaceHashMemos, generationKey),
-            signal,
-          });
-          // A snapshot sent before this transfer knows only the old base. Keep the latest
-          // result across command gaps; supersede it on transfer or drop it with its generation.
-          if (
-            !(input.transfer.direction === "download" && input.transfer.attachments) &&
-            !(input.transfer.direction === "upload" && input.transfer.publicationBaseCommit)
-          ) {
-            this.latestTransferredManifest.set(generationKey, stdout);
-          }
-          return projectWorkspaceOperationResult(workspacePath, `${stdout}\n`);
+          const selectedTransfer = input.transfer;
+          const runTransfer = async () => {
+            assertProcessCurrent();
+            const stdout = await runNodeWorkerWorkspaceTransfer({
+              seedsRoot: this.seedsRoot,
+              gatewayNamespace: input.gatewayNamespace,
+              gatewayUrl: gateway.url,
+              gatewayTlsFingerprint: gateway.tlsFingerprint,
+              gatewayCloudflareAccess: gateway.cloudflareAccess,
+              environmentId: input.environmentId,
+              workspaceDir: workspacePath,
+              manifestHome: homeDir,
+              ...(prepared && this.prepared.store
+                ? { prepared: { row: prepared, store: this.prepared.store } }
+                : {}),
+              transfer: selectedTransfer,
+              hashMemo: takeWorkspaceHashMemo(this.workspaceHashMemos, generationKey),
+              signal,
+            });
+            // A snapshot sent before this transfer knows only the old base. Keep the latest
+            // result across command gaps; supersede it on transfer or drop it with its generation.
+            if (
+              selectedTransfer.direction !== "publication" &&
+              !(selectedTransfer.direction === "download" && selectedTransfer.attachments) &&
+              !(selectedTransfer.direction === "upload" && selectedTransfer.publicationBaseCommit)
+            ) {
+              this.latestTransferredManifest.set(generationKey, stdout);
+            }
+            return projectWorkspaceOperationResult(workspacePath, `${stdout}\n`);
+          };
+          return selectedTransfer.direction === "publication" ? runTransfer : await runTransfer();
         }
         if (isWorkspaceInspectionCommand(input.argv)) {
           const stat = fs.lstatSync(workspacePath, { throwIfNoEntry: false });
@@ -714,13 +717,10 @@ export class NodeWorkerWorkspaceRuntime {
         });
         return input.process ? output : projectNodeWorkerWorkspaceExecResult(workspaceDir, output);
       });
-      return this.credentialScrubber
-        ? {
-            ...result,
-            stdout: this.credentialScrubber.scrub(result.stdout),
-            stderr: this.credentialScrubber.scrub(result.stderr),
-          }
-        : result;
+      const result = typeof admitted === "function" ? await admitted() : admitted;
+      result.stdout = this.credentialScrubber?.scrub(result.stdout) ?? result.stdout;
+      result.stderr = this.credentialScrubber?.scrub(result.stderr) ?? result.stderr;
+      return result;
     } finally {
       finishOperation();
     }

@@ -16,7 +16,7 @@ export function createWorkerPlacementRedispatch(params: {
   dispatch: WorkerPlacementDispatchContract["dispatch"];
   resolveDevicePlacementRequirement?: WorkerDevicePlacementRequirementResolver;
 }): WorkerPlacementRedispatch {
-  return async (placement, { assertCurrent, signal }) => {
+  return async (placement, { assertCurrent, signal, readNativeCredential: admittedCredential }) => {
     signal?.throwIfAborted();
     assertCurrent();
     const projection = await params.placements.readProjection([placement.sessionId], {
@@ -59,11 +59,13 @@ export function createWorkerPlacementRedispatch(params: {
     }
     signal?.throwIfAborted();
     assertCurrent();
-    const readNativeCredential = repositoryChatDispatchCredentialReader(
-      identity,
-      { profileId, providerId, profileSnapshot, executionMode },
-      assertCurrent,
-    );
+    const readNativeCredential =
+      admittedCredential ??
+      repositoryChatDispatchCredentialReader(
+        identity,
+        { profileId, providerId, profileSnapshot, executionMode },
+        assertCurrent,
+      );
     const requiredProfile = getRuntimeConfig().cloudWorkers?.requiredProfile;
     return await params.dispatch(
       {

@@ -26,6 +26,8 @@ import * as logger from "../logger.js";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import { resetPluginRuntimeStateForTest, setActivePluginRegistry } from "../plugins/runtime.js";
 import {
+  NODE_WORKSPACE_PUBLICATION_CONFLICT_CODE,
+  NodeWorkerPublicationConflictError,
   NODE_WORKSPACE_TRANSFER_ERROR_CODE,
   NodeWorkerWorkspaceTransferError,
 } from "../worker/node-workspace-transfer-protocol.js";
@@ -929,41 +931,50 @@ setInterval(() => {}, 1000);
     }
   });
 
-  it("preserves a typed workspace transfer failure across node invoke", async () => {
-    const cause = Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
-    const workspace = {
-      exec: vi.fn(async () => {
-        throw Object.assign(
-          new NodeWorkerWorkspaceTransferError(
-            "workspace-transfer-failed: transfer did not complete",
-            { cause },
-          ),
-          { operation: "upload", stage: "reconcile" },
-        );
-      }),
-    } as unknown as NodeWorkerWorkspaceRuntime;
+  it.each([false, true])(
+    "preserves typed workspace failures across node invoke (conflict: %s)",
+    async (conflict) => {
+      const cause = Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
+      const workspace = {
+        exec: vi.fn(async () => {
+          if (conflict) {
+            throw new NodeWorkerPublicationConflictError();
+          }
+          throw Object.assign(
+            new NodeWorkerWorkspaceTransferError(
+              "workspace-transfer-failed: transfer did not complete",
+              { cause },
+            ),
+            { operation: "upload", stage: "reconcile" },
+          );
+        }),
+      } as unknown as NodeWorkerWorkspaceRuntime;
 
-    const { result } = await invokePrivate({
-      command: NODE_WORKER_WORKSPACE_EXEC_COMMAND,
-      paramsJSON: JSON.stringify({
-        gatewayNamespace: "gateway-1",
-        environmentId: "environment-1",
-        sessionId: "session-1",
-        generation: 4,
-        argv: ["openclaw-internal-workspace-transfer"],
-      }),
-      workspace,
-    });
+      const { result } = await invokePrivate({
+        command: NODE_WORKER_WORKSPACE_EXEC_COMMAND,
+        paramsJSON: JSON.stringify({
+          gatewayNamespace: "gateway-1",
+          environmentId: "environment-1",
+          sessionId: "session-1",
+          generation: 4,
+          argv: ["openclaw-internal-workspace-transfer"],
+        }),
+        workspace,
+      });
 
-    expect(result).toMatchObject({
-      ok: false,
-      error: {
-        code: NODE_WORKSPACE_TRANSFER_ERROR_CODE,
-        message:
-          "workspace-transfer-failed: operation=upload stage=reconcile: socket hang up | ECONNRESET",
-      },
-    });
-  });
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          code: conflict
+            ? NODE_WORKSPACE_PUBLICATION_CONFLICT_CODE
+            : NODE_WORKSPACE_TRANSFER_ERROR_CODE,
+          message: conflict
+            ? "Publication integration has merge conflicts with the latest base; saved checkpoint and editing workspace are unchanged."
+            : "workspace-transfer-failed: operation=upload stage=reconcile: socket hang up | ECONNRESET",
+        },
+      });
+    },
+  );
 
   it("bounds and redacts serialized workspace transfer diagnostics", async () => {
     const secret = "sk-abcdefghijklmnopqrstuv";

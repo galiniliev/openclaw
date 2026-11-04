@@ -16,7 +16,10 @@ import { runInDetachedAsyncContext } from "../shared/detached-async-context.js";
 import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
 import { createGitHubPublicationRuntime } from "./github-publication-runtime.js";
 import type { NodeWorkerSupervisorTransport } from "./node-registry-private.js";
-import type { PrepareRepositoryPublicationCheckpoint } from "./repository-publication-checkpoint.js";
+import type {
+  PrepareRepositoryPublicationCheckpoint,
+  PrepareRepositoryPublicationIntegration,
+} from "./repository-publication-checkpoint.js";
 import { measureGatewayCloseStep, measureGatewayRestartTrace } from "./restart-trace.js";
 import { emitSessionsChanged } from "./server-methods/session-change-event.js";
 import { measureStartup, type GatewayStartupTrace } from "./server-startup-trace.js";
@@ -60,6 +63,7 @@ import type {
 } from "./worker-environments/placement-record.js";
 import { createPlacementSessionRetirement } from "./worker-environments/placement-session-retirement.js";
 import type { WorkerSessionPlacementStore } from "./worker-environments/placement-store.js";
+import { createRepositoryPublicationPreparation } from "./worker-environments/repository-publication-worker-preparation.js";
 import { createRepositoryWorkspaceMutationService } from "./worker-environments/repository-workspace-mutation.js";
 import type { WorkerEnvironmentService } from "./worker-environments/service.js";
 import { createWorkerPlacementRedispatch } from "./worker-environments/worker-placement-redispatch.js";
@@ -77,6 +81,7 @@ type WorkerPlacementSidecar = { stop: () => Promise<void> };
 
 export function createGatewayGitHubPublicationRuntime(params: {
   prepareRepositoryCheckpoint?: PrepareRepositoryPublicationCheckpoint;
+  prepareRepositoryIntegration?: PrepareRepositoryPublicationIntegration;
   placements: WorkerSessionPlacementStore;
   getCommittedRuntimeConfig: () => OpenClawConfig;
   warn: (message: string) => void;
@@ -176,6 +181,21 @@ export function createGatewayWorkerPlacementRuntime(params: GatewayWorkerPlaceme
     resolved.assertCurrent(getRuntimeConfig());
     return resolved.workspace;
   };
+  const repositoryWorkspaceMutationService = createRepositoryWorkspaceMutationService({
+    placements: params.placements,
+    environments: params.environments,
+    workspaceOperations,
+    resolveWorkspace,
+    ...createRepositoryPublicationPreparation({
+      placements: params.placements,
+      environments: params.environments,
+      getConfig: getRuntimeConfig,
+      ensurePlacement: (request) => dispatchService.ensurePlacement(request),
+      resolveDevicePlacementRequirement: (identity) => resolveDevicePlacementRequirement(identity),
+      waitForNode: runtimeRefresh.wait,
+      reconcileActive: (id) => dispatchService.reconcileActive(id),
+    }),
+  });
   const resolveDevicePlacementRequirement: WorkerDevicePlacementRequirementResolver = async (
     identity,
   ) => {
@@ -238,7 +258,9 @@ export function createGatewayWorkerPlacementRuntime(params: GatewayWorkerPlaceme
             return activate(assertCurrent);
           },
         }),
-      onActivated: ({ sessionId }, placement) => {
+      onActivated: (request, placement) => {
+        const { sessionId } = request;
+        repositoryWorkspaceMutationService.refreshRepositoryRefs(request);
         const environment = params.environments.get(placement.environmentId);
         if (
           environment?.state === "attached" &&
@@ -685,12 +707,7 @@ export function createGatewayWorkerPlacementRuntime(params: GatewayWorkerPlaceme
     },
     placements: params.placements,
     githubPublication,
-    repositoryWorkspaceMutationService: createRepositoryWorkspaceMutationService({
-      placements: params.placements,
-      environments: params.environments,
-      workspaceOperations,
-      resolveWorkspace,
-    }),
+    repositoryWorkspaceMutationService,
     resolveNodeWorkspaceBinding,
     bindNodeWorkerSupervisorTransport: (transport: NodeWorkerSupervisorTransport) => {
       nodeWorkerSupervisorTransport = transport;

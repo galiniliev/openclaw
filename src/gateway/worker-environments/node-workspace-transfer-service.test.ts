@@ -107,6 +107,52 @@ function retryOrUploadStatus(retryStarted: Promise<void>, upload: Promise<unknow
 }
 
 describe("node workspace transfer service", () => {
+  it("retains a detached publication download without advancing the editing manifest", async () => {
+    const root = tempDirs.make("detached-publication-transfer-");
+    const localPath = path.join(root, "workspace");
+    await fs.mkdir(localPath);
+    await fs.writeFile(path.join(localPath, "input.txt"), "editing workspace\n");
+    const service = createNodeWorkspaceTransferService({
+      getOwner: () => transferOwner("session-detached", 1, Date.now() + 60_000),
+      temporaryRoot: path.join(root, "transfer"),
+    });
+    const request = {
+      environmentId: "env-detached",
+      ownerEpoch: 1,
+      sessionId: "session-detached",
+      localPath,
+      isAuthorized: () => true,
+    };
+    try {
+      const original = await service.prepareSync(request);
+      await service.revoke(request.environmentId, original.token);
+      await fs.writeFile(path.join(localPath, "input.txt"), "detached artifact\n");
+      const { captureWorkspaceSnapshot } = await import("./workspace-manifest-worker.js");
+      const snapshot = await captureWorkspaceSnapshot({ root: localPath, baseCommit: null });
+      const token = service.publishSnapshot(
+        request.environmentId,
+        { ...snapshot, root: localPath },
+        undefined,
+        false,
+      );
+      const route = (manifestRef: string) => ({
+        kind: "manifest" as const,
+        direction: "download" as const,
+        environmentId: request.environmentId,
+        manifestRef,
+      });
+      const admitted = service.authorize({ token, route: route(snapshot.manifestRef) });
+      expect(admitted && service.snapshot(admitted)?.manifestRef).toBe(snapshot.manifestRef);
+      await service.revoke(request.environmentId, token);
+      expect(service.getSnapshot(request.environmentId, snapshot.manifestRef)).toBeUndefined();
+      expect(
+        service.getSnapshot(request.environmentId, original.snapshot.manifestRef)?.manifestRef,
+      ).toBe(original.snapshot.manifestRef);
+    } finally {
+      await service.closeAll();
+    }
+  });
+
   it("keeps a plain workspace transferable after durable result staging initializes Git", async () => {
     const root = tempDirs.make("node-workspace-transfer-unborn-git-");
     const localPath = path.join(root, "workspace");

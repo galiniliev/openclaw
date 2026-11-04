@@ -129,6 +129,7 @@ export async function observeRepositoryGitHubPublication(params: {
         baseBranch: row.base_branch,
         headCommit: row.head_commit,
         workspaceTree: row.workspace_tree,
+        repositoryIntegration: true,
         parentCommit: row.previous_head_commit ?? row.source_head_commit,
         marker: `<!-- openclaw-publication:${row.request_id} -->`,
         knownPullRequestUrls,

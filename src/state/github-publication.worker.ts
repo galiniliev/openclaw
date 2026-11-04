@@ -52,7 +52,8 @@ function mutate(
   const requiresSource =
     (input.operation === "claim" && kind === "personal") ||
     input.operation === "bindWorkspaceSnapshot" ||
-    input.operation === "checkpoint";
+    input.operation === "checkpoint" ||
+    input.operation === "retryUnavailable";
   if (requiresSource && !input.source) {
     throw new Error("GitHub publication action requires a typed source.");
   }
@@ -207,6 +208,7 @@ function repositoryMutation(database: OpenClawStateDatabase, input: RepositoryPu
   const admitted = () => assertGitHubPublicationWorkerSourceCurrent(database.db);
   const authority = { assertCurrent: admitted, assertCustody: () => assertCustody(database) };
   switch (input.operation) {
+    case "retryUnavailable":
     case "claim":
       return [
         repository.claimRepositoryGitHubPublicationInDatabase(
@@ -215,6 +217,7 @@ function repositoryMutation(database: OpenClawStateDatabase, input: RepositoryPu
           input.instanceId,
           input.executionId,
           authority,
+          input.operation === "retryUnavailable",
         ),
       ];
     case "updateHead":

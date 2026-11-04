@@ -270,6 +270,7 @@ export async function reconcileGitHubPublicationPullRequest(
     pushRepository: string;
     workspaceTree: string;
     parentCommit: string;
+    repositoryIntegration?: true;
     pushOnly?: "observed" | "dispatched";
     beforeRetry?: boolean;
     knownPullRequestUrls: readonly string[];
@@ -315,10 +316,28 @@ export async function reconcileGitHubPublicationPullRequest(
     }
     return parent.sha;
   });
+  let accepted = commit;
+  if (params.repositoryIntegration && parents.length === 2) {
+    const { raw: inputRaw } = await readGitHubPublicationApi(
+      params,
+      `repos/${params.pushRepository}/git/commits/${parents[0]}`,
+    );
+    params.assertCurrent();
+    const input: unknown = JSON.parse(inputRaw);
+    if (!isRecord(input) || input.sha !== parents[0]) {
+      return undefined;
+    }
+    accepted = input;
+  }
   if (
-    commit.tree.sha !== params.workspaceTree ||
-    parents.length !== 1 ||
-    parents[0] !== params.parentCommit ||
+    !isRecord(accepted.tree) ||
+    accepted.tree.sha !== params.workspaceTree ||
+    !Array.isArray(accepted.parents) ||
+    accepted.parents.length !== 1 ||
+    !isRecord(accepted.parents[0]) ||
+    accepted.parents[0].sha !== params.parentCommit ||
+    typeof accepted.message !== "string" ||
+    !accepted.message.split(/\r?\n/u).includes(`OpenClaw-Publication: ${params.requestId}`) ||
     !commit.message.split(/\r?\n/u).includes(`OpenClaw-Publication: ${params.requestId}`)
   ) {
     return undefined;

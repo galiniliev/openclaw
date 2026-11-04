@@ -30,6 +30,7 @@ export const gatewayDatabaseWorkerTestFiles = [
   "src/gateway/worker-environments/retained-lease-lifecycle.test.ts",
   "src/gateway/worker-environments/repository-project-admission.integration.test.ts",
   "src/gateway/worker-environments/worker-placement-retained-recovery.test.ts",
+  "src/gateway/worker-environments/repository-publication-worker-preparation.test.ts",
   "src/gateway/worker-environments/worker-turn-retained-failure.test.ts",
   "src/gateway/worker-environments/worker-turn-lease-admission.test.ts",
   "src/gateway/worker-environments/workspace-result-retained-disk.test.ts",

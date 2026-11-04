@@ -598,6 +598,9 @@ export async function ensureWorkerSessionPlacement(params: {
         await params.redispatchPlacement(placement, {
           assertCurrent: params.assertCurrent,
           signal: params.signal,
+          ...(request.readNativeCredential
+            ? { readNativeCredential: request.readNativeCredential }
+            : {}),
         });
         assertReady();
       } else if (params.waitForReady !== false) {

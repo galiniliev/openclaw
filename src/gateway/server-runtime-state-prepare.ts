@@ -34,6 +34,7 @@ import { STARTUP_UNAVAILABLE_GATEWAY_METHODS } from "./methods/core-method-polic
 import { isLoopbackHost } from "./net.js";
 import { createNodeReapprovalCoordinator } from "./node-reapproval-coordinator.js";
 import { GatewayOperatorAccessUnavailableError } from "./operator-access-policy.js";
+import type { RepositoryPublicationIntegrationResult } from "./repository-publication-checkpoint.js";
 import { createGatewayConnectionState } from "./server-connection-state.js";
 import { createGatewayControlUiRootLifecycle } from "./server-control-ui-root.js";
 import type { GatewayInstanceRuntime } from "./server-instance-runtime.types.js";
@@ -192,6 +193,18 @@ export async function prepareGatewayKernelState(params: {
     workerEnvironmentStartup && workerPlacementModule
       ? workerPlacementModule.createGatewayGitHubPublicationRuntime({
           placements: workerEnvironmentStartup.placementStore,
+          prepareRepositoryIntegration: async (
+            identity,
+            input,
+          ): Promise<RepositoryPublicationIntegrationResult> => {
+            if (!workerPlacement) {
+              throw new Error("Repository publication worker is unavailable");
+            }
+            return await workerPlacement.repositoryWorkspaceMutationService.integratePublication(
+              identity,
+              input,
+            );
+          },
           prepareRepositoryCheckpoint: async (identity, assertCurrent) => {
             if (!workerPlacement) {
               throw new Error("Repository workspace capture owner is unavailable");

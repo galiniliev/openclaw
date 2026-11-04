@@ -29,19 +29,26 @@ import {
   observeRepositoryGitHubPublication,
   settleDeniedRepositoryGitHubPublication,
 } from "./github-repository-publication-recovery.js";
-import { terminalRepositoryGitHubPublication } from "./github-repository-publication-store.js";
+import {
+  retryableRepositoryGitHubPublication,
+  terminalRepositoryGitHubPublication,
+} from "./github-repository-publication-store.js";
 import {
   assertReceiptOwner,
   captureCheckpoint,
   prepareReceiptOwner,
 } from "./github-repository-publication-workspace.js";
-import type { PrepareRepositoryPublicationCheckpoint } from "./repository-publication-checkpoint.js";
+import type {
+  PrepareRepositoryPublicationCheckpoint,
+  PrepareRepositoryPublicationIntegration,
+} from "./repository-publication-checkpoint.js";
 
 export function createRepositoryGitHubPublicationExecution(params: {
   instanceId: string;
   active: Map<string, string>;
   getCommittedRuntimeConfig: () => OpenClawConfig;
   prepareRepositoryCheckpoint?: PrepareRepositoryPublicationCheckpoint;
+  prepareRepositoryIntegration?: PrepareRepositoryPublicationIntegration;
   assertCurrent: () => void;
   prepareSource: (
     requester: Pick<GitHubPublicationRequesterPolicyV2, "prepareSource">,
@@ -57,10 +64,12 @@ export function createRepositoryGitHubPublicationExecution(params: {
       action?: PersonalGitHubSessionActionV2;
       requester?: GitHubPublicationRequesterPolicyV2;
       recoveryResult?: SessionGitHubPublicationResult;
+      retryUnavailable?: boolean;
     },
   ) => {
     let row = initial;
-    if (terminalRepositoryGitHubPublication(row)) {
+    const retryUnavailable = context.retryUnavailable && retryableRepositoryGitHubPublication(row);
+    if (terminalRepositoryGitHubPublication(row) && !retryUnavailable) {
       return projectGitHubPublicationResult(row);
     }
     const { assertCustody, action } = context;
@@ -118,7 +127,12 @@ export function createRepositoryGitHubPublicationExecution(params: {
     let execution: RepositoryGitHubPublicationExecutionAsync | undefined;
     const claimExecution = async () => {
       if (!execution) {
-        execution = await claimRepositoryGitHubPublicationAsync(row, instanceId, authority);
+        execution = await claimRepositoryGitHubPublicationAsync(
+          row,
+          instanceId,
+          authority,
+          retryUnavailable,
+        );
         active.set(row.request_id, execution.row.execution_id!);
       }
       return execution;
@@ -192,6 +206,12 @@ export function createRepositoryGitHubPublicationExecution(params: {
           const actor = action ? undefined : getRequester().snapshot.actor;
           return await executeRepositoryGitHubPublication({
             execution: await claimExecution(),
+            prepareIntegration: params.prepareRepositoryIntegration,
+            readDispatchCredential: (action ?? getRequester()).prepareDispatchCredential?.({
+              sessionId: row.session_id,
+              requestDigest: row.request_digest,
+              assertCurrent: assertExecution,
+            }),
             requesterProfileId:
               action?.owner ?? (actor?.kind === "operator" ? actor.profileId : undefined),
             snapshot: prepared.snapshot,

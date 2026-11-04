@@ -157,13 +157,16 @@ export async function claimRepositoryGitHubPublicationAsync(
   row: RepositoryGitHubPublicationRow,
   instanceId: string,
   authority: GitHubPublicationTransitionAuthority,
+  retryUnavailable = false,
 ) {
   const scope = mutationScope();
   const executionId = randomUUID();
   const identity = { row, instanceId, executionId };
   const claimed = requireRow(
-    await repositoryMutation(scope, { operation: "claim", ...identity }, () =>
-      authority.assertCustody(),
+    await repositoryMutation(
+      scope,
+      { operation: retryUnavailable ? "retryUnavailable" : "claim", ...identity },
+      retryUnavailable ? authority : () => authority.assertCustody(),
     ),
   );
   return {

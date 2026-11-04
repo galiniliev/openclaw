@@ -63,9 +63,10 @@ function reportFailure(error) {
 }
 `;
 
+export const NODE_WORKSPACE_PUBLICATION_CONFLICT_CODE = "WORKSPACE_PUBLICATION_CONFLICT";
 export const NODE_WORKSPACE_TRANSFER_ERROR_CODE = "WORKSPACE_TRANSFER_FAILED";
 
-export type NodeWorkerWorkspaceTransferOperation = "download" | "upload";
+export type NodeWorkerWorkspaceTransferOperation = "download" | "upload" | "publication";
 export type NodeWorkerWorkspaceTransferStage =
   | "recover"
   | "manifest"
@@ -117,6 +118,15 @@ export class NodeWorkerWorkspaceTransferError extends Error {
   }
 }
 
+/** Only a completed three-way merge can report this safe, content-free result. */
+export class NodeWorkerPublicationConflictError extends NodeWorkerWorkspaceTransferError {
+  constructor() {
+    super(
+      "Publication integration has merge conflicts with the latest base; saved checkpoint and editing workspace are unchanged.",
+    );
+  }
+}
+
 const ManifestRef = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
 const TransferToken = z
   .string()
@@ -145,6 +155,18 @@ export const NodeWorkerWorkspaceTransferInputSchema = z.union([
         (value.attachments === undefined && value.seedKey === undefined)) &&
       (value.checkpointGitHistory === undefined || value.checkpointBaseManifestRef !== undefined),
   ),
+  workerProtocolObject({
+    // A distinct operation is rejected by older workers, never interpreted as a live upload.
+    direction: z.literal("publication"),
+    token: TransferToken,
+    inputToken: TransferToken,
+    inputManifestRef: ManifestRef,
+    inputDigest: ManifestRef,
+    mainCommit: z.string().regex(/^[a-f0-9]{40}$/u),
+    sourceUrl: z.string().url(),
+    targetUrl: z.string().url(),
+    gitToken: z.string().min(1),
+  }),
   workerProtocolObject({
     direction: z.literal("upload"),
     token: TransferToken,

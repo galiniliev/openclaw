@@ -424,6 +424,38 @@ Automatic shared-publication recovery waits one minute after the first failed at
 
 During cooldown, publication status includes the remaining wait and the latest failure. Base-fetch failures identify the failed stage and native reason, including timeouts, with bounded, redacted Git diagnostics in status and the recovery warning. Inspect the original branch and PR, repair the reported access, connectivity, or Git-object problem, and let recovery reconcile the existing request. A failed observation does not establish that a push or PR creation failed; do not request a replacement publication to recover it.
 
+Repository-backed cloud sessions fetch `main` into a remote-tracking ref after
+activation without waiting for that fetch before starting or continuing turns.
+The fetch does not check out files or update the editing index. A background
+fetch failure is advisory; publication refreshes its target independently.
+
+New repository publications target the authenticated repository's default branch
+(the parent repository's default branch for forks). Continuations of an already
+published branch retain that publication's recorded repository and base branch.
+A selected source branch,
+tag, or commit remains the input, rather than becoming the PR destination.
+Publication reads the current target tip once for preparation and merges the
+accepted checkpoint with that tip in temporary worker Git state. It preserves
+the original checkpoint, later editing changes, and the request identity. The
+published merge retains the accepted input as one parent and the observed target
+tip as the other. It does not chase a continuously moving base after preparation.
+Conflicts leave the checkpoint and editing workspace untouched and appear in the
+publication receipt. A reclaimed or lost worker is prepared through normal placement
+recovery using its recorded destination or the configured required worker profile;
+publication does not start a model or editing turn. Unknown worker custody is not
+replaced. Stale runtimes use the normal guarded upgrade path and wait for active
+work to finish. If recovery needs current startup authorization, retry the same
+request from the original signed-in account; its checkpoint stays saved.
+
+An explicit retry with the original idempotency key and unchanged publication
+content can resume a shared repository request that failed as `unavailable`
+before creating a publication commit or dispatching a branch or PR write. It
+reuses the accepted checkpoint and revalidates the original requester, selected
+account, and current session authority. Background recovery does not reopen
+terminal failures, and requests with recorded or uncertain publication effects
+retain their existing reconciliation requirements. API failures retain safe
+exit, signal, timeout, and reported HTTP status details without command output.
+
 During publication, an accepted PR response still completes its owned receipt if the requesting connection closes or publication permission ends. A successful local branch update likewise finishes its matching index transaction while the execution retains workspace ownership. This settlement does not authorize another push or PR creation; unconfirmed outcomes retain their existing recovery or personal-confirmation requirements.
 
 If an update reached an existing PR before that PR closed, recovery recognizes

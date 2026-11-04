@@ -18,6 +18,7 @@ import {
   githubPublicationUnsafeConfigArgs,
   parseGitHubPublicationBaseRef,
 } from "./github-publication-base.js";
+import { GitHubPublicationApiError } from "./github-publication-failure.js";
 import { createGitHubPublicationGitError } from "./github-publication-git-error.js";
 import {
   hasUnapprovedGitHubPublicationWorkflowChanges,
@@ -90,6 +91,9 @@ export async function requirePublicationCommand(
 ): Promise<string> {
   const result = await runPublicationCommand(argv, options);
   if (result.code !== 0 || result.error) {
+    if (argv[0] === "gh" && argv[1] === "api") {
+      throw new GitHubPublicationApiError(result, options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS);
+    }
     throw createCommandError(
       argv[0] ?? "command",
       { ...result, stdout: Buffer.alloc(0) },

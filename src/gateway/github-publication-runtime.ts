@@ -11,7 +11,10 @@ import {
 } from "./github-publication-store-async.js";
 import { reportGitHubPublicationTranscript } from "./github-publication-transcript.js";
 import { createGitHubPublicationCoordinator } from "./github-publication.js";
-import type { PrepareRepositoryPublicationCheckpoint } from "./repository-publication-checkpoint.js";
+import type {
+  PrepareRepositoryPublicationCheckpoint,
+  PrepareRepositoryPublicationIntegration,
+} from "./repository-publication-checkpoint.js";
 import type {
   WorkerSessionPlacementStore,
   WorkerSessionTurnClaim,
@@ -21,6 +24,7 @@ export function createGitHubPublicationRuntime(params: {
   placements: WorkerSessionPlacementStore;
   getCommittedRuntimeConfig: () => OpenClawConfig;
   prepareRepositoryCheckpoint?: PrepareRepositoryPublicationCheckpoint;
+  prepareRepositoryIntegration?: PrepareRepositoryPublicationIntegration;
   loadSessionRuntime: Parameters<typeof reportGitHubPublicationTranscript>[0];
   warn: (message: string) => void;
 }) {

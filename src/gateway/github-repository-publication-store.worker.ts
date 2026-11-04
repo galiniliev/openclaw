@@ -21,7 +21,10 @@ import type { OpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import { deferSharedGitHubPublicationChanged } from "./github-publication-events.js";
 import { assertReadableSharedGitHubPublication } from "./github-publication-receipt.js";
 import { listRepositoryGitHubPublicationsInDatabase } from "./github-repository-publication-read.worker.js";
-import { terminalRepositoryGitHubPublication } from "./github-repository-publication-store.js";
+import {
+  retryableRepositoryGitHubPublication,
+  terminalRepositoryGitHubPublication,
+} from "./github-repository-publication-store.js";
 import {
   checkRepositoryGitHubPublication as checked,
   repositoryGitHubPublicationDigest,
@@ -306,10 +309,17 @@ export function claimRepositoryGitHubPublicationInDatabase(
   instanceId: string,
   executionId: string,
   authority: { assertCustody: () => void; assertCurrent: () => void },
+  retryUnavailable = false,
 ) {
   const { db } = database;
   authority.assertCustody();
-  if (terminalRepositoryGitHubPublication(row)) {
+  if (retryUnavailable) {
+    authority.assertCurrent();
+    const current = readRepositoryGitHubPublicationInDatabase(db, row.request_id);
+    if (!current || !retryableRepositoryGitHubPublication(current)) {
+      throw new Error("GitHub publication is not eligible for retry.");
+    }
+  } else if (terminalRepositoryGitHubPublication(row)) {
     throw new Error("GitHub publication receipt changed.");
   }
   const updated = executeSqliteQueryTakeFirstSync(
@@ -318,6 +328,7 @@ export function claimRepositoryGitHubPublicationInDatabase(
       .updateTable(table)
       .set({
         status: "publishing",
+        ...(retryUnavailable ? { error_code: null, next_action: null, reported_at_ms: null } : {}),
         gateway_instance_id: instanceId,
         execution_id: executionId,
         updated_at_ms: Date.now(),

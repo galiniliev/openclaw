@@ -60,7 +60,10 @@ import {
   sameWorktree,
 } from "./github-publication-workspace.js";
 import { createRepositoryGitHubPublicationCoordinator } from "./github-repository-publication.js";
-import type { PrepareRepositoryPublicationCheckpoint } from "./repository-publication-checkpoint.js";
+import type {
+  PrepareRepositoryPublicationCheckpoint,
+  PrepareRepositoryPublicationIntegration,
+} from "./repository-publication-checkpoint.js";
 import { loadGatewaySessionEntryReadOnlyInWorker } from "./session-utils-store-worker.js";
 import type {
   WorkerSessionPlacementStore,
@@ -98,6 +101,7 @@ export function createGitHubPublicationCoordinator(params: {
   placements: WorkerSessionPlacementStore;
   getCommittedRuntimeConfig: () => OpenClawConfig;
   prepareRepositoryCheckpoint?: PrepareRepositoryPublicationCheckpoint;
+  prepareRepositoryIntegration?: PrepareRepositoryPublicationIntegration;
   assertCurrent?: () => void;
   signal?: AbortSignal;
   recovery?: {

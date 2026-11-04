@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import fsp from "node:fs/promises";
 import {
   gitMaintenanceEnvironment,
   gitMaintenanceEnvironmentExpression,
@@ -6,12 +7,17 @@ import {
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import type { SpawnResult } from "../../process/exec.js";
 import type { NodeWorkerWorkspaceExecResult } from "../../worker/node-workspace-protocol.js";
+import { NODE_WORKSPACE_EMPTY_MANIFEST_REF } from "../../worker/node-workspace-transfer-protocol.js";
 import {
   prepareRepositoryPublicationRestore,
   RESTORE_PUBLICATION_INDEX_JS,
 } from "../github-repository-publication-restore.js";
+import { readGitHubRepositoryPublicationMetadata } from "../github-repository-publication-snapshot.js";
+import type { RepositoryPublicationIntegrationInput } from "../repository-publication-checkpoint.js";
+import { StaleWorkerBuildError } from "./admission.js";
 import type { createNodeWorkspaceTransferCommand } from "./node-workspace-transfer-command.js";
 import type { NodeWorkspaceTransferService } from "./node-workspace-transfer-service.js";
+import { removeNodeWorkspaceUpload } from "./node-workspace-upload-reader.js";
 import type {
   PreparedRepositoryWorkspace,
   WorkerWorkspaceCommand,
@@ -19,7 +25,7 @@ import type {
   WorkerWorkspaceSyncRequest,
 } from "./tunnel-contract.js";
 import { boundedWorkerError } from "./worker-error.js";
-import { decodeWorkspaceManifest } from "./workspace-manifest-worker.js";
+import { captureWorkspaceSnapshot, decodeWorkspaceManifest } from "./workspace-manifest-worker.js";
 import { workerWorkspaceTransferPaths } from "./workspace-result-staging.js";
 import {
   workerWorkspaceCommandSucceeded as succeeded,
@@ -44,7 +50,7 @@ type RepositoryIdentity = {
   gitToken?: string;
 };
 
-const AUTHENTICATED_GIT_JS = String.raw`const fs = require("node:fs");
+export const AUTHENTICATED_GIT_JS = String.raw`const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
 const { origin, token, disableLazyFetch } = JSON.parse(fs.readFileSync(0, "utf8"));
 const env = { ...process.env };
@@ -60,7 +66,7 @@ Object.assign(env, token ? ${gitMaintenanceEnvironmentExpression([
 const args = process.argv.slice(1);
 // Identity-scoped workspaces can put partial-clone .promisor files at MAX_PATH.
 if (process.platform === "win32") args.unshift("-c", "core.longpaths=true");
-const result = spawnSync("git", args, { env, stdio: ["ignore", "inherit", "inherit"] });
+const result = spawnSync("git", args, { env, timeout: 60000, stdio: ["ignore", "inherit", "inherit"] });
 if (result.error) console.error((result.error.code ? result.error.code + ": " : "") + result.error.message);
 process.exitCode = result.status ?? 1;`;
 
@@ -501,4 +507,101 @@ export async function restoreNodeWorkerRepositoryCheckpoint(params: {
   }
 
   return manifestRef;
+}
+
+export async function prepareNodeWorkerPublicationIntegration(
+  params: {
+    environmentId: string;
+    signal: AbortSignal;
+    workspaceTransfer: NodeWorkspaceTransferService;
+    supportsIntegration?: () => Promise<boolean>;
+    transfer: ReturnType<typeof createNodeWorkspaceTransferCommand>;
+  },
+  input: RepositoryPublicationIntegrationInput,
+) {
+  const { transfer } = params;
+  input.assertCurrent();
+  if (!(await params.supportsIntegration?.())) {
+    throw new StaleWorkerBuildError(
+      "Worker publication integration requires the current runtime; retry the same request after normal runtime refresh.",
+    );
+  }
+  input.assertCurrent();
+  const captured = await captureWorkspaceSnapshot({
+    root: input.snapshotRoot,
+    baseCommit: null,
+    signal: params.signal,
+  });
+  input.assertCurrent();
+  const download = params.workspaceTransfer.publishSnapshot(
+    params.environmentId,
+    { ...captured, root: input.snapshotRoot },
+    input.assertCurrent,
+    false,
+  );
+  let upload: string | undefined;
+  let result: ReturnType<typeof params.workspaceTransfer.takeUpload> | undefined;
+  try {
+    upload = params.workspaceTransfer.prepareUpload(
+      params.environmentId,
+      NODE_WORKSPACE_EMPTY_MANIFEST_REF,
+      input.assertCurrent,
+    );
+    await transfer(
+      {
+        direction: "publication",
+        token: upload,
+        inputToken: download,
+        inputManifestRef: captured.manifestRef,
+        inputDigest: input.snapshotDigest,
+        sourceUrl: input.sourceUrl,
+        targetUrl: input.targetUrl,
+        mainCommit: input.mainCommit,
+        gitToken: input.token,
+      },
+      "Worker could not integrate the saved checkpoint with latest main; inspect worker availability or merge conflicts and retry the same request.",
+      { assertCurrent: input.assertCurrent },
+    );
+    result = params.workspaceTransfer.takeUpload(
+      params.environmentId,
+      NODE_WORKSPACE_EMPTY_MANIFEST_REF,
+    );
+    const metadata = result.current.entries.find((entry) => entry.path === "snapshot.json");
+    if (metadata?.type !== "file") {
+      throw new Error("Publication integration snapshot is missing.");
+    }
+    const { snapshot } = await readGitHubRepositoryPublicationMetadata(
+      result.stagingRoot,
+      `sha256:${metadata.sha256}`,
+    );
+    input.assertCurrent();
+    if (snapshot.baseCommit !== input.mainCommit) {
+      throw new Error("Publication integration base changed.");
+    }
+    const knownBlobs: unknown = JSON.parse(
+      await fsp.readFile(`${result.stagingRoot}/known-blobs.json`, "utf8"),
+    );
+    if (
+      !Array.isArray(knownBlobs) ||
+      !knownBlobs.every((sha) => typeof sha === "string" && /^[a-f0-9]{40}$/u.test(sha))
+    ) {
+      throw new Error("Publication integration object inventory is invalid.");
+    }
+    const retained = result;
+    result = undefined;
+    return {
+      snapshot,
+      knownBlobs,
+      snapshotRoot: retained.stagingRoot,
+      release: () => removeNodeWorkspaceUpload(retained),
+    };
+  } finally {
+    if (result) {
+      await removeNodeWorkspaceUpload(result);
+    }
+    if (upload) {
+      await params.workspaceTransfer.discardUpload(params.environmentId, upload);
+    }
+    await params.workspaceTransfer.revoke(params.environmentId, download);
+  }
 }

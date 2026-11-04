@@ -2,6 +2,7 @@
 // oxfmt-ignore
 import {
   BRANCH,
+  SESSION_ID,
   NEW_HEAD,
   OLD_HEAD,
   WORKSPACE_TREE,
@@ -198,6 +199,15 @@ describe("shared GitHub publication requester authority", () => {
     onTestFinished(current.release);
     expect(current.requester).toBe(captured.requester);
     expect(current.requester.repositoryCredentialSource).toBe(credentialSource);
+    const dispatchReader = current.requester.prepareDispatchCredential?.({
+      sessionId: SESSION_ID,
+      requestDigest: "c".repeat(64),
+      assertCurrent: current.requester.assertCurrent,
+    });
+    expect(dispatchReader?.admit).toBeTypeOf("function");
+    await expect(dispatchReader!.admit!()).rejects.toThrow(
+      "Requester retention must not issue credentials",
+    );
     const restored = await prepareGitHubPublicationExecutionRequester(
       stored,
       f.guestSource.session,
@@ -205,11 +215,13 @@ describe("shared GitHub publication requester authority", () => {
     );
     onTestFinished(restored.release);
     expect(restored.requester.repositoryCredentialSource).toBeUndefined();
+    expect(restored.requester.prepareDispatchCredential).toBeUndefined();
     f.guestSource.client.authenticatedRepositoryCredentialSource = Object.freeze({
       ...credentialSource,
       id: `browser:${"b".repeat(64)}`,
     });
     expect(current.requester.assertCurrent).toThrow(GitHubPublicationRequesterUnavailableError);
+    expect(dispatchReader!.assertCurrent).toThrow(GitHubPublicationRequesterUnavailableError);
   });
 
   it("distinguishes explicit System authority from missing, unclassified, and closed sources", async () => {

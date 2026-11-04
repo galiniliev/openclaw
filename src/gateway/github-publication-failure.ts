@@ -3,6 +3,12 @@ import {
   type GitHubPublicationSelectionRejectedErrorDetails,
 } from "../../packages/gateway-protocol/src/gateway-error-details.js";
 import type { SessionGitHubPublicationResult } from "../../packages/gateway-protocol/src/schema/session-github-publication.js";
+import { createCommandError } from "../process/command-error.js";
+import type { BufferedCommandResult } from "../process/exec.js";
+import {
+  NodeWorkerPublicationConflictError,
+  NodeWorkerWorkspaceTransferError,
+} from "../worker/node-workspace-transfer-protocol.js";
 
 type PublicationFailure = Pick<
   Extract<SessionGitHubPublicationResult, { status: "failed" }>,
@@ -24,6 +30,19 @@ export class GitHubPublicationKnownFailure extends Error {
     readonly rejection?: GitHubPublicationSelectionRejectedErrorDetails,
   ) {
     super(message);
+  }
+}
+
+/** Safe transport facts only; command output and credentials never enter a receipt. */
+export class GitHubPublicationApiError extends Error {
+  constructor(result: BufferedCommandResult, timeoutMs: number) {
+    const reason = createCommandError(
+      "GitHub API command",
+      { ...result, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), error: undefined },
+      { timeoutMs },
+    ).message;
+    const status = /\(HTTP ([1-5]\d{2})\)/u.exec(result.stderr.toString("utf8"))?.[1];
+    super(`${reason}${status ? `; HTTP ${status}` : ""}.`);
   }
 }
 
@@ -152,6 +171,32 @@ export class GitHubPublicationWorkflowChangesError extends GitHubPublicationKnow
  * and only select generic guidance.
  */
 export function resolveGitHubPublicationFailure(error: unknown): PublicationFailure {
+  if (error instanceof NodeWorkerPublicationConflictError) {
+    return {
+      code: "workspace_changed",
+      nextAction: `${error.message} Resolve the conflicts in your saved work before publishing again.`,
+    };
+  }
+  if (error instanceof NodeWorkerWorkspaceTransferError && error.operation === "publication") {
+    // Extract fixed native facts only; transfer diagnostics can also contain private paths or output.
+    const reason =
+      /Publication integration [a-z-]+ failed \((?:exit|error|timeout|signal|no-output-timeout|output-limit); exit (?:null|-?\d+)\)\./u.exec(
+        error.message,
+      )?.[0] ??
+      /\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|HTTP [1-5]\d{2})\b/u.exec(
+        error.message,
+      )?.[0];
+    return {
+      code: "unavailable",
+      nextAction: `${reason ? `${reason} ` : ""}Worker publication transfer failed. Restore worker and repository connectivity, then retry the same request.`,
+    };
+  }
+  if (error instanceof GitHubPublicationApiError) {
+    return {
+      code: "unavailable",
+      nextAction: `${error.message} Retry after the Gateway and GitHub are available.`,
+    };
+  }
   if (error instanceof GitHubPublicationKnownFailure) {
     const reason = /[.!?]$/u.test(error.message) ? error.message : `${error.message}.`;
     return { code: error.failure.code, nextAction: `${reason} ${error.failure.nextAction}` };

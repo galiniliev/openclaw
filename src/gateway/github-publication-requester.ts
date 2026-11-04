@@ -1,4 +1,5 @@
 import { GATEWAY_OWNER_PROFILE_ID } from "../../packages/gateway-protocol/src/schema/users.js";
+import type { GitHubCredentialReader } from "../agents/github-credential-reader.js";
 import { resolveConfiguredGitHubToolIdentity } from "../agents/github-tool-identity.js";
 import {
   getGatewayToolCallerIdentity,
@@ -34,6 +35,7 @@ import {
   resolveOperatorRolePolicyForAssignment,
 } from "./operator-role-policy.js";
 import { captureGatewayOperatorRunAuthority } from "./operator-run-authority.js";
+import { repositoryDispatchCredentialReader } from "./repository-dispatch.js";
 import type { GatewayRequestHandlerOptions } from "./server-methods/types.js";
 import { createSyntheticPluginRuntimeClient } from "./server-plugin-runtime-client.js";
 import { prepareSessionCreatorProfile } from "./session-creator.js";
@@ -88,12 +90,22 @@ export type GitHubPublicationRequester = GitHubPublicationRequesterPolicy &
     assertInvocationCurrent: () => void;
   }>;
 
+type PublicationDispatchSource = {
+  sessionId: string;
+  requestDigest: string;
+  assertCurrent: () => void;
+};
+
 /** Prepared host policy and a required live source capability for worker-owned writes. */
 export type GitHubPublicationRequesterPolicyV2 = GitHubPublicationRequesterPolicy &
   Readonly<{
     version: 2;
     /** Live invocation source; deliberately absent from durable requester snapshots. */
     repositoryCredentialSource?: RepositoryCredentialSource;
+    /** Original invocation admission only; never reconstructed from the durable requester JSON. */
+    prepareDispatchCredential?(
+      input: PublicationDispatchSource,
+    ): GitHubCredentialReader | undefined;
     signal: AbortSignal;
     prepareSource(
       selector: GitHubPublicationSourceSelector,
@@ -357,6 +369,21 @@ export async function prepareGitHubPublicationRequesterV2(
     };
     const requester: GitHubPublicationRequesterV2 = Object.freeze({
       version: 2 as const,
+      prepareDispatchCredential: (input: PublicationDispatchSource) =>
+        repositoryDispatchCredentialReader({
+          client: options.client,
+          operatorAuthority: source?.authority,
+          agentId: session.agentId,
+          sessionKey: session.sessionKey,
+          sessionId: input.sessionId,
+          requestDigest: input.requestDigest,
+          hasCurrentClientAuthority: options.hasCurrentClientAuthority,
+          assertCurrent: () => {
+            requester.assertCurrent();
+            requester.assertInvocationCurrent();
+            input.assertCurrent();
+          },
+        }),
       repositoryCredentialSource: source?.authority.repositoryCredentialSource,
       signal,
       snapshot,

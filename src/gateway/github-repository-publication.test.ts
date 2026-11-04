@@ -1,8 +1,11 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import { afterEach, expect, it, onTestFinished, vi } from "vitest";
 import { createDeferredCore } from "../shared/deferred.js";
 import { preparePersonalGitHubSessionReceiptDeletion } from "../state/github-personal-publication-lifecycle.js";
 import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import { getSessionRepositoryWorkspaceStore } from "../state/session-repository-workspaces.js";
+import { NodeWorkerPublicationConflictError } from "../worker/node-workspace-transfer-protocol.js";
 import {
   createPersonalPublicationFixture,
   personalPublicationAccount,
@@ -11,6 +14,7 @@ import {
 import { createGitHubPublicationRecoveryBackoff } from "./github-publication-recovery.js";
 import { claimRepositoryGitHubPublicationAsync } from "./github-publication-store-async.js";
 import {
+  root,
   SESSION_ID,
   SESSION_KEY,
   commandResult,
@@ -19,6 +23,7 @@ import {
   installGitHubPublicationTestHarness,
 } from "./github-publication.test-support.js";
 import { listRepositoryGitHubPublicationsInDatabase } from "./github-repository-publication-read.worker.js";
+import { readGitHubRepositoryPublicationMetadata } from "./github-repository-publication-snapshot.js";
 import { readRepositoryGitHubPublicationInDatabase } from "./github-repository-publication-store.worker.js";
 import {
   createRepositoryPublicationFixture,
@@ -175,6 +180,254 @@ it("replays only the original personal selection and content without new reposit
   }));
 });
 
+it.each(["request", "confirmation"] as const)(
+  "admits the next turn during personal %s network work",
+  async (phase) => {
+    const { f, person, coordinator, publish } = await sourceFixture("personal");
+    let confirm: Parameters<typeof coordinator.confirmPersonalV2>[0] | undefined;
+    if (phase === "confirmation") {
+      f.runtime.interruptPush = true;
+      const interrupted = await publish("personal-overlap");
+      expect(interrupted.status).toBe("needs_confirmation");
+      confirm = {
+        sessionKey: SESSION_KEY,
+        requestId: interrupted.requestId,
+        requestDigest: readReceipt(interrupted.requestId)!.request_digest,
+        generation: person!.generation,
+        account: personalPublicationAccount,
+      };
+    }
+    const entered = createDeferredCore();
+    const finish = createDeferredCore();
+    let blocked = false;
+    observeRepositoryCommands(async (args) => {
+      if (
+        !blocked &&
+        args.some((arg) =>
+          phase === "request" ? arg.endsWith("/git/blobs") : arg === "repos/owner/repository",
+        )
+      ) {
+        blocked = true;
+        entered.resolve();
+        await finish.promise;
+      }
+    });
+    const pending = confirm
+      ? coordinator.confirmPersonalV2(confirm, person!.action)
+      : publish("personal-overlap");
+    onTestFinished(async () => {
+      finish.resolve();
+      await pending;
+    });
+    await entered.promise;
+    try {
+      const claim = await f.placements.claimTurn({
+        sessionId: SESSION_ID,
+        sessionKey: SESSION_KEY,
+        agentId: "main",
+        claimId: "next-turn",
+        runId: "next-run",
+        owner: { kind: "local" },
+      });
+      await f.placements.releaseTurn(claim);
+      finish.resolve();
+      expect((await pending).status).toBe("published");
+    } finally {
+      finish.resolve();
+      await pending;
+    }
+  },
+);
+
+it("continues the recorded PR destination after the repository default branch changes", async () => {
+  const f = await repositoryFixture();
+  const transport = mocks.runCommand.getMockImplementation()!;
+  mocks.runCommand.mockImplementation(async (args, options) => {
+    const result = await transport(args, options);
+    return args.includes("repos/owner/repository")
+      ? {
+          ...result,
+          stdout: Buffer.from(
+            JSON.stringify({ ...JSON.parse(result.stdout.toString()), default_branch: "topic" }),
+          ),
+        }
+      : result;
+  });
+  expect((await f.publish("first-topic-pr")).status).toBe("published");
+  expect(f.runtime.pr?.baseRef).toBe("topic");
+  mocks.runCommand.mockImplementation(transport);
+  await f.capture("continued repair\n", "continued");
+  const continued = await f.publish("continue-topic-pr");
+  expect(continued.status).toBe("published");
+  expect(readReceipt(continued.requestId)?.base_branch).toBe("topic");
+  expect(f.runtime.pr?.baseRef).toBe("topic");
+  expect(f.runtime.effects).toEqual(["push", "pull_request", "push"]);
+});
+
+it("retains a typed worker merge conflict in the publication receipt without GitHub effects", async () => {
+  const f = await repositoryFixture();
+  const identity = await mocks.prepareIdentity();
+  mocks.prepareIdentity.mockResolvedValue({
+    ...identity,
+    env: { ...identity.env, GH_TOKEN: "synthetic-integration-token" },
+  });
+  const coordinator = createTestGitHubPublicationCoordinator({
+    placements: f.placements,
+    prepareRepositoryIntegration: async () => {
+      throw new NodeWorkerPublicationConflictError();
+    },
+  });
+  const result = await coordinator.requestForSessionV2({
+    agentId: "main",
+    sessionKey: SESSION_KEY,
+    idempotencyKey: "conflicting-integration",
+  });
+  expect(result).toMatchObject({
+    status: "failed",
+    code: "workspace_changed",
+    nextAction: expect.stringContaining("merge conflicts"),
+  });
+  expect(readReceipt(result.requestId)).toMatchObject({
+    workspace_tree: f.first.workspaceTree,
+    last_effect: null,
+  });
+  expect(f.runtime.effects).toEqual([]);
+});
+
+it("publishes a merged latest-main head once and reuses remote blobs after an interrupted push", async () => {
+  const f = await repositoryFixture();
+  const original = await f.capture("saved repair\n", "integration", {
+    "known.txt": "upstream known\n",
+  });
+  const known = f.git(["hash-object", "-w", "--stdin"], "upstream known\n");
+  f.git(["read-tree", f.baseTree]);
+  f.git(["update-index", "--add", "--cacheinfo", "100644", known, "known.txt"]);
+  const upstreamOnly = f.git(["hash-object", "-w", "--stdin"], "new upstream file\n");
+  f.git(["update-index", "--add", "--cacheinfo", "100644", upstreamOnly, "main.txt"]);
+  f.runtime.baseHeadTree = f.git(["write-tree"]);
+  f.runtime.baseHead = f.git(
+    ["commit-tree", f.runtime.baseHeadTree, "-p", f.baseCommit],
+    "latest main\n",
+  );
+  const identity = await mocks.prepareIdentity();
+  mocks.prepareIdentity.mockResolvedValue({
+    ...identity,
+    env: { ...identity.env, GH_TOKEN: "synthetic-integration-token" },
+  });
+  const coordinator = createTestGitHubPublicationCoordinator({
+    placements: f.placements,
+    prepareRepositoryIntegration: async (_identity, input) => {
+      expect(input.mainCommit).toBe(f.runtime.baseHead);
+      const { snapshot } = await readGitHubRepositoryPublicationMetadata(
+        input.snapshotRoot,
+        input.snapshotDigest,
+      );
+      expect(snapshot.workspaceTree).toBe(original.workspaceTree);
+      f.git(["read-tree", f.runtime.baseHeadTree]);
+      const repair = snapshot.entries.find((entry) => entry.path === "counter.txt")!;
+      f.git(["update-index", "--add", "--cacheinfo", "100644", repair.sha!, repair.path]);
+      const mergedTree = f.git(["write-tree"]);
+      const output = await fs.mkdtemp(path.join(root, "integrated-"));
+      await fs.cp(input.snapshotRoot, output, { recursive: true });
+      return {
+        snapshotRoot: output,
+        knownBlobs: [known],
+        release: async () => {},
+        snapshot: {
+          ...snapshot,
+          workspaceTree: mergedTree,
+          baseCommit: f.runtime.baseHead,
+          baseTree: f.runtime.baseHeadTree,
+          entries: snapshot.entries.filter((entry) => entry.path === "counter.txt"),
+        },
+      };
+    },
+  });
+  f.runtime.interruptPush = true;
+  const result = await coordinator.requestForSessionV2({
+    agentId: "main",
+    sessionKey: SESSION_KEY,
+    idempotencyKey: "merged-publication",
+  });
+  expect(result).toMatchObject({ status: "requested" });
+  await coordinator.resumeSessionRequests();
+  expect(await coordinator.readAsync(result.requestId)).toMatchObject({
+    status: "published",
+    requestId: result.requestId,
+  });
+  expect(f.runtime.effects).toEqual(["push", "pull_request"]);
+  expect(f.runtime.uploaded.has(known)).toBe(false);
+  expect(f.runtime.uploaded.size).toBe(1);
+  expect(f.git(["merge-base", f.runtime.baseHead, f.runtime.head!])).toBe(f.runtime.baseHead);
+  expect(f.git(["show", `${f.runtime.head}:counter.txt`])).toBe("saved repair");
+  expect(f.git(["show", `${f.runtime.head}:known.txt`])).toBe("upstream known");
+  expect(f.git(["show", `${f.runtime.head}:main.txt`])).toBe("new upstream file");
+  expect(readReceipt(result.requestId)?.workspace_tree).toBe(original.workspaceTree);
+});
+
+it("retries a pre-effect unavailable receipt with the same request and accepted checkpoint", async () => {
+  const f = await repositoryFixture();
+  const transport = mocks.runCommand.getMockImplementation()!;
+  mocks.runCommand.mockImplementation(async (args, options) =>
+    args.some((arg: string) => arg.endsWith("/git/blobs"))
+      ? { ...commandResult(), code: null, termination: "timeout" }
+      : transport(args, options),
+  );
+  const failed = await f.publish("retry-blobs");
+  expect(failed).toMatchObject({ status: "failed", code: "unavailable" });
+  const original = readReceipt(failed.requestId)!;
+  await f.coordinator.resumeSessionRequests();
+  expect(readReceipt(failed.requestId)?.status).toBe("failed");
+  await f.capture("later workspace change\n", "later");
+  mocks.runCommand.mockImplementation(transport);
+  const retried = await f.publish("retry-blobs");
+  expect(retried).toMatchObject({ status: "published", requestId: failed.requestId });
+  expect(readReceipt(failed.requestId)).toMatchObject({
+    request_digest: original.request_digest,
+    checkpoint_ref: original.checkpoint_ref,
+    workspace_tree: original.workspace_tree,
+  });
+  expect(f.runtime.effects).toEqual(["push", "pull_request"]);
+  expect(listReceipts()).toHaveLength(1);
+});
+
+it.each([
+  {
+    termination: "timeout",
+    code: null,
+    stderr: "private response",
+    diagnostic: "timed out after 60 seconds",
+  },
+  {
+    termination: "exit",
+    code: 1,
+    stderr: "gh: private response (HTTP 429)",
+    diagnostic: "HTTP 429",
+  },
+])(
+  "retains safe API failure diagnostics for $termination",
+  async ({ termination, code, stderr, diagnostic }) => {
+    const f = await repositoryFixture();
+    const transport = mocks.runCommand.getMockImplementation()!;
+    mocks.runCommand.mockImplementation(async (args, options) =>
+      args.some((arg: string) => arg.endsWith("/git/blobs"))
+        ? { ...commandResult("private output"), code, termination, stderr: Buffer.from(stderr) }
+        : transport(args, options),
+    );
+    const result = await f.publish("blob-failure");
+    expect(result).toMatchObject({
+      status: "failed",
+      code: "unavailable",
+      nextAction: expect.stringContaining(diagnostic),
+    });
+    const receipt = readReceipt(result.requestId)!;
+    expect(receipt.next_action).toContain(diagnostic);
+    expect(receipt.next_action).not.toContain("private");
+    expect(receipt.last_effect).toBeNull();
+    expect(f.runtime.effects).toEqual([]);
+  },
+);
+
 it.each(["shared", "personal"] as const)(
   "records unavailable %s publication without losing its accepted recovery checkpoint",
   async (source) => {
@@ -230,7 +483,7 @@ it.each(["topic", "refs/tags/release", { kind: "commit" }] as const)(
     f.runtime.mergeBaseTree = "c".repeat(40);
     const result = await f.publish("related-ref");
     expect(result.status).toBe("published");
-    expect(f.runtime.pr?.baseRef).toBe(ref === "topic" ? "topic" : "main");
+    expect(f.runtime.pr?.baseRef).toBe("main");
     expect(f.runtime.uploaded.size).toBe(0);
     expect(readReceipt(result.requestId)?.workspace_tree).toBe(f.baseTree);
     expect(f.casRequests[0]).toMatchObject({ beforeOid: "0".repeat(40), force: false });

@@ -81,6 +81,7 @@ export type PersonalPublicationMutation =
   | Mutation<PersonalPublicationRow>
   | { operation: "restart"; instanceId: string };
 export type RepositoryPublicationMutation =
+  | ({ operation: "retryUnavailable" } & Execution<RepositoryPublicationRow>)
   | Mutation<RepositoryPublicationRow>
   | {
       operation: "checkpoint";

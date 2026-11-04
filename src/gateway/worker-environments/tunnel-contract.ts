@@ -261,6 +261,11 @@ export type WorkerWorkspaceTunnelHandle = {
   launchTurn?: never;
   measureLaunchTurn?: never;
   readLaunchToolNames?: never;
+  integratePublication?(
+    input: import("../repository-publication-checkpoint.js").RepositoryPublicationIntegrationInput,
+  ): Promise<
+    import("../repository-publication-checkpoint.js").RepositoryPublicationIntegrationResult
+  >;
   runWorkspaceCommand(command: WorkerWorkspaceCommand): Promise<SpawnResult>;
   stageAttachments?(request: {
     localPath: string;

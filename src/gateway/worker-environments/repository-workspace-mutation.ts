@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { toErrorObject } from "@openclaw/normalization-core/error-coercion";
+import type { GitHubCredentialReader } from "../../agents/github-credential-reader.js";
 import { retainPreparedSessionSharingFacts } from "../../config/sessions/session-accessor.sqlite-entry-cache-publication-state.js";
 import { projectSessionSharingEntry } from "../../config/sessions/session-accessor.sqlite-entry-cache.types.js";
 import { captureSessionEntryCurrentRead } from "../../config/sessions/session-entry-current-runtime.js";
@@ -7,8 +8,18 @@ import type { SessionEntryCurrentFacts } from "../../config/sessions/session-ent
 import { withSessionEntryReadOnlyInWorker } from "../../config/sessions/session-entry-read-runtime.js";
 import { captureSessionEntryMetadataRead } from "../../config/sessions/session-entry-source-authority.js";
 import { resolveSessionStorePathForScope } from "../../config/sessions/session-store-path.js";
+import { sleepWithAbort } from "../../infra/backoff.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { getGatewayRestartDrainSignal } from "../../process/gateway-work-admission.js";
+import { runInDetachedAsyncContext } from "../../shared/detached-async-context.js";
 import { registerOpenClawAgentDatabaseAsyncResource } from "../../state/openclaw-agent-db-resources.js";
 import { getSessionRepositoryWorkspaceStore } from "../../state/session-repository-workspaces.js";
+import { GitHubPublicationRecoveryPendingError } from "../github-publication-git-index.js";
+import { StaleWorkerBuildError } from "./admission.js";
+import {
+  AUTHENTICATED_GIT_JS,
+  WORKER_REPOSITORY_GIT_ARGS,
+} from "./node-worker-repository-preparation.js";
 import {
   placementTurnOwner,
   type WorkerSessionPlacementIdentity,
@@ -17,6 +28,8 @@ import {
 import type { WorkerSessionPlacementStore } from "./placement-store.js";
 import { isCurrentActiveWorkerEnvironment } from "./placement-target.js";
 import type { PlacementTurnClaimCurrentCheck } from "./placement-turn-claims.types.js";
+import { WorkerRuntimeRefreshPendingError } from "./provider-runtime-refresh.js";
+import { prepareRepositoryGitHubIdentity } from "./repository-github-identity.js";
 import {
   assertRetainedWorkspaceDisk,
   prepareRetainedWorkspaceTransfer,
@@ -41,9 +54,199 @@ export function createRepositoryWorkspaceMutationService(options: {
     Partial<Pick<WorkerEnvironmentService, "inspectTurnLease">>;
   workspaceOperations: WorkerWorkspaceOperationCoordinator;
   resolveWorkspace: (identity: WorkerSessionPlacementIdentity) => Promise<WorkerSessionWorkspace>;
+  refreshPublicationRuntime?: (
+    placement: Extract<WorkerSessionPlacementRecord, { state: "active" }>,
+    assertCurrent: () => void,
+  ) => Promise<void>;
+  preparePublicationWorker?: (
+    identity: WorkerSessionPlacementIdentity,
+    input: import("../repository-publication-checkpoint.js").RepositoryPublicationIntegrationInput,
+  ) => Promise<Extract<WorkerSessionPlacementRecord, { state: "active" }>>;
 }) {
   const { placements, environments } = options;
+  const refreshRepositoryRefs = async (
+    identity: WorkerSessionPlacementIdentity,
+    readNativeCredential?: GitHubCredentialReader,
+  ): Promise<void> => {
+    const workspace = await options.resolveWorkspace(identity);
+    if (workspace.kind !== "repository") {
+      return;
+    }
+    const placement = await placements.getAsync(identity.sessionId);
+    if (placement?.state !== "active") {
+      return;
+    }
+    const assertCurrent = () => {
+      getGatewayRestartDrainSignal().throwIfAborted();
+      const current = placements.get(identity.sessionId);
+      if (
+        current?.state !== "active" ||
+        current.generation !== placement.generation ||
+        current.environmentId !== placement.environmentId ||
+        current.activeOwnerEpoch !== placement.activeOwnerEpoch ||
+        current.sessionKey !== identity.sessionKey ||
+        current.agentId !== identity.agentId
+      ) {
+        throw new Error("Repository ref refresh placement changed.");
+      }
+    };
+    const cleanup: Array<() => Promise<void>> = [];
+    const processId = `repository-main-fetch-${placement.generation}`;
+    let tunnel: Awaited<ReturnType<typeof environments.startTunnel>> | undefined;
+    try {
+      const github = await prepareRepositoryGitHubIdentity(identity.agentId, assertCurrent, {
+        repositoryUrl: workspace.repository.url,
+        readNativeCredential,
+        retainCredentialCleanup: (revoke) => cleanup.push(revoke),
+      });
+      assertCurrent();
+      tunnel = await environments.startTunnel({
+        environmentId: placement.environmentId,
+        ownerEpoch: placement.activeOwnerEpoch,
+      });
+      assertCurrent();
+      const ownedTunnel = tunnel;
+      await github.start(async () => {
+        let result = await ownedTunnel.runWorkspaceCommand({
+          argv: [
+            "node",
+            "-e",
+            AUTHENTICATED_GIT_JS,
+            "--",
+            ...WORKER_REPOSITORY_GIT_ARGS,
+            "fetch",
+            "--no-tags",
+            "--no-auto-maintenance",
+            "--no-write-fetch-head",
+            "--no-recurse-submodules",
+            "--",
+            workspace.repository.url,
+            "+refs/heads/main:refs/remotes/origin/main",
+          ],
+          input: JSON.stringify({
+            origin: workspace.repository.url,
+            token: github.token,
+            disableLazyFetch: true,
+          }),
+          process: { action: "start", processId },
+          transportRetry: "never",
+          assertCurrent,
+        });
+        while (result.code === null && result.signal === null && !result.killed) {
+          await sleepWithAbort(250, getGatewayRestartDrainSignal());
+          assertCurrent();
+          result = await ownedTunnel.runWorkspaceCommand({
+            argv: ["openclaw-internal-workspace-process"],
+            process: { action: "status", processId },
+            transportRetry: "never",
+            assertCurrent,
+          });
+        }
+        if (result.code !== 0) {
+          throw new Error(
+            "Background repository main fetch failed; publication will refresh its base independently.",
+          );
+        }
+      });
+    } finally {
+      // Stop is cleanup of this admitted process, never permission to start another Git action.
+      await tunnel
+        ?.runWorkspaceCommand({
+          argv: ["openclaw-internal-workspace-process"],
+          process: { action: "stop", processId },
+          transportRetry: "never",
+        })
+        .catch(() => undefined);
+      for (const revoke of cleanup) {
+        await revoke();
+      }
+    }
+  };
   return {
+    refreshRepositoryRefs(
+      request: WorkerSessionPlacementIdentity & { readNativeCredential?: GitHubCredentialReader },
+    ): void {
+      runInDetachedAsyncContext(() => {
+        void refreshRepositoryRefs(request, request.readNativeCredential).catch(() => {
+          createSubsystemLogger("gateway/worker-workspace").warn(
+            "Background repository main refresh was unavailable; session startup continues and publication will refresh its base.",
+          );
+        });
+      });
+    },
+    async integratePublication(
+      identity: WorkerSessionPlacementIdentity,
+      input: import("../repository-publication-checkpoint.js").RepositoryPublicationIntegrationInput,
+    ) {
+      let placement = await placements.getAsync(identity.sessionId);
+      input.assertCurrent();
+      if (placement?.state !== "active" && options.preparePublicationWorker) {
+        placement = await options.preparePublicationWorker(identity, input);
+        input.assertCurrent();
+      }
+      if (placement?.state !== "active") {
+        throw new Error(
+          "Publication worker preparation is unavailable; retry the same request after worker recovery.",
+        );
+      }
+      const assertCurrent = () => {
+        input.assertCurrent();
+        const current = placements.get(identity.sessionId);
+        if (
+          current?.state !== "active" ||
+          current.generation !== placement.generation ||
+          current.environmentId !== placement.environmentId ||
+          current.activeOwnerEpoch !== placement.activeOwnerEpoch ||
+          current.sessionKey !== identity.sessionKey ||
+          current.agentId !== identity.agentId
+        ) {
+          throw new Error("Publication integration lost its worker placement.");
+        }
+      };
+      const integrate = async () => {
+        const tunnel = await environments.startTunnel({
+          environmentId: placement.environmentId,
+          ownerEpoch: placement.activeOwnerEpoch,
+          authorize: assertCurrent,
+        });
+        assertCurrent();
+        if (!tunnel.integratePublication) {
+          throw new StaleWorkerBuildError(
+            "Worker publication integration requires its current runtime.",
+          );
+        }
+        return await tunnel.integratePublication({ ...input, assertCurrent });
+      };
+      try {
+        return await integrate();
+      } catch (error) {
+        if (
+          !(
+            error instanceof StaleWorkerBuildError ||
+            error instanceof WorkerRuntimeRefreshPendingError
+          ) ||
+          !options.refreshPublicationRuntime
+        ) {
+          throw error;
+        }
+        await options.refreshPublicationRuntime(placement, assertCurrent);
+        assertCurrent();
+        try {
+          return await integrate();
+        } catch (refreshError) {
+          if (
+            refreshError instanceof StaleWorkerBuildError ||
+            refreshError instanceof WorkerRuntimeRefreshPendingError
+          ) {
+            throw new GitHubPublicationRecoveryPendingError(
+              "Publication is waiting for the normal worker runtime upgrade. Retry the same request after worker recovery; its accepted checkpoint is retained.",
+              { cause: refreshError },
+            );
+          }
+          throw refreshError;
+        }
+      }
+    },
     async captureCheckpoint(
       identity: WorkerSessionPlacementIdentity,
       assertCallerCurrent: () => void,

@@ -1,7 +1,15 @@
 import fsp from "node:fs/promises";
+import { createServer } from "node:http";
 import path from "node:path";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, onTestFinished, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+import {
+  AUTHENTICATED_GIT_JS,
+  WORKER_REPOSITORY_GIT_ARGS,
+} from "../gateway/worker-environments/node-worker-repository-preparation.js";
+import { createDeferredCore } from "../shared/deferred.js";
+import { reserveTestPortListener } from "../test-utils/port-claims.js";
+import * as transferClient from "./node-worker-transfer-client.js";
 import { NodeWorkerWorkspaceRuntime } from "./node-worker-workspace.js";
 
 const identity = { gatewayNamespace: "gw", environmentId: "env", sessionId: "s1", generation: 1 };
@@ -126,4 +134,110 @@ it("serializes competing stores of the same repository across sessions", async (
   const results = await Promise.all([seed("store"), seed("store", "session-2")]);
   expect(results.map((result) => result.stdout).toSorted()).toEqual(["fresh\n", "stored\n"]);
   expect(await fsp.readdir(seeds)).toEqual([key]);
+});
+
+it("runs the next workspace command while detached publication transfer waits on network", async () => {
+  const entered = createDeferredCore();
+  const finish = createDeferredCore<string>();
+  const transfer = vi
+    .spyOn(transferClient, "runNodeWorkerWorkspaceTransfer")
+    .mockImplementation(async () => {
+      entered.resolve();
+      return await finish.promise;
+    });
+  const pending = runtime.exec(
+    {
+      ...identity,
+      argv: ["openclaw-internal-workspace-transfer"],
+      transfer: {
+        direction: "publication",
+        token: "synthetic-upload",
+        inputToken: "synthetic-download",
+        inputManifestRef: `sha256:${"a".repeat(64)}`,
+        inputDigest: `sha256:${"b".repeat(64)}`,
+        mainCommit: "c".repeat(40),
+        sourceUrl: "https://github.com/example/repo.git",
+        targetUrl: "https://github.com/example/repo.git",
+        gitToken: "synthetic-token",
+      },
+    },
+    undefined,
+    { url: "https://gateway.example.test" },
+  );
+  onTestFinished(async () => {
+    finish.resolve("completed");
+    await pending;
+    transfer.mockRestore();
+  });
+  await entered.promise;
+  expect((await exec(["node", "-e", 'console.log("turn proceeds")'])).stdout.trim()).toBe(
+    "turn proceeds",
+  );
+  finish.resolve("completed");
+  expect((await pending).stdout.trim()).toBe("completed");
+});
+
+it("continues commands while a background main fetch is blocked and then fails", async () => {
+  const entered = createDeferredCore();
+  const respond = createDeferredCore();
+  const server = await reserveTestPortListener({
+    offsets: [0],
+    createListener: () =>
+      createServer((_request, response) => {
+        entered.resolve();
+        void respond.promise.then(() => {
+          response.writeHead(503);
+          response.end();
+        });
+      }),
+  });
+  const processId = "background-main-fetch";
+  onTestFinished(async () => {
+    respond.resolve();
+    await runtime.exec({
+      ...identity,
+      argv: ["openclaw-internal-workspace-process"],
+      process: { action: "stop", processId },
+    });
+    await server.releaseListener();
+    await server.claim.release();
+  });
+  await exec(["git", "init", "--quiet"]);
+  await write("tracked.txt", "editing work");
+  await exec(["git", "add", "tracked.txt"]);
+  const index = await fsp.readFile(path.join(workspace, ".git", "index"));
+  const origin = `http://127.0.0.1:${server.claim.port}/repository.git`;
+  await runtime.exec({
+    ...identity,
+    argv: [
+      "node",
+      "-e",
+      AUTHENTICATED_GIT_JS,
+      "--",
+      ...WORKER_REPOSITORY_GIT_ARGS,
+      "fetch",
+      "--no-tags",
+      "--no-auto-maintenance",
+      "--no-write-fetch-head",
+      "--",
+      origin,
+      "+refs/heads/main:refs/remotes/origin/main",
+    ],
+    input: JSON.stringify({ origin, disableLazyFetch: true }),
+    process: { action: "start", processId },
+  });
+  await entered.promise;
+  expect((await exec(["node", "-e", 'console.log("next turn")'])).stdout.trim()).toBe("next turn");
+  respond.resolve();
+  await vi.waitFor(async () => {
+    const result = await runtime.exec({
+      ...identity,
+      argv: ["openclaw-internal-workspace-process"],
+      process: { action: "status", processId },
+    });
+    expect(result.process?.state).toBe("exited");
+    expect(result.code).not.toBe(0);
+  });
+  expect(await read()).toBe("editing work");
+  expect(await fsp.readFile(path.join(workspace, ".git", "index"))).toEqual(index);
 });
