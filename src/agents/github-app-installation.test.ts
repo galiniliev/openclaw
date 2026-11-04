@@ -22,7 +22,7 @@ import { NodeWorkerWorkspaceRuntime } from "../node-host/node-worker-workspace.j
 import { runCommandWithTimeout } from "../process/exec.js";
 import { prepareAppGitHubIdentity } from "./github-app-identity.js";
 import type { GitHubAppSelection } from "./github-credential-reader.js";
-import { GitHubIdentityError } from "./github-read-identity.js";
+import { GitHubIdentityError, readNativeGitHubToken } from "./github-read-identity.js";
 import {
   resolveGitHubToolIdentityStatus,
   prepareGitHubPublicationIdentity,
@@ -146,6 +146,17 @@ it("settles invalid-token revocation and retires token reads", async () => {
   fetcher.mockResolvedValueOnce(new Response(null, { status: 401 }));
   await expect(issued.revoke()).resolves.toBeUndefined();
   await expect(issued.readToken()).rejects.toThrow("changed");
+});
+it("extracts its publication App token for worker integration on the selected Enterprise host", async () => {
+  const identity = await prepareGitHubPublicationIdentity({ config, agentId: "main" });
+  try {
+    await expect(readNativeGitHubToken(identity.env, true, identity.host)).resolves.toBe(
+      "synthetic-installation",
+    );
+  } finally {
+    await identity.revoke?.();
+  }
+  expect(fetcher.mock.calls.at(-1)?.[1].method).toBe("DELETE");
 });
 it("reports the selected App contract without minting an execution token during status", async () => {
   expect(

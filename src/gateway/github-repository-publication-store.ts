@@ -34,7 +34,7 @@ export function retryableRepositoryGitHubPublication(
     row.owner_profile_id === null &&
     row.status === "failed" &&
     (row.error_code === "unavailable" ||
-      (row.error_code === "push_rejected" &&
+      ((row.error_code === "push_rejected" || row.error_code === "identity_unavailable") &&
         managedInput !== undefined &&
         matchesRepositoryGitHubPublicationInput(row, managedInput))) &&
     row.checkpoint_ref !== null &&

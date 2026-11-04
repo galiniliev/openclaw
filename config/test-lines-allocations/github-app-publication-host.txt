@@ -1,0 +1,2 @@
+# Enterprise App publication token extraction and same-key pre-effect identity recovery through the existing canonical managed input, preserving trust, revocation, and immutable request proof.
+26

@@ -1,5 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
+import { GitHubIdentityError } from "../agents/github-read-identity.js";
 import { closeOpenClawAgentDatabasesAsync } from "../state/openclaw-agent-db.js";
 import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import { ensureCanonicalUserProfileForEmail } from "../state/user-profile-writes.js";
@@ -247,7 +248,7 @@ async function laterManagedPublicationFixture(mismatch?: "tree" | "requester") {
   return { f, original, failed, later, saved: readRepositoryGitHubPublication(failed.requestId)! };
 }
 
-it("retries the original rejected request onto latest main through its later owned PR", async () => {
+it("retries the original rejected request after a pre-effect identity failure through its later owned PR", async () => {
   const { f, original, failed, later, saved } = await laterManagedPublicationFixture();
   const managedHead = f.runtime.head!;
   const description = f.runtime.pr!.body;
@@ -264,9 +265,13 @@ it("retries the original rejected request onto latest main through its later own
     ...identity,
     env: { ...identity.env, GH_TOKEN: "synthetic-integration-token" },
   });
+  let credentialReady = false;
   const coordinator = createTestGitHubPublicationCoordinator({
     placements: f.placements,
     prepareRepositoryIntegration: async (_identity, input) => {
+      if (!credentialReady) {
+        throw new GitHubIdentityError("unverified");
+      }
       expect(input.mainCommit).toBe(f.runtime.baseHead);
       const { snapshot } = await readGitHubRepositoryPublicationMetadata(
         input.snapshotRoot,
@@ -289,6 +294,16 @@ it("retries the original rejected request onto latest main through its later own
     },
   });
   f.runtime.uploaded.clear();
+  expect(
+    await coordinator.requestForSessionV2({
+      agentId: "main",
+      sessionKey: SESSION_KEY,
+      idempotencyKey: "older-managed-request",
+      ...original,
+    }),
+  ).toMatchObject({ requestId: failed.requestId, status: "failed", code: "identity_unavailable" });
+  expect(f.runtime.effects).toEqual(["push", "pull_request"]);
+  credentialReady = true;
   f.runtime.interruptPush = true;
   const result = await coordinator.requestForSessionV2({
     agentId: "main",
