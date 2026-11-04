@@ -119,6 +119,13 @@ describe("prepared worker intent admission", () => {
     );
   });
 
+  it("keeps the selected runtime-only profile setup opt-out in the admitted preparation", async () => {
+    const f = await fixture(true);
+    support.getDevelopmentProfile().runSetupScript = false;
+    const intent = await f.prepare({ runSetupScript: true, setupAuthorized: true });
+    expect(intent.profileSnapshot.project?.preparation).toMatchObject({ runSetupScript: false });
+  });
+
   it("requires setup authority for reserves while preserving explicit session setup admission", async () => {
     const f = await fixture(true);
     const ordinary = await f.prepare();

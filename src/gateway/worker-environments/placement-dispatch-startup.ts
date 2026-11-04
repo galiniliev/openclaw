@@ -473,7 +473,10 @@ export function createWorkerPlacementDispatchStartup(options: {
           : params.workspace.kind === "repository"
             ? await syncSessionRepositoryWorkspace({
                 markPhase: params.markPhase,
-                repository: params.workspace.repository,
+                repository:
+                  params.environment.profileSnapshot.runSetupScript === false
+                    ? { ...params.workspace.repository, runSetupScript: false }
+                    : params.workspace.repository,
                 retainedDisk: (workspaceDir) =>
                   retainedRepositoryDisk(requireAttachedEnvironment(), request, workspaceDir),
                 preparedRepository,
@@ -512,7 +515,11 @@ export function createWorkerPlacementDispatchStartup(options: {
       }
       assertWorkspaceCurrent();
       const runProjectLifecycleCommand = environments.runProjectLifecycleCommand;
-      if (preparation?.recipe && preparation.runSetupScript !== false) {
+      if (
+        params.environment.profileSnapshot.runSetupScript !== false &&
+        preparation?.recipe &&
+        preparation.runSetupScript !== false
+      ) {
         params.markPhase?.("lifecycleCommands");
         await runWorkerProjectLifecycle({
           recipe: preparation.recipe,

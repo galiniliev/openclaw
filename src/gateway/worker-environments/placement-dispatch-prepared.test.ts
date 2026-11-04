@@ -86,6 +86,7 @@ async function preparedHarness(
     repository?: SessionRepositoryWorkspaceRecord & { baseCommit: string };
     recipe?: EnvironmentRecipe;
     lifecycleFailure?: boolean;
+    runSetupScript?: false;
     boundWorkspace?: Pick<
       NodeWorkerPreparedWorkspaceResult,
       "workspaceDir" | "sourceManifestRef" | "preparedManifestRef"
@@ -146,7 +147,8 @@ async function preparedHarness(
         },
       }
     : { key: "d".repeat(64), baseCommit: "e".repeat(40), root: "/gateway/workspace" };
-  const profile = { settings: { region: "test" }, executionMode };
+  const { runSetupScript = true } = options;
+  const profile = { settings: { region: "test" }, executionMode, runSetupScript };
   const intent: WorkerProviderPreparedIntent = {
     providerId: "fake",
     profileSnapshot: options.emptyWorkspace
@@ -823,6 +825,7 @@ describe("prepared worker dispatch", () => {
   });
   it.each([
     ["allowed", true],
+    ["profile optout", true],
     ["allowed", false],
     ["forbidden", false],
     ["revoked-after-checkpoint", false],
@@ -886,6 +889,7 @@ describe("prepared worker dispatch", () => {
       };
       const { harness, store, ready, request } = await preparedHarness({
         repository: { ...accepted, baseCommit },
+        ...(scenario === "profile optout" ? { runSetupScript: false } : {}),
         boundWorkspace,
         ...(runSetupScript ? { recipe: lifecycleRecipe } : {}),
       });
@@ -985,7 +989,7 @@ describe("prepared worker dispatch", () => {
         return tunnel;
       });
       const dispatch = harness.service.dispatch({ ...request, runSetupScript });
-      if (scenario !== "allowed") {
+      if (scenario !== "allowed" && scenario !== "profile optout") {
         await expect(dispatch).rejects.toThrow("repository policy revoked");
         expect(effects).toBe(0);
         expect(prepareRepositoryGitHubIdentity).not.toHaveBeenCalled();
@@ -1016,7 +1020,9 @@ describe("prepared worker dispatch", () => {
       expect(store.get(ready.environmentId)?.preparation?.consumedAtMs).toBe(1_000);
       expectBefore(harness.log, "workspace:bind-prepared", "sync");
       expect(await repositoryStore.get(accepted.workspaceId)).toEqual(accepted);
-      if (runSetupScript) {
+      if (scenario === "profile optout") {
+        expect(harness.log.some((phase) => phase.startsWith("lifecycle:"))).toBe(false);
+      } else if (runSetupScript) {
         expectBefore(harness.log, "sync", "lifecycle:post-create");
         expectBefore(harness.log, "lifecycle:post-start", "placement:starting");
       }

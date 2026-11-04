@@ -298,6 +298,49 @@ it.each(["", "https://example.test/project.git"])(
     });
   },
 );
+it.each(["repository", "worktree"] as const)(
+  "qualifies the configured Enterprise host for %s custody without credentials",
+  async (source) => {
+    await fixture(async (f) => {
+      const origin = "https://microsoft.ghe.com/bic/lobster.git";
+      if (source === "repository") {
+        const workspace = await getSessionRepositoryWorkspaceStore().create({
+          agentId: "main",
+          sessionKey,
+          url: origin,
+          assertCurrent() {},
+        });
+        await upsertSessionEntryCore(
+          { agentId: "main", sessionKey },
+          { repositoryWorkspaceId: workspace.workspaceId },
+        );
+      } else {
+        await bind(origin);
+      }
+      const config = f.context.getRuntimeConfig();
+      const reads = vi.spyOn(managedWorktrees, "resolveRepositoryIdentity");
+      for (const [host, kind] of [
+        [undefined, "unsupported"],
+        ["microsoft.ghe.com", "supported"],
+        ["foreign.example", "unsupported"],
+        ["microsoft.ghe.com", "supported"],
+      ] as const) {
+        setRuntimeConfigSnapshot({
+          ...config,
+          gateway: {
+            ...config.gateway,
+            github: { host, apiBaseUrl: "https://api.microsoft.ghe.com" },
+          },
+        });
+        expect(await observe(f)).toMatchObject({
+          custody: { kind: "qualified", source },
+          target: { kind },
+        });
+      }
+      expect(reads).toHaveBeenCalledTimes(source === "worktree" ? 3 : 0);
+    });
+  },
+);
 it("reads current pending rows without a second request or settlement", async () => {
   await fixture(async (f) => {
     const worktree = await bind();

@@ -299,7 +299,10 @@ export async function prepareCodexAttemptConnection({ params, options }: CodexRu
     params.runtimePlan?.auth.forwardedAuthProfileId ??
     params.authProfileId ??
     startupBinding?.authProfileId;
-  if (workerHostedCloud && (usesSupervisionConnection || selectedAuthProfileId)) {
+  if (
+    workerHostedCloud &&
+    (usesSupervisionConnection || selectedAuthProfileId || params.resolvedApiKey)
+  ) {
     throw new Error(
       "Worker-hosted Codex requires worker-owned authentication; detach native supervision and clear the selected Gateway auth profile before retrying.",
     );
@@ -364,9 +367,10 @@ export async function prepareCodexAttemptConnection({ params, options }: CodexRu
             agentDir,
             config: params.config,
           });
-  // Native-command selection still uses its handoff owner, including remote-exec refusal.
+  // The authorized worker duplex owns its native command credential too. Never
+  // route that account through the Gateway's prepared-auth/login bridge.
   const authHandoff =
-    usesSupervisionConnection || (workerHostedCloud && !nativeCommandAuth)
+    usesSupervisionConnection || workerHostedCloud
       ? { authProfileId: undefined, nativeAuthProfile: true, preparedAuth: undefined }
       : await resolveCodexAppServerPreparedAuthHandoff({
           authRequirement: startupAuthRequirement,

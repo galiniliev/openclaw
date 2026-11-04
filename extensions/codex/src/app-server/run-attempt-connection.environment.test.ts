@@ -203,7 +203,7 @@ describe("Codex local tool environment placement", () => {
   );
 });
 
-it.each(["api-key", "subscription"] as const)(
+it.each(["api-key", "subscription", "native-command"] as const)(
   "keeps worker %s route constraints through actual startup without GitHub credentials or local login",
   async (authRequirement) => {
     provisionWorker();
@@ -224,22 +224,50 @@ it.each(["api-key", "subscription"] as const)(
     };
     params.sandbox = sandbox;
     const runtimePlan = createCodexRuntimePlanFixture();
-    params.runtimePlan = {
-      ...runtimePlan,
-      auth: {
-        ...runtimePlan.auth,
-        selectedAuthMode: authRequirement,
-        modelRoute: {
-          provider: "openai",
-          modelId: params.modelId,
-          api: authRequirement === "api-key" ? "openai-responses" : "openai-chatgpt-responses",
-          baseUrl:
-            authRequirement === "api-key"
-              ? "https://api.openai.com/v1"
-              : "https://chatgpt.com/backend-api/codex",
-          authRequirement,
-          requestTransportOverrides: "none",
+    if (authRequirement === "native-command") {
+      params.provider = "command-fixture";
+      params.model = {
+        ...params.model,
+        provider: params.provider,
+        api: "openai-responses",
+        baseUrl: "https://native.example.test/v1",
+      };
+      params.runtimePlan = {
+        ...runtimePlan,
+        auth: {
+          providerForAuth: params.provider,
+          authProfileProviderForAuth: params.provider,
+          selectedAuthMode: "native-command",
+          credentialSource: { kind: "none" },
         },
+      };
+    } else {
+      params.runtimePlan = {
+        ...runtimePlan,
+        auth: {
+          ...runtimePlan.auth,
+          selectedAuthMode: authRequirement,
+          modelRoute: {
+            provider: "openai",
+            modelId: params.modelId,
+            api: authRequirement === "api-key" ? "openai-responses" : "openai-chatgpt-responses",
+            baseUrl:
+              authRequirement === "api-key"
+                ? "https://api.openai.com/v1"
+                : "https://chatgpt.com/backend-api/codex",
+            authRequirement,
+            requestTransportOverrides: "none",
+          },
+        },
+      };
+    }
+    const readHostProfiles = vi.fn(() => {
+      throw new Error("Worker auth must not read Gateway profiles");
+    });
+    params.authProfileStore = {
+      version: 1,
+      get profiles() {
+        return readHostProfiles();
       },
     };
     const runtime = createPluginRuntimeMock();
@@ -257,7 +285,12 @@ it.each(["api-key", "subscription"] as const)(
           const result =
             request.method === "initialize"
               ? { userAgent: "codex-cli/0.164.0" }
-              : { account: { type: authRequirement === "api-key" ? "chatgpt" : "apiKey" } };
+              : {
+                  account:
+                    authRequirement === "native-command"
+                      ? null
+                      : { type: authRequirement === "api-key" ? "chatgpt" : "apiKey" },
+                };
           await receive?.(Buffer.from(JSON.stringify({ id: request.id, result })));
         }
       },
@@ -287,12 +320,22 @@ it.each(["api-key", "subscription"] as const)(
         })
         .then(
           async (client) => {
+            if (authRequirement === "native-command") {
+              expect(await client.request("account/read", { refreshToken: false })).toEqual({
+                account: null,
+              });
+            }
             await client.closeAndWait();
             return undefined;
           },
           (error: unknown) => error,
         );
-      expect(outcome).toMatchObject({ status: 401 });
+      if (authRequirement === "native-command") {
+        expect(outcome).toBeUndefined();
+      } else {
+        expect(outcome).toMatchObject({ status: 401 });
+      }
+      expect(readHostProfiles).not.toHaveBeenCalled();
       expect(connection.effectiveWorkspace).toBe(sandbox.containerWorkdir);
       expect(open).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -314,11 +357,14 @@ it.each(["api-key", "subscription"] as const)(
   },
 );
 
-it.each(["explicit-profile", "forwarded-profile", "supervision"] as const)(
+it.each(["explicit-profile", "forwarded-profile", "resolved-key", "supervision"] as const)(
   "rejects worker hosting instead of silently replacing %s ownership",
   async (ownership) => {
     const params = createParams(path.join(tempDir, "owned.jsonl"), path.join(tempDir, "owned"));
     params.permissionMode = "full";
+    if (ownership === "resolved-key") {
+      params.resolvedApiKey = "synthetic-host-key-must-not-forward";
+    }
     const sandbox = {
       ...createSandboxContext({}),
       backendId: "node",
@@ -406,7 +452,7 @@ it("keeps non-node remote placements confined when worker hosting is configured"
   ).rejects.toThrow("requires an enrolled node");
 });
 
-it.each(["ordinary", "ordinary-profile", "worker"] as const)(
+it.each(["ordinary", "ordinary-profile", "worker", "unprovisioned-worker"] as const)(
   "keeps native-command auth within its admitted %s placement boundary",
   async (placement) => {
     const params = createParams(
@@ -439,12 +485,20 @@ it.each(["ordinary", "ordinary-profile", "worker"] as const)(
         return readHostProfiles();
       },
     };
-    if (placement === "worker") {
+    if (placement === "worker" || placement === "unprovisioned-worker") {
       const sandbox = {
         ...createSandboxContext({}),
         backendId: "node",
         placementExecutionMode: "remote-exec",
         placementNodeId: "worker-node",
+        ...(placement === "unprovisioned-worker"
+          ? {
+              placementEnvironmentId: "worker-environment",
+              placementSessionId: params.sessionId,
+              sessionKey: params.sessionKey!,
+              placementOwnerEpoch: 1,
+            }
+          : {}),
       };
       params.sandbox = sandbox;
     }
@@ -461,7 +515,7 @@ it.each(["ordinary", "ordinary-profile", "worker"] as const)(
         pluginConfig: { appServer: { workerHostedCloud: true } },
       },
     });
-    if (placement !== "ordinary") {
+    if (placement === "ordinary-profile") {
       await expect(preparation).rejects.toThrow(
         "Native command auth cannot use host credentials or remote-exec placement",
       );
@@ -471,6 +525,18 @@ it.each(["ordinary", "ordinary-profile", "worker"] as const)(
         expect(connection.startupAuthRequirement).toBe("native-command");
         expect(connection.startupClientAuthProfileId).toBeNull();
         expect(connection.startupPreparedAuth).toBeUndefined();
+        if (placement === "worker" || placement === "unprovisioned-worker") {
+          await expect(
+            connection.attemptClientFactory({
+              authProfileId: connection.startupClientAuthProfileId,
+              authRequirement: connection.startupAuthRequirement,
+            }),
+          ).rejects.toThrow(
+            placement === "worker"
+              ? "exact placement workspace identity"
+              : "Worker Codex configuration version is unavailable",
+          );
+        }
       } finally {
         connection.cancellation.dispose();
         connection.releaseModelExecution();

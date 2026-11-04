@@ -531,6 +531,7 @@ export const gatewayDatabaseWorkerTestFiles = [
   "src/gateway/worker-environments/worker-turn-launcher-claim-admission.test.ts",
   "src/gateway/worker-environments/worker-turn-launcher-computer.test.ts",
   "src/gateway/worker-environments/worker-turn-launcher-failure-recovery.test.ts",
+  "src/gateway/worker-environments/worker-turn-launcher-github-authority.test.ts",
   "src/gateway/worker-environments/worker-turn-launcher-initial-setup.test.ts",
   "src/gateway/worker-environments/worker-turn-launcher-media.test.ts",
   "src/gateway/worker-environments/worker-turn-launcher-reclaimed-placement.test.ts",

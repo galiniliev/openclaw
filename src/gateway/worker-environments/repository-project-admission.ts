@@ -8,11 +8,14 @@ import {
   matchesAgentLifecycleBindingAsync,
 } from "../../agents/agent-lifecycle-registry.js";
 import type { GitHubCredentialReader } from "../../agents/github-credential-reader.js";
+import { getGitHubIdentityErrorOrigin } from "../../agents/github-read-identity.js";
 import {
   GitHubIdentityError,
   prepareGitHubReadIdentity,
+  resolveConfiguredGitHubToolIdentity,
 } from "../../agents/github-tool-identity.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { parseConfiguredProjectGitUrl } from "../../projects/project-git-url.runtime.js";
 import { getActiveSecretsRuntimeConfigSnapshot } from "../../secrets/runtime-state.js";
 import { requestCurrentGitHubOAuthRefresh } from "../github-oauth-lifecycle.js";
@@ -25,6 +28,8 @@ import {
 } from "./environment-recipe.js";
 import { readRepositoryWorkerProjectSnapshot } from "./repository-project-source.js";
 import type { RepositoryWorkerProjectSnapshot } from "./repository-project-source.schema.js";
+
+const log = createSubsystemLogger("gateway/worker-environments");
 
 const GitObject = /^[a-f0-9]{40}$/u;
 // Commit lookup requests one changed file; trees are nonrecursive and inspect
@@ -135,7 +140,10 @@ export async function prepareRepositoryWorkerProjectSource(params: AdmissionRequ
     assertAgent();
   };
   const repositoryPath = new URL(url).pathname.replace(/\.git$/u, "");
-  const prepareIdentity = async (assertPreparationCurrent: () => void) => {
+  const prepareIdentity = async (
+    assertPreparationCurrent: () => void,
+    phase: "initial" | "revalidation",
+  ) => {
     await assertAgentPrepared();
     assertPreparationCurrent();
     const config = getConfig();
@@ -154,6 +162,27 @@ export async function prepareRepositoryWorkerProjectSource(params: AdmissionRequ
       refresh: () => requestCurrentGitHubOAuthRefresh(agent.agentId),
       allowAnonymous: true,
     }).catch(async (error: unknown) => {
+      const agentSelection = resolveConfiguredGitHubToolIdentity({
+        config,
+        agentId: agent.agentId,
+        scope: "agent",
+      });
+      const selection =
+        agentSelection ??
+        resolveConfiguredGitHubToolIdentity({ config, agentId: agent.agentId, scope: "system" });
+      log.warn("Repository GitHub identity preparation failed", {
+        phase,
+        reason: error instanceof GitHubIdentityError ? error.reason : "unverified",
+        origin: getGitHubIdentityErrorOrigin(error),
+        source: agentSelection
+          ? "agent-override"
+          : selection
+            ? "system-configured"
+            : "system-detected",
+        kind: selection?.kind,
+        hasNativeReader: params.readNativeCredential !== undefined,
+        hasCredentialCleanup: params.retainCredentialCleanup !== undefined,
+      });
       await assertAgentPrepared();
       // Native credential subprocess diagnostics must never enter provider errors.
       throw error instanceof GitHubIdentityError ? error : new GitHubIdentityError("unverified");
@@ -167,7 +196,7 @@ export async function prepareRepositoryWorkerProjectSource(params: AdmissionRequ
   };
   await assertAgentPrepared();
   assertAdmission();
-  let identity = await prepareIdentity(assertCaller);
+  let identity = await prepareIdentity(assertCaller, "initial");
   assertAdmission();
   const owner = { agent, identity: identity.selection };
   if (expected && !isDeepStrictEqual(owner, expected.source.owner)) {
@@ -507,7 +536,7 @@ export async function prepareRepositoryWorkerProjectSource(params: AdmissionRequ
       assertCurrent();
     };
     assertSource();
-    const current = await prepareIdentity(() => signal?.throwIfAborted());
+    const current = await prepareIdentity(() => signal?.throwIfAborted(), "revalidation");
     assertSource();
     if (!isDeepStrictEqual(current.selection, owner.identity)) {
       sourceChanged();

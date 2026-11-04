@@ -318,9 +318,7 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
           target &&
           provider.requiresNodeEnrollment &&
           options.prepareNodeArtifacts &&
-          (!setupRecipe ||
-            createOptions.runSetupScript === false ||
-            createOptions.setupAuthorized === true)
+          (!setupRecipe || runSetupScript === false || createOptions.setupAuthorized === true)
         ) {
           if (createOptions.imageReserve) {
             const admittedTarget = structuredClone(target);
@@ -346,7 +344,7 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
             artifacts: prepared.artifacts,
             setupRecipe,
             recipe,
-            runSetupScript: createOptions.runSetupScript,
+            runSetupScript,
           });
           profileSnapshot = project
             ? { ...resolved.profileSnapshot, project: { ...project, preparation } }

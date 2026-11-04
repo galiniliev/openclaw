@@ -3,6 +3,7 @@ import type {
   GitHubPublicationPublisher,
   SessionGitHubReadinessResult,
 } from "../../packages/gateway-protocol/src/schema/session-github-publication.js";
+import { resolveGitHubHost } from "../agents/github-host-runtime.js";
 import {
   matchesPreparedGitHubPublicationIdentity,
   prepareGitHubPublicationOptionsIdentity,
@@ -576,8 +577,8 @@ export async function prepareGitHubPublicationRepositoryIdentity(params: {
   return repositoryIdentity;
 }
 
-function isSupportedGitHubOrigin(originUrl: string): boolean {
-  const remote = parseGitHubRemoteUrl(originUrl);
+function isSupportedGitHubOrigin(originUrl: string, githubHost: string): boolean {
+  const remote = parseGitHubRemoteUrl(originUrl, githubHost);
   return Boolean(
     remote && /^[A-Za-z0-9_.-]+$/u.test(remote.owner) && /^[A-Za-z0-9_.-]+$/u.test(remote.repo),
   );
@@ -634,7 +635,7 @@ export async function qualifyGitHubPublicationSource(
       return {
         ok: true,
         custody: { kind: "qualified", source: "repository" },
-        target: isSupportedGitHubOrigin(owner.workspace.url)
+        target: isSupportedGitHubOrigin(owner.workspace.url, resolveGitHubHost())
           ? { kind: "supported", basis: "repository-url", freshness: "observed" }
           : { kind: "unsupported" },
         assertCurrent: () => {
@@ -688,7 +689,8 @@ export async function qualifyGitHubPublicationSource(
       };
     }
     const { repoRoot, repoFingerprint } = owner.worktree;
-    const key = JSON.stringify([context.admission.identity.key, repoRoot, repoFingerprint]);
+    const host = resolveGitHubHost();
+    const key = JSON.stringify([context.admission.identity.key, repoRoot, repoFingerprint, host]);
     let observed = false;
     const target = await repositoryTargets.read(
       key,
@@ -698,7 +700,7 @@ export async function qualifyGitHubPublicationSource(
           assertCurrent: () => context.admission.assertCurrent(),
         });
         observed = true;
-        return isSupportedGitHubOrigin(repository.originUrl);
+        return isSupportedGitHubOrigin(repository.originUrl, host);
       },
       { allowStale: false },
     );

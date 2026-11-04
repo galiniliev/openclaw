@@ -19,6 +19,7 @@ import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import { getSessionRepositoryWorkspaceStore } from "../state/session-repository-workspaces.js";
 import { prepareUserProfileCatalog } from "../state/user-profile-list.js";
 import { ensureProfileForEmail } from "../state/user-profiles.js";
+import { createTestGatewayScheduler } from "../test-utils/gateway-scheduler-clock.js";
 import * as oauth from "./github-oauth-lifecycle.js";
 import { createDirectChatContext } from "./server-chat.agent-events.test-helpers.js";
 import { handleGatewayRequest } from "./server-methods.js";
@@ -37,8 +38,13 @@ import { createWorkerSessionPlacementStore } from "./worker-environments/placeme
 import { writePlacementEnvironmentFixture } from "./worker-environments/placement-test-fixtures.js";
 import { createRepositoryPolicySource } from "./worker-environments/repository-policy-node.test-support.js";
 import { deriveEnvironmentIntent } from "./worker-environments/service-contract.js";
+import { createWorkerEnvironmentService } from "./worker-environments/service.js";
+import { BUNDLE_ARTIFACT, createProvider } from "./worker-environments/service.test-support.js";
+import { createWorkerEnvironmentStore } from "./worker-environments/store.js";
 import { captureWorkspaceManifest } from "./worker-environments/workspace-manifest-worker.js";
 import { serializeWorkerWorkspaceManifest } from "./worker-environments/workspace-manifest.js";
+import { requireWorkspaceResultGit } from "./worker-environments/workspace-result-git.js";
+import { REMOTE_WORKSPACE_SETUP_JS } from "./worker-environments/workspace-sync-scripts.js";
 
 const { createSessionStoreDir } = setupGatewaySessionsHandlerTestHarness();
 afterEach(() => {
@@ -50,17 +56,33 @@ afterEach(() => {
 
 // Actual RPC admission/creation and dispatch owners, with native Git/checkpoint effects.
 // Provider allocation and remote transport/account responses remain synthetic.
-test.each(["allowed", "policy", "source", "stop", "caller"] as const)(
+test.each([
+  "allowed",
+  "policy",
+  "source",
+  "stop",
+  "caller",
+  "admin runtime",
+  "admin developer",
+  "admin failure",
+] as const)(
   "required repository sessions.create retains authority after ACK: %s",
   async (scenario) => {
+    const ordinaryAdmin = scenario.startsWith("admin ");
     const { dir, storePath } = await createSessionStoreDir();
     const config = await getGatewayConfigModule();
     const key = "agent:main:dashboard:required-repository-rpc";
     const profileId = "ghp_88888888888888888888888888888888";
     await config.writeConfigFile({
       cloudWorkers: {
-        requiredProfile: "development",
-        profiles: { development: { provider: "fake", settings: {} } },
+        ...(!ordinaryAdmin ? { requiredProfile: "development" } : {}),
+        profiles: {
+          development: {
+            provider: "fake",
+            settings: {},
+            ...(ordinaryAdmin ? { runSetupScript: scenario !== "admin runtime" } : {}),
+          },
+        },
       },
       gateway: { repositoryIntegration: "repository-policy" },
       tools: { github: { profileId } },
@@ -115,7 +137,30 @@ test.each(["allowed", "policy", "source", "stop", "caller"] as const)(
     vi.stubGlobal("fetch", verify);
     vi.spyOn(oauth, "requestCurrentGitHubOAuthRefresh").mockResolvedValue(undefined);
     const origin = path.join(dir, "origin");
-    const { baseCommit, base } = await createRepositoryPolicySource(origin);
+    await createRepositoryPolicySource(origin);
+    if (ordinaryAdmin) {
+      await fs.mkdir(path.join(origin, ".openclaw"), { recursive: true });
+      await fs.writeFile(
+        path.join(origin, ".openclaw", "worktree-setup.sh"),
+        `#!/bin/sh\nprintf 'postCreate\\n' >> setup-ran.txt\nexit ${scenario === "admin failure" ? 19 : 0}\n`,
+        { mode: 0o755 },
+      );
+      await requireWorkspaceResultGit(origin, ["add", "."]);
+      await requireWorkspaceResultGit(origin, [
+        "-c",
+        "user.name=Dispatch Fixture",
+        "-c",
+        "user.email=dispatch@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--quiet",
+        "-m",
+        "optional repository setup",
+      ]);
+    }
+    const baseCommit = await requireWorkspaceResultGit(origin, ["rev-parse", "HEAD"]);
+    const base = await captureWorkspaceManifest({ root: origin, baseCommit });
     const database = openOpenClawStateDatabase();
     const placements = createWorkerSessionPlacementStore({ database });
     const repositories = getSessionRepositoryWorkspaceStore();
@@ -134,6 +179,14 @@ test.each(["allowed", "policy", "source", "stop", "caller"] as const)(
         return { kind: "repository", repository };
       },
     });
+    if (ordinaryAdmin) {
+      for (const environment of [harness.ready, harness.attached]) {
+        environment.profileSnapshot = {
+          ...environment.profileSnapshot,
+          runSetupScript: scenario !== "admin runtime",
+        };
+      }
+    }
     const resume = createDeferredCore();
     const entered = createDeferredCore();
     const stopped = createDeferredCore();
@@ -199,10 +252,28 @@ test.each(["allowed", "policy", "source", "stop", "caller"] as const)(
         if (prepared.kind !== "prepared") {
           throw new Error("Checkout failed");
         }
+        if (input.source.runSetupScript) {
+          commands.push("postCreate");
+          const setup = await runtime.exec({
+            gatewayNamespace: "rpc-proof",
+            environmentId: "worker",
+            sessionId: entry()!.sessionId,
+            generation: 1,
+            argv: ["node", "-e", REMOTE_WORKSPACE_SETUP_JS],
+          });
+          if (setup.code !== 0 || setup.termination !== "exit") {
+            throw new Error("Repository setup script failed");
+          }
+        }
+        const current = await captureWorkspaceManifest({
+          root: prepared.result.remoteWorkspaceDir,
+          baseCommit,
+        });
         return {
           ...prepared.result,
           mode: "repository",
           baseManifestRef: prepared.result.manifestRef,
+          manifestRef: current.manifestRef,
         };
       },
       reconcileWorkspace: async (input) => {
@@ -260,6 +331,18 @@ test.each(["allowed", "policy", "source", "stop", "caller"] as const)(
         warn: () => {},
       },
     );
+    const capabilityProvider = createProvider({
+      requiresNodeEnrollment: true,
+      supportedExecutionModes: ["worker-turn", "remote-exec"],
+    });
+    const environmentService = createWorkerEnvironmentService({
+      store: await createWorkerEnvironmentStore({ database }),
+      scheduler: createTestGatewayScheduler(),
+      getConfig: config.getRuntimeConfig,
+      resolveProvider: (id) => (id === capabilityProvider.id ? capabilityProvider : undefined),
+      prepareInstallation: async () => BUNDLE_ARTIFACT,
+      bootstrapWorker: async () => harness.ready.bootstrapReceipt!,
+    });
     const prepare = createRequiredWorkerSessionPreparation({
       getConfig: config.getRuntimeConfig,
       dispatch: coordinated,
@@ -268,6 +351,7 @@ test.each(["allowed", "policy", "source", "stop", "caller"] as const)(
       getRuntimeConfig: config.getRuntimeConfig,
       getClientConnIds: () => new Set([client.connId]),
     });
+    context.workerEnvironmentService = environmentService;
     context.workerPlacementDispatchService = { ...coordinated, withRequiredSession: prepare };
     context.workerSessionPlacementService = placements;
     await initializeSessionReadContext(context);
@@ -280,7 +364,15 @@ test.each(["allowed", "policy", "source", "stop", "caller"] as const)(
         respond,
         isWebchatConnect: () => false,
       });
-      expect(respond.mock.calls[0]?.[0], JSON.stringify(respond.mock.calls)).toBe(true);
+      if (
+        !(
+          scenario === "admin failure" &&
+          method === "sessions.dispatch" &&
+          String(respond.mock.calls[0]?.[2]?.message).includes("Repository setup script failed")
+        )
+      ) {
+        expect(respond.mock.calls[0]?.[0], JSON.stringify(respond.mock.calls)).toBe(true);
+      }
       return respond.mock.calls[0]?.[1];
     };
     try {
@@ -290,6 +382,13 @@ test.each(["allowed", "policy", "source", "stop", "caller"] as const)(
         repository: { url: "https://github.com/example/repository" },
       });
       expect(created).toMatchObject({ key, runStarted: false });
+      const dispatch = ordinaryAdmin
+        ? rpc("sessions.dispatch", { key, profileId: "development" })
+        : undefined;
+      void dispatch?.catch((error: unknown) => {
+        complete.resolve(error);
+        entered.resolve();
+      });
       await entered.promise;
       expect(verify).not.toHaveBeenCalled();
       expect(commands).toEqual([]);
@@ -330,7 +429,12 @@ test.each(["allowed", "policy", "source", "stop", "caller"] as const)(
       resume.resolve();
       const outcome = await complete.promise;
       await stop;
-      if (scenario === "allowed") {
+      await dispatch;
+      if (
+        scenario === "allowed" ||
+        scenario === "admin runtime" ||
+        scenario === "admin developer"
+      ) {
         expect(outcome, String(outcome)).toMatchObject({ state: "active" });
         expect(verify).toHaveBeenCalledTimes(1);
         const placement = (
@@ -339,6 +443,24 @@ test.each(["allowed", "policy", "source", "stop", "caller"] as const)(
         expect(
           await fs.readFile(path.join(placement.remoteWorkspaceDir!, "tracked.txt"), "utf8"),
         ).toBe("pinned source\n");
+        if (ordinaryAdmin) {
+          expect(commands.filter((command) => command === "postCreate")).toHaveLength(
+            scenario === "admin runtime" ? 0 : 1,
+          );
+          if (scenario === "admin runtime") {
+            await expect(
+              fs.stat(path.join(placement.remoteWorkspaceDir!, "setup-ran.txt")),
+            ).rejects.toMatchObject({ code: "ENOENT" });
+          } else {
+            expect(
+              await fs.readFile(path.join(placement.remoteWorkspaceDir!, "setup-ran.txt"), "utf8"),
+            ).toBe("postCreate\n");
+          }
+        }
+      } else if (scenario === "admin failure") {
+        expect(outcome).toBeInstanceOf(Error);
+        expect(String(outcome)).toContain("Repository setup script failed");
+        expect(commands.filter((command) => command === "postCreate")).toHaveLength(1);
       } else {
         expect(outcome).toBeInstanceOf(Error);
         expect(verify).not.toHaveBeenCalled();
@@ -347,6 +469,7 @@ test.each(["allowed", "policy", "source", "stop", "caller"] as const)(
     } finally {
       resume.resolve();
       await complete.promise;
+      await environmentService.stop();
       catalog.release();
     }
   },

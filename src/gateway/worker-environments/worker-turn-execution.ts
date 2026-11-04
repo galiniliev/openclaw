@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { SKILL_RESOURCE_PROTOCOL_FEATURE } from "../../../packages/gateway-protocol/src/schema/skill-resources.js";
 import { WORKER_TURN_ADMISSION_PROTOCOL_FEATURE } from "../../../packages/gateway-protocol/src/schema/worker-turn-admission.js";
+import { readAdmittedRunOperatorAuthority } from "../../agents/admitted-run-context.js";
 import { resolveAgentDir } from "../../agents/agent-scope.js";
 import {
   copyAgentToolMetadata,
@@ -525,6 +526,7 @@ export async function executeWorkerTurn(
       const { bundleHash, openclawVersion, protocolFeatures } = bootstrapReceipt;
       githubGrant = await bindWorkerGitHubTurn({
         session: placement,
+        operatorAuthority: readAdmittedRunOperatorAuthority(admittedRunContext),
         fact: readGitHubPublicationFact(placement),
         sessionTarget: transcriptTarget,
         store: params.placements,

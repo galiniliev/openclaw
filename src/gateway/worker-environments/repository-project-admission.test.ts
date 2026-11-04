@@ -1,6 +1,10 @@
 import { afterEach, assert, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
-import type { PreparedGitHubSourceReadIdentity } from "../../agents/github-read-identity.js";
+import {
+  annotateGitHubIdentityError,
+  GitHubIdentityError,
+  type PreparedGitHubSourceReadIdentity,
+} from "../../agents/github-read-identity.js";
 import {
   clearRuntimeConfigSnapshot,
   setRuntimeConfigSnapshot,
@@ -12,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   matchesAgentLifecycleBindingAsync: vi.fn(),
   prepareGitHubReadIdentity: vi.fn(),
   prepareGitPack: vi.fn(),
+  warn: vi.fn(),
 }));
 // mock-isolation: HTTP admission tests inject retirement during awaits without a database lifecycle owner.
 vi.mock("../../agents/agent-lifecycle-registry.js", () => ({
@@ -19,7 +24,8 @@ vi.mock("../../agents/agent-lifecycle-registry.js", () => ({
   matchesAgentLifecycleBinding: mocks.matchesAgentLifecycleBinding,
   matchesAgentLifecycleBindingAsync: mocks.matchesAgentLifecycleBindingAsync,
 }));
-vi.mock("../../agents/github-tool-identity.js", async () => ({
+vi.mock("../../agents/github-tool-identity.js", async (original) => ({
+  ...(await original<typeof import("../../agents/github-tool-identity.js")>()),
   GitHubIdentityError: (await import("../../agents/github-read-identity.js")).GitHubIdentityError,
   prepareGitHubReadIdentity: mocks.prepareGitHubReadIdentity,
 }));
@@ -32,6 +38,18 @@ vi.mock("../github-oauth-lifecycle.js", () => ({
 vi.mock("./repository-git-pack.js", () => ({
   prepareRepositoryWorkerGitPack: mocks.prepareGitPack,
 }));
+
+// mock-isolation: Capture only the owning subsystem diagnostic, preserving logger behavior elsewhere.
+vi.mock("../../logging/subsystem.js", async (original) => {
+  const actual = await original<typeof import("../../logging/subsystem.js")>();
+  return {
+    ...actual,
+    createSubsystemLogger: (name: string) => {
+      const logger = actual.createSubsystemLogger(name);
+      return name === "gateway/worker-environments" ? { ...logger, warn: mocks.warn } : logger;
+    },
+  };
+});
 
 import { prepareRepositoryWorkerProjectSource } from "./repository-project-admission.js";
 import { readRepositoryWorkerProjectSnapshot } from "./repository-project-source.js";
@@ -73,6 +91,7 @@ describe("repository project admission", () => {
     fetchImpl.mock.calls.map(([input]) => new URL(new Request(input).url).pathname);
 
   beforeEach(() => {
+    mocks.warn.mockReset();
     observedRepositoryUrl = repositoryUrl;
     selection = { source: "system-configured", profileId: `ghp_${"1".repeat(32)}`, accountId: 1 };
     token = "synthetic-github-source-token";
@@ -777,15 +796,48 @@ describe("repository project admission", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("does not expose native credential subprocess diagnostics as preparation errors", async () => {
-    mocks.prepareGitHubReadIdentity.mockRejectedValueOnce(
-      new Error("synthetic-private-diagnostic"),
-    );
-    await expect(prepareRepositoryWorkerProjectSource(initial)).rejects.toThrow(
-      "could not be verified",
-    );
-    expect(fetchImpl).not.toHaveBeenCalled();
-  });
+  it.each(["initial", "revalidation"] as const)(
+    "preserves safe identity failure diagnostics during %s without exposing secrets",
+    async (phase) => {
+      const params = {
+        ...initial,
+        getConfig: () => ({
+          tools: { github: { kind: "oauth" as const, profileId: "private-profile" } },
+        }),
+        readNativeCredential: async () => "private-token",
+        retainCredentialCleanup: () => {},
+      };
+      const prepared =
+        phase === "revalidation" ? await prepareRepositoryWorkerProjectSource(params) : undefined;
+      const error = annotateGitHubIdentityError(
+        phase === "initial"
+          ? new GitHubIdentityError("unavailable")
+          : new Error("private-stderr private-token private-key"),
+        phase === "initial" ? "issuer-failed" : "native-reader-failed",
+      );
+      mocks.prepareGitHubReadIdentity.mockRejectedValueOnce(error);
+      await expect(
+        prepared ? prepared.revalidate() : prepareRepositoryWorkerProjectSource(params),
+      ).rejects.toThrow(
+        phase === "initial" ? "credential is unavailable" : "could not be verified",
+      );
+      expect(mocks.warn.mock.calls).toEqual([
+        [
+          "Repository GitHub identity preparation failed",
+          {
+            phase,
+            reason: phase === "initial" ? "unavailable" : "unverified",
+            origin: phase === "initial" ? "issuer-failed" : "native-reader-failed",
+            source: "system-configured",
+            kind: "oauth",
+            hasNativeReader: true,
+            hasCredentialCleanup: true,
+          },
+        ],
+      ]);
+      expect(JSON.stringify(mocks.warn.mock.calls)).not.toContain("private-");
+    },
+  );
 
   it.each(["initial", "refill", "revalidate"] as const)(
     "cancels a pending %s HTTP read",
