@@ -2,24 +2,32 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import { closeOpenClawAgentDatabasesAsync } from "../state/openclaw-agent-db.js";
 import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
+import { ensureCanonicalUserProfileForEmail } from "../state/user-profile-writes.js";
+import { NodeWorkerPublicationConflictError } from "../worker/node-workspace-transfer-protocol.js";
 import {
   callPersonalPublicationRpc,
   createPersonalPublicationFixture,
   personalPublicationAccount,
   restartPersonalPublicationFixture,
 } from "./github-personal-publication.test-support.js";
+import { createGitHubPublicationRequesterFixture } from "./github-publication-requester.test-support.js";
 import {
   SESSION_ID,
   SESSION_KEY,
+  commandResult,
+  createTestGitHubPublicationCoordinator,
   githubPublicationTestMocks,
   installGitHubPublicationTestHarness,
   root,
 } from "./github-publication.test-support.js";
+import { listRepositoryGitHubPublicationsInDatabase } from "./github-repository-publication-read.worker.js";
+import { readGitHubRepositoryPublicationMetadata } from "./github-repository-publication-snapshot.js";
 import { readRepositoryGitHubPublicationInDatabase } from "./github-repository-publication-store.worker.js";
 import {
   createRepositoryPublicationFixture,
   repositoryPublicationTestUrl as url,
 } from "./github-repository-publication.test-support.js";
+import type { PrepareRepositoryPublicationIntegration } from "./repository-publication-checkpoint.js";
 
 const readRepositoryGitHubPublication = (requestId: string) =>
   readRepositoryGitHubPublicationInDatabase(openOpenClawStateDatabase().db, requestId);
@@ -195,3 +203,203 @@ it.each(["reset", "move", "held", "store-busy", "retired-owner"] as const)(
     expect(f.runtime.uploaded.size).toBe(1);
   },
 );
+
+async function laterManagedPublicationFixture(mismatch?: "tree" | "requester") {
+  const f = await createRepositoryPublicationFixture(checkpoint);
+  const transport = mocks.runCommand.getMockImplementation()!;
+  mocks.runCommand.mockImplementation(async (args, options) =>
+    args.some((arg: string) => arg.endsWith("/git/blobs"))
+      ? { ...commandResult(), code: null, termination: "timeout" }
+      : transport(args, options),
+  );
+  const original = { body: "Original description", draft: true };
+  const failed = await f.publish("older-managed-request", original);
+  expect(failed).toMatchObject({ status: "failed", code: "unavailable" });
+  mocks.runCommand.mockImplementation(transport);
+  if (mismatch === "tree") {
+    await f.capture("different accepted work\n", "different-tree");
+  }
+  const requester =
+    mismatch === "requester"
+      ? (
+          await createGitHubPublicationRequesterFixture({
+            profileId: (await ensureCanonicalUserProfileForEmail("other-publisher@example.test"))
+              .id,
+            scopes: ["operator.admin"],
+            sessionKey: SESSION_KEY,
+            agentId: "main",
+          })
+        ).requester
+      : undefined;
+  const later = await f.publish("later-managed-request", {
+    body: "Newer description to preserve",
+    draft: true,
+    requester,
+  });
+  expect(later).toMatchObject({ status: "published", url });
+  // An older executor without detached integration cannot reconcile this branch.
+  expect(await f.publish("older-managed-request", original)).toMatchObject({
+    status: "failed",
+    code: "push_rejected",
+  });
+  await f.coordinator.markReportedAsync(failed.requestId);
+  expect(readRepositoryGitHubPublication(failed.requestId)?.reported_at_ms).not.toBeNull();
+  return { f, original, failed, later, saved: readRepositoryGitHubPublication(failed.requestId)! };
+}
+
+it("retries the original rejected request onto latest main through its later owned PR", async () => {
+  const { f, original, failed, later, saved } = await laterManagedPublicationFixture();
+  const managedHead = f.runtime.head!;
+  const description = f.runtime.pr!.body;
+  f.git(["read-tree", f.baseTree]);
+  const upstream = f.git(["hash-object", "-w", "--stdin"], "latest upstream\n");
+  f.git(["update-index", "--add", "--cacheinfo", "100644", upstream, "main.txt"]);
+  f.runtime.baseHeadTree = f.git(["write-tree"]);
+  f.runtime.baseHead = f.git(
+    ["commit-tree", f.runtime.baseHeadTree, "-p", f.baseCommit],
+    "latest main\n",
+  );
+  const identity = await mocks.prepareIdentity();
+  mocks.prepareIdentity.mockResolvedValue({
+    ...identity,
+    env: { ...identity.env, GH_TOKEN: "synthetic-integration-token" },
+  });
+  const coordinator = createTestGitHubPublicationCoordinator({
+    placements: f.placements,
+    prepareRepositoryIntegration: async (_identity, input) => {
+      expect(input.mainCommit).toBe(f.runtime.baseHead);
+      const { snapshot } = await readGitHubRepositoryPublicationMetadata(
+        input.snapshotRoot,
+        input.snapshotDigest,
+      );
+      f.git(["read-tree", f.runtime.baseHeadTree]);
+      const repair = snapshot.entries[0]!;
+      f.git(["update-index", "--add", "--cacheinfo", "100644", repair.sha!, repair.path]);
+      return {
+        snapshotRoot: input.snapshotRoot,
+        knownBlobs: [upstream],
+        release: async () => {},
+        snapshot: {
+          ...snapshot,
+          workspaceTree: f.git(["write-tree"]),
+          baseCommit: f.runtime.baseHead,
+          baseTree: f.runtime.baseHeadTree,
+        },
+      };
+    },
+  });
+  f.runtime.uploaded.clear();
+  f.runtime.interruptPush = true;
+  const result = await coordinator.requestForSessionV2({
+    agentId: "main",
+    sessionKey: SESSION_KEY,
+    idempotencyKey: "older-managed-request",
+    ...original,
+  });
+  expect(result).toMatchObject({ requestId: failed.requestId, status: "requested" });
+  await coordinator.resumeSessionRequests();
+  expect(await coordinator.readAsync(failed.requestId)).toMatchObject({ status: "published", url });
+  expect(f.git(["rev-parse", `${f.runtime.head}^1`])).toBe(managedHead);
+  expect(f.git(["rev-parse", `${f.runtime.head}^2`])).toBe(f.runtime.baseHead);
+  expect(f.git(["show", `${f.runtime.head}:counter.txt`])).toBe("accepted first");
+  expect(f.git(["show", `${f.runtime.head}:main.txt`])).toBe("latest upstream");
+  expect(f.casRequests[1]).toMatchObject({ beforeOid: managedHead, force: false });
+  expect(f.runtime.effects).toEqual(["push", "pull_request", "push"]);
+  expect(f.runtime.pr!.body).toBe(description);
+  expect(f.runtime.pr!.body).toContain(later.requestId);
+  expect(f.runtime.uploaded.size).toBe(0);
+  expect(readRepositoryGitHubPublication(failed.requestId)).toMatchObject({
+    request_digest: saved.request_digest,
+    previous_head_commit: null,
+    requester_authority_json: saved.requester_authority_json,
+    checkpoint_ref: saved.checkpoint_ref,
+    checkpoint_digest: saved.checkpoint_digest,
+    workspace_tree: saved.workspace_tree,
+    reported_at_ms: null,
+  });
+  expect(
+    listRepositoryGitHubPublicationsInDatabase(openOpenClawStateDatabase().db, {}),
+  ).toHaveLength(2);
+});
+
+it.each(["external head", "tree", "requester", "PR publisher"] as const)(
+  "does not reconcile the original request with a mismatched %s",
+  async (mismatch) => {
+    const { f, original, saved } = await laterManagedPublicationFixture(
+      mismatch === "tree" || mismatch === "requester" ? mismatch : undefined,
+    );
+    if (mismatch === "external head") {
+      f.runtime.head = f.git(
+        ["commit-tree", f.first.workspaceTree, "-p", f.baseCommit],
+        "External commit with the same tree\n",
+      );
+      f.runtime.pr!.headSha = f.runtime.head;
+    } else if (mismatch === "PR publisher") {
+      f.runtime.pr!.userId = 99;
+    }
+    const integrate = vi.fn<PrepareRepositoryPublicationIntegration>();
+    const coordinator = createTestGitHubPublicationCoordinator({
+      placements: f.placements,
+      prepareRepositoryIntegration: integrate,
+    });
+    const before = mocks.runCommand.mock.calls.length;
+    expect(
+      await coordinator.requestForSessionV2({
+        agentId: "main",
+        sessionKey: SESSION_KEY,
+        idempotencyKey: "older-managed-request",
+        ...original,
+      }),
+    ).toMatchObject({ status: "failed" });
+    expect(integrate).not.toHaveBeenCalled();
+    expect(mocks.runCommand.mock.calls.slice(before).some(([args]) => args.includes("POST"))).toBe(
+      false,
+    );
+    expect(readRepositoryGitHubPublication(saved.request_id)).toMatchObject({
+      request_digest: saved.request_digest,
+      head_commit: null,
+      last_effect: null,
+      pull_request_url: null,
+    });
+    expect(f.runtime.effects).toEqual(["push", "pull_request"]);
+  },
+);
+
+it("reports a managed-input merge conflict without claiming the prior PR as a new result", async () => {
+  const { f, original, saved } = await laterManagedPublicationFixture();
+  const head = f.runtime.head;
+  const description = f.runtime.pr!.body;
+  const identity = await mocks.prepareIdentity();
+  mocks.prepareIdentity.mockResolvedValue({
+    ...identity,
+    env: { ...identity.env, GH_TOKEN: "synthetic-integration-token" },
+  });
+  const coordinator = createTestGitHubPublicationCoordinator({
+    placements: f.placements,
+    prepareRepositoryIntegration: async () => {
+      throw new NodeWorkerPublicationConflictError();
+    },
+  });
+  expect(
+    await coordinator.requestForSessionV2({
+      agentId: "main",
+      sessionKey: SESSION_KEY,
+      idempotencyKey: "older-managed-request",
+      ...original,
+    }),
+  ).toMatchObject({
+    status: "failed",
+    code: "workspace_changed",
+    nextAction: expect.stringContaining("merge conflicts"),
+  });
+  expect(readRepositoryGitHubPublication(saved.request_id)).toMatchObject({
+    request_digest: saved.request_digest,
+    workspace_tree: saved.workspace_tree,
+    head_commit: null,
+    last_effect: null,
+    pull_request_url: null,
+  });
+  expect(f.runtime.head).toBe(head);
+  expect(f.runtime.pr!.body).toBe(description);
+  expect(f.runtime.effects).toEqual(["push", "pull_request"]);
+});

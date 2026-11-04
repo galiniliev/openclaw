@@ -352,6 +352,7 @@ export function startNodeHostConnection({
                 ? {
                     workspaceResultVersion: NODE_WORKSPACE_RESULT_VERSION,
                     publicationIntegration: 1 as const,
+                    publicationGitHistory: true as const,
                   }
                 : {}),
               ...(gatewayCapabilities.has(GATEWAY_SERVER_CAPS.NODE_WORKER_STATUS_WAIT)

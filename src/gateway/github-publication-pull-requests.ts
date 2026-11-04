@@ -271,6 +271,7 @@ export async function reconcileGitHubPublicationPullRequest(
     workspaceTree: string;
     parentCommit: string;
     repositoryIntegration?: true;
+    readInputRequestId?: (headCommit: string) => Promise<string | undefined>;
     pushOnly?: "observed" | "dispatched";
     beforeRetry?: boolean;
     knownPullRequestUrls: readonly string[];
@@ -317,6 +318,7 @@ export async function reconcileGitHubPublicationPullRequest(
     return parent.sha;
   });
   let accepted = commit;
+  let inputRequestId = params.requestId;
   if (params.repositoryIntegration && parents.length === 2) {
     const { raw: inputRaw } = await readGitHubPublicationApi(
       params,
@@ -328,6 +330,12 @@ export async function reconcileGitHubPublicationPullRequest(
       return undefined;
     }
     accepted = input;
+    if (
+      typeof input.message === "string" &&
+      !input.message.split(/\r?\n/u).includes(`OpenClaw-Publication: ${params.requestId}`)
+    ) {
+      inputRequestId = (await params.readInputRequestId?.(parents[0]!)) ?? params.requestId;
+    }
   }
   if (
     !isRecord(accepted.tree) ||
@@ -337,7 +345,7 @@ export async function reconcileGitHubPublicationPullRequest(
     !isRecord(accepted.parents[0]) ||
     accepted.parents[0].sha !== params.parentCommit ||
     typeof accepted.message !== "string" ||
-    !accepted.message.split(/\r?\n/u).includes(`OpenClaw-Publication: ${params.requestId}`) ||
+    !accepted.message.split(/\r?\n/u).includes(`OpenClaw-Publication: ${inputRequestId}`) ||
     !commit.message.split(/\r?\n/u).includes(`OpenClaw-Publication: ${params.requestId}`)
   ) {
     return undefined;

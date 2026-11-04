@@ -27,6 +27,7 @@ import {
 } from "./github-repository-publication-store.js";
 import {
   checkRepositoryGitHubPublication as checked,
+  matchesRepositoryGitHubPublicationInput,
   repositoryGitHubPublicationDigest,
 } from "./github-repository-publication.kernel.js";
 
@@ -316,7 +317,13 @@ export function claimRepositoryGitHubPublicationInDatabase(
   if (retryUnavailable) {
     authority.assertCurrent();
     const current = readRepositoryGitHubPublicationInDatabase(db, row.request_id);
-    if (!current || !retryableRepositoryGitHubPublication(current)) {
+    const managedInput =
+      current?.error_code === "push_rejected"
+        ? listRepositoryGitHubPublicationsInDatabase(db, {
+            workspaceId: current.workspace_id,
+          }).findLast((published) => matchesRepositoryGitHubPublicationInput(current, published))
+        : undefined;
+    if (!current || !retryableRepositoryGitHubPublication(current, managedInput)) {
       throw new Error("GitHub publication is not eligible for retry.");
     }
   } else if (terminalRepositoryGitHubPublication(row)) {

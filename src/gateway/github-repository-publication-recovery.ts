@@ -19,6 +19,7 @@ import type { GitHubPublicationRecoveryBackoff } from "./github-publication-reco
 import { restoreGitHubPublicationRequester } from "./github-publication-requester.js";
 import {
   listRepositoryGitHubPublicationsAsync,
+  readRepositoryGitHubPublicationInputAsync,
   deferRepositoryGitHubPublicationClaimsAsync,
   bindRepositoryGitHubPublicationCheckpointAsync,
   failStaleRepositoryGitHubPublicationAsync,
@@ -130,6 +131,8 @@ export async function observeRepositoryGitHubPublication(params: {
         headCommit: row.head_commit,
         workspaceTree: row.workspace_tree,
         repositoryIntegration: true,
+        readInputRequestId: async (headCommit) =>
+          (await readRepositoryGitHubPublicationInputAsync(row, headCommit))?.request_id,
         parentCommit: row.previous_head_commit ?? row.source_head_commit,
         marker: `<!-- openclaw-publication:${row.request_id} -->`,
         knownPullRequestUrls,

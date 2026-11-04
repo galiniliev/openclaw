@@ -53,7 +53,7 @@ import {
 } from "./workspace-result-staging.js";
 
 const MARKER = "OpenClaw repository Git delta\n";
-type RepositoryGitHistory = {
+export type RepositoryGitHistory = {
   gitHistory?: WorkerWorkspaceGitHistory;
   gitPackPath?: string;
   gitHistoryNote?: string;

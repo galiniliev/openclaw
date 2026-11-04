@@ -22,6 +22,7 @@ import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worke
 import type { PersonalGitHubPublicationRow } from "./github-personal-publication-store.js";
 import type { GitHubPublicationEffectTransition } from "./github-publication-execution-effects.js";
 import type { GitHubPublicationSourceCapability } from "./github-publication-source.js";
+import { matchesRepositoryGitHubPublicationInput } from "./github-repository-publication.kernel.js";
 
 /** Native callers retain live memory authority; durable execution predicates stay in the worker. */
 export type GitHubPublicationTransitionAuthority = {
@@ -325,6 +326,18 @@ export async function listRepositoryGitHubPublicationsAsync(
 ) {
   const result = await read({ type: "githubPublications.repositoryList", input });
   return result?.type === "githubPublications.repositoryList" ? result.rows : [];
+}
+
+export async function readRepositoryGitHubPublicationInputAsync(
+  row: RepositoryGitHubPublicationRow,
+  headCommit?: string,
+) {
+  const rows = await listRepositoryGitHubPublicationsAsync({ workspaceId: row.workspace_id });
+  return rows.findLast(
+    (published) =>
+      (headCommit === undefined || published.pushed_head_commit === headCommit) &&
+      matchesRepositoryGitHubPublicationInput(row, published),
+  );
 }
 
 export async function readRepositoryGitHubPublicationAsync(requestId: string) {

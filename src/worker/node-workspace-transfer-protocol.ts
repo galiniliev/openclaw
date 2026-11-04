@@ -162,6 +162,7 @@ export const NodeWorkerWorkspaceTransferInputSchema = z.union([
     inputToken: TransferToken,
     inputManifestRef: ManifestRef,
     inputDigest: ManifestRef,
+    checkpointGitHistory: WorkerWorkspaceGitHistorySchema.optional(),
     mainCommit: z.string().regex(/^[a-f0-9]{40}$/u),
     sourceUrl: z.string().url(),
     targetUrl: z.string().url(),

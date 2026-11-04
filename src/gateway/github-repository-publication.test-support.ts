@@ -312,6 +312,22 @@ export async function createRepositoryPublicationFixture(
     if (endpoint.endsWith("/pulls") && args.includes("state=all")) {
       return jsonResult(runtime.pr ? [runtime.pr] : []);
     }
+    if (endpoint === "repos/owner/repository/pulls/1" && runtime.pr) {
+      const pr = runtime.pr;
+      return jsonResult({
+        html_url: pr.url,
+        number: 1,
+        user: { id: pr.userId },
+        state: pr.state,
+        body: pr.body,
+        head: {
+          sha: pr.headSha,
+          ref: pr.headRef,
+          repo: { full_name: "owner/repository" },
+        },
+        base: { ref: pr.baseRef, repo: { full_name: "owner/repository" } },
+      });
+    }
     if (endpoint.endsWith("/pulls") && args.includes("POST")) {
       runtime.effects.push("pull_request");
       runtime.pr = {

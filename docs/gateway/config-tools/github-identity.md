@@ -447,6 +447,14 @@ replaced. Stale runtimes use the normal guarded upgrade path and wait for active
 work to finish. If recovery needs current startup authorization, retry the same
 request from the original signed-in account; its checkpoint stays saved.
 
+When retained Git history has exactly the saved checkpoint's tree, publication
+uses that commit's original ancestry for integration. This keeps intervening
+upstream changes from appearing as new task edits or false merge conflicts.
+History import and integration use temporary Git state; the editing branch,
+index, and later work remain unchanged. An older worker defers requested
+publication through normal runtime recovery while session startup and turns
+continue.
+
 An explicit retry with the original idempotency key and unchanged publication
 content can resume a shared repository request that failed as `unavailable`
 before creating a publication commit or dispatching a branch or PR write. It
@@ -455,6 +463,15 @@ account, and current session authority. Background recovery does not reopen
 terminal failures, and requests with recorded or uncertain publication effects
 retain their existing reconciliation requirements. API failures retain safe
 exit, signal, timeout, and reported HTTP status details without command output.
+
+The same explicit retry can recover a pre-write `push_rejected` result when a
+later publication by the same requester and account published the exact saved
+checkpoint from that workspace. The Gateway verifies its recorded publication,
+remote commit and existing open PR before merging with the current target tip.
+It extends that managed commit without rewriting branch history, keeps the
+original request and checkpoint unchanged, and preserves the existing PR's
+description and metadata. External commits, different checkpoints, and different
+requesters remain subject to the branch-change rejection.
 
 During publication, an accepted PR response still completes its owned receipt if the requesting connection closes or publication permission ends. A successful local branch update likewise finishes its matching index transaction while the execution retains workspace ownership. This settlement does not authorize another push or PR creation; unconfirmed outcomes retain their existing recovery or personal-confirmation requirements.
 

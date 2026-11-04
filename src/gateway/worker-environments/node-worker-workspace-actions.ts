@@ -55,7 +55,9 @@ export function createNodeWorkerWorkspaceActions(params: {
   restoredWorkspace?: NodeWorkerWorkspaceBinding;
   supportsNativeQuiescence?: () => Promise<boolean>;
   supportsGitResults?: () => Promise<boolean>;
-  supportsPublicationIntegration?: () => Promise<boolean>;
+  readPublicationCapabilities?: Parameters<
+    typeof prepareNodeWorkerPublicationIntegration
+  >[0]["readCapabilities"];
   workspaceTransfer: NodeWorkspaceTransferService;
   runWorkspaceCommand: (
     command: WorkerWorkspaceCommand & {
@@ -561,7 +563,7 @@ export function createNodeWorkerWorkspaceActions(params: {
           environmentId: params.environmentId,
           signal: params.ownerSignal,
           workspaceTransfer: params.workspaceTransfer,
-          supportsIntegration: params.supportsPublicationIntegration,
+          readCapabilities: params.readPublicationCapabilities,
           transfer,
         },
         input,

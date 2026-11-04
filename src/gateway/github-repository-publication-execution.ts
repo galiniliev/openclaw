@@ -29,10 +29,7 @@ import {
   observeRepositoryGitHubPublication,
   settleDeniedRepositoryGitHubPublication,
 } from "./github-repository-publication-recovery.js";
-import {
-  retryableRepositoryGitHubPublication,
-  terminalRepositoryGitHubPublication,
-} from "./github-repository-publication-store.js";
+import { terminalRepositoryGitHubPublication } from "./github-repository-publication-store.js";
 import {
   assertReceiptOwner,
   captureCheckpoint,
@@ -68,7 +65,8 @@ export function createRepositoryGitHubPublicationExecution(params: {
     },
   ) => {
     let row = initial;
-    const retryUnavailable = context.retryUnavailable && retryableRepositoryGitHubPublication(row);
+    // Admission selects explicit retries; the worker rechecks their canonical receipts at claim.
+    const retryUnavailable = context.retryUnavailable;
     if (terminalRepositoryGitHubPublication(row) && !retryUnavailable) {
       return projectGitHubPublicationResult(row);
     }
@@ -216,6 +214,7 @@ export function createRepositoryGitHubPublicationExecution(params: {
               action?.owner ?? (actor?.kind === "operator" ? actor.profileId : undefined),
             snapshot: prepared.snapshot,
             snapshotRoot: prepared.snapshotRoot,
+            history: prepared.history,
             storePath: loaded.storePath,
             readCurrentEntry: () => assertReceiptOwner(row, preparedOwner).loaded.entry,
             assertWorkflowChangesAllowed: bound

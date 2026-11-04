@@ -3,6 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { withTempWorkspace } from "@openclaw/fs-safe/temp";
 import { readGitHubRepositoryPublicationMetadata } from "../gateway/github-repository-publication-snapshot.js";
+import { importWorkerWorkspaceHistory } from "../gateway/worker-environments/workspace-result-history.js";
+import type { WorkerWorkspaceGitHistory } from "../gateway/worker-environments/workspace-result-inventory.js";
 import { appendGitConfig, gitMaintenanceEnvironment } from "../infra/git-maintenance-env.js";
 import { runCommandBuffered } from "../process/exec.js";
 import {
@@ -22,6 +24,7 @@ export async function integrateNodeRepositoryPublication(params: {
   targetUrl: string;
   mainCommit: string;
   token: string;
+  gitHistory?: WorkerWorkspaceGitHistory;
   signal?: AbortSignal;
 }): Promise<void> {
   const { snapshot } = await readGitHubRepositoryPublicationMetadata(
@@ -115,6 +118,38 @@ export async function integrateNodeRepositoryPublication(params: {
       if ((await text(["rev-parse", `${snapshot.baseCommit}^{tree}`])) !== snapshot.baseTree) {
         throw new Error("Publication integration source base changed.");
       }
+      let retainedHead: string | undefined;
+      if (params.gitHistory) {
+        const history = params.gitHistory;
+        if (
+          history.baseCommit !== snapshot.baseCommit ||
+          !history.descendsFromBase ||
+          history.unavailableReason
+        ) {
+          throw new Error(
+            "Publication integration retained history does not match its source base.",
+          );
+        }
+        try {
+          await importWorkerWorkspaceHistory({
+            root: dir,
+            gitHistory: history,
+            gitPackPath: path.join(params.inputRoot, "history.pack"),
+            baseEnv: env,
+            assertCurrent: () => params.signal?.throwIfAborted(),
+          });
+        } catch {
+          params.signal?.throwIfAborted();
+          throw new Error("Publication integration retained Git history could not be verified.");
+        }
+        // Uncommitted checkpoint changes keep the established normalized-input path.
+        // Only this exact saved tree can borrow the retained commit's real ancestry.
+        if (
+          (await text(["rev-parse", `${history.headCommit}^{tree}`])) === snapshot.workspaceTree
+        ) {
+          retainedHead = history.headCommit;
+        }
+      }
       const remoteBlobs = new Set<string>();
       for (const commit of [
         snapshot.baseCommit,
@@ -156,10 +191,12 @@ export async function integrateNodeRepositoryPublication(params: {
       if ((await text(["write-tree"])) !== snapshot.workspaceTree) {
         throw new Error("Publication integration input tree changed.");
       }
-      const accepted = await text(
-        ["commit-tree", snapshot.workspaceTree, "-p", snapshot.baseCommit],
-        "Accepted publication checkpoint\n",
-      );
+      const accepted =
+        retainedHead ??
+        (await text(
+          ["commit-tree", snapshot.workspaceTree, "-p", snapshot.baseCommit],
+          "Accepted publication checkpoint\n",
+        ));
       const merge = await run(["merge-tree", "--write-tree", accepted, params.mainCommit]);
       if (merge.code === 1) {
         throw new NodeWorkerPublicationConflictError();
@@ -260,6 +297,7 @@ export async function integrateNodePublicationTransfer(
         sourceUrl: params.transfer.sourceUrl,
         targetUrl: params.transfer.targetUrl,
         token: params.transfer.gitToken,
+        gitHistory: params.transfer.checkpointGitHistory,
         signal: params.signal,
       });
       const manifests = path.join(params.manifestHome, ".openclaw-worker", "manifests");

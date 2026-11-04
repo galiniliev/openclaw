@@ -7,6 +7,7 @@ export type RepositoryPublicationIntegrationInput = {
   readNativeCredential?: import("../agents/github-credential-reader.js").GitHubCredentialReader;
   snapshotRoot: string;
   snapshotDigest: string;
+  history?: import("./worker-environments/session-repository-checkpoints.js").RepositoryGitHistory;
   mainCommit: string;
   sourceUrl: string;
   targetUrl: string;

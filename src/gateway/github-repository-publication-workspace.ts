@@ -16,7 +16,10 @@ import {
   readGitHubRepositoryPublicationMetadata,
   type GitHubRepositoryPublicationSnapshot,
 } from "./github-repository-publication-snapshot.js";
-import { withSessionRepositoryCheckpoint } from "./worker-environments/session-repository-checkpoints.js";
+import {
+  withSessionRepositoryCheckpoint,
+  type RepositoryGitHistory,
+} from "./worker-environments/session-repository-checkpoints.js";
 
 export async function prepareRepositoryOwner(session: PublicationSessionIdentity) {
   const current = await prepareGitHubPublicationWorkspaceOwner(session);
@@ -106,6 +109,7 @@ export async function captureCheckpoint<T>(
     prepared: {
       snapshot: GitHubRepositoryPublicationSnapshot;
       snapshotRoot: string;
+      history: RepositoryGitHistory;
       authority: GitHubPublicationTransitionAuthority;
     },
   ) => Promise<T>,
@@ -179,7 +183,16 @@ export async function captureCheckpoint<T>(
           source_index_tree: snapshot.baseTree,
           workspace_tree: snapshot.workspaceTree,
         },
-        { snapshot, snapshotRoot: payload.publicationStagingRoot, authority: selectedAuthority },
+        {
+          snapshot,
+          snapshotRoot: payload.publicationStagingRoot,
+          history: {
+            gitHistory: payload.gitHistory,
+            gitPackPath: payload.gitPackPath,
+            gitHistoryNote: payload.gitHistoryNote,
+          },
+          authority: selectedAuthority,
+        },
       );
     },
   );

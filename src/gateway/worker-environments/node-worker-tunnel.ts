@@ -369,8 +369,7 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
         supportsNativeQuiescence: async () =>
           (await readWorkspaceHost()).workspaceQuiescence ===
           NODE_WORKER_WORKSPACE_QUIESCENCE_VERSION,
-        supportsPublicationIntegration: async () =>
-          (await readWorkspaceHost()).publicationIntegration === 1,
+        readPublicationCapabilities: readWorkspaceHost,
         supportsGitResults: async () =>
           (await readWorkspaceHost()).workspaceResultVersion === NODE_WORKSPACE_RESULT_VERSION,
         workspaceTransfer: options.workspaceTransfer,

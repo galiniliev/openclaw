@@ -49,6 +49,7 @@ import {
   listRepositoryGitHubPublicationsAsync,
   readRepositoryGitHubPublicationBranchAsync,
   readRepositoryGitHubPublicationAsync,
+  readRepositoryGitHubPublicationInputAsync,
 } from "./github-publication-store-async.js";
 import { createRepositoryGitHubPublicationExecution } from "./github-repository-publication-execution.js";
 import { prepareRepositoryGitHubPublicationTarget } from "./github-repository-publication-executor.js";
@@ -295,14 +296,19 @@ export function createRepositoryGitHubPublicationCoordinator(params: {
       throw new Error("GitHub publication idempotency key was reused.");
     }
     const expected = input.selection?.source === "shared" ? input.selection.expected : undefined;
-    if (
-      existing &&
-      terminalRepositoryGitHubPublication(existing) &&
-      !retryableRepositoryGitHubPublication(existing)
-    ) {
+    const retryable =
+      existing !== undefined &&
+      retryableRepositoryGitHubPublication(
+        existing,
+        existing.error_code === "push_rejected"
+          ? await readRepositoryGitHubPublicationInputAsync(existing)
+          : undefined,
+      );
+    assertCurrent();
+    if (existing && terminalRepositoryGitHubPublication(existing) && !retryable) {
       const result = projectGitHubPublicationResult(existing);
       assertExpectedSharedGitHubPublisher(expected, result.publisher!);
-      return existing;
+      return { row: existing, retryable };
     }
     if (existing) {
       const original = decodeGitHubPublicationRequester(existing.requester_authority_json);
@@ -339,7 +345,7 @@ export function createRepositoryGitHubPublicationCoordinator(params: {
       if (!matchesGitHubPublicationIdentityRow(existing, identity)) {
         throw new Error("GitHub publication identity changed.");
       }
-      return existing;
+      return { row: existing, retryable };
     }
     const target = await prepareRepositoryGitHubPublicationTarget(
       initial.workspace,
@@ -363,7 +369,7 @@ export function createRepositoryGitHubPublicationCoordinator(params: {
     });
     try {
       assertCurrent();
-      return await insertRepositoryGitHubPublicationAsync(row, source);
+      return { row: await insertRepositoryGitHubPublicationAsync(row, source), retryable: false };
     } finally {
       await source.release();
     }
@@ -374,7 +380,7 @@ export function createRepositoryGitHubPublicationCoordinator(params: {
       if (expected?.source === "personal") {
         throw new Error("My GitHub publication requires direct personal authorization.");
       }
-      const row = await admitShared(
+      const { row } = await admitShared(
         {
           ...input,
           selection: {
@@ -413,9 +419,11 @@ export function createRepositoryGitHubPublicationCoordinator(params: {
         throw new Error("GitHub publication run identity changed.");
       }
       const claim = input.expectedRunId !== undefined ? currentClaim : undefined;
-      let row = await admitShared(input, claim);
+      const admitted = await admitShared(input, claim);
+      let { row } = admitted;
+      const { retryable } = admitted;
       if (
-        (terminalRepositoryGitHubPublication(row) && !retryableRepositoryGitHubPublication(row)) ||
+        (terminalRepositoryGitHubPublication(row) && !retryable) ||
         claim ||
         (await placements.getAsync(row.session_id))?.turnClaim
       ) {
@@ -437,7 +445,7 @@ export function createRepositoryGitHubPublicationCoordinator(params: {
             assertCustody,
             assertCurrent: input.requester.assertInvocationCurrent,
             requester: input.requester,
-            retryUnavailable: retryableRepositoryGitHubPublication(row),
+            retryUnavailable: retryable,
           }),
       );
     },

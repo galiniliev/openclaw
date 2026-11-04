@@ -95,6 +95,7 @@ const WorkerHost = z
       capturedExecPolicy: z.literal(true).optional(),
       workspaceResultVersion: z.literal(NODE_WORKSPACE_RESULT_VERSION).optional(),
       publicationIntegration: z.literal(1).optional(),
+      publicationGitHistory: z.literal(true).optional(),
       workspaceQuiescence: z.literal(NODE_WORKER_WORKSPACE_QUIESCENCE_VERSION).optional(),
       launchToolNames: LaunchToolNames.optional(),
       idleRetention: z.literal(true).optional(),

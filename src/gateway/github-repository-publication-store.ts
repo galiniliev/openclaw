@@ -1,5 +1,6 @@
 import type { RepositoryGitHubPublicationRow } from "../state/github-publication-read.types.js";
 import { executeExistingOpenClawStateRead } from "../state/openclaw-state-db-readonly.js";
+import { matchesRepositoryGitHubPublicationInput } from "./github-repository-publication.kernel.js";
 import type {
   RepositoryGitHubPublicationPendingQuery,
   RepositoryGitHubPublicationStatusRow,
@@ -25,11 +26,17 @@ export function terminalRepositoryGitHubPublication(
 }
 
 /** Only an explicit retry can reclaim a captured request that never dispatched a ref or PR. */
-export function retryableRepositoryGitHubPublication(row: RepositoryGitHubPublicationRow): boolean {
+export function retryableRepositoryGitHubPublication(
+  row: RepositoryGitHubPublicationRow,
+  managedInput?: RepositoryGitHubPublicationRow,
+): boolean {
   return (
     row.owner_profile_id === null &&
     row.status === "failed" &&
-    row.error_code === "unavailable" &&
+    (row.error_code === "unavailable" ||
+      (row.error_code === "push_rejected" &&
+        managedInput !== undefined &&
+        matchesRepositoryGitHubPublicationInput(row, managedInput))) &&
     row.checkpoint_ref !== null &&
     row.checkpoint_digest !== null &&
     row.head_commit === null &&

@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
 import fsp from "node:fs/promises";
+import path from "node:path";
 import {
   gitMaintenanceEnvironment,
   gitMaintenanceEnvironmentExpression,
 } from "../../infra/git-maintenance-env.js";
+import type { NodeWorkerHostDeclaration } from "../../infra/node-runner-inventory.js";
+import { resolvePreferredOpenClawTmpDir } from "../../infra/tmp-openclaw-dir.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import type { SpawnResult } from "../../process/exec.js";
 import type { NodeWorkerWorkspaceExecResult } from "../../worker/node-workspace-protocol.js";
@@ -514,28 +517,63 @@ export async function prepareNodeWorkerPublicationIntegration(
     environmentId: string;
     signal: AbortSignal;
     workspaceTransfer: NodeWorkspaceTransferService;
-    supportsIntegration?: () => Promise<boolean>;
+    readCapabilities?: () => Promise<
+      Pick<
+        Extract<NodeWorkerHostDeclaration, { enabled: true }>,
+        "publicationIntegration" | "publicationGitHistory"
+      >
+    >;
     transfer: ReturnType<typeof createNodeWorkspaceTransferCommand>;
   },
   input: RepositoryPublicationIntegrationInput,
 ) {
   const { transfer } = params;
+  const history = input.history;
+  const gitHistory =
+    history?.gitPackPath &&
+    !history.gitHistoryNote &&
+    history.gitHistory?.descendsFromBase &&
+    !history.gitHistory.unavailableReason &&
+    history.gitHistory.headCommit !== history.gitHistory.baseCommit
+      ? history.gitHistory
+      : undefined;
   input.assertCurrent();
-  if (!(await params.supportsIntegration?.())) {
+  const capabilities = await params.readCapabilities?.();
+  if (
+    capabilities?.publicationIntegration !== 1 ||
+    (gitHistory && capabilities.publicationGitHistory !== true)
+  ) {
     throw new StaleWorkerBuildError(
       "Worker publication integration requires the current runtime; retry the same request after normal runtime refresh.",
     );
   }
   input.assertCurrent();
+  let temporaryRoot: string | undefined;
+  await using _ = {
+    [Symbol.asyncDispose]: async () => {
+      if (temporaryRoot) {
+        await fsp.rm(temporaryRoot, { recursive: true, force: true });
+      }
+    },
+  };
+  let inputRoot = input.snapshotRoot;
+  if (gitHistory) {
+    temporaryRoot = await fsp.mkdtemp(
+      path.join(resolvePreferredOpenClawTmpDir(), "publication-input-"),
+    );
+    inputRoot = path.join(temporaryRoot, "input");
+    await fsp.cp(input.snapshotRoot, inputRoot, { recursive: true });
+    await fsp.copyFile(history!.gitPackPath!, path.join(inputRoot, "history.pack"));
+  }
   const captured = await captureWorkspaceSnapshot({
-    root: input.snapshotRoot,
+    root: inputRoot,
     baseCommit: null,
     signal: params.signal,
   });
   input.assertCurrent();
   const download = params.workspaceTransfer.publishSnapshot(
     params.environmentId,
-    { ...captured, root: input.snapshotRoot },
+    { ...captured, root: inputRoot },
     input.assertCurrent,
     false,
   );
@@ -554,6 +592,7 @@ export async function prepareNodeWorkerPublicationIntegration(
         inputToken: download,
         inputManifestRef: captured.manifestRef,
         inputDigest: input.snapshotDigest,
+        ...(gitHistory ? { checkpointGitHistory: gitHistory } : {}),
         sourceUrl: input.sourceUrl,
         targetUrl: input.targetUrl,
         mainCommit: input.mainCommit,
