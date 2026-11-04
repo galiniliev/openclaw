@@ -16,6 +16,7 @@ export const gatewayDatabaseWorkerTestFiles = [
   "src/gateway/worker-environments/placement-dispatch-retained-recovery.test.ts",
   "src/gateway/worker-environments/placement-dispatch-repository-ref-recovery.test.ts",
   "src/gateway/worker-environments/placement-dispatch-startup-containment.test.ts",
+  "src/gateway/worker-environments/provider-crabbox-prepared-fork.integration.test.ts",
   "src/gateway/worker-environments/provider-intent-replay.test.ts",
   "src/gateway/worker-environments/provider-node-resume.test.ts",
   "src/gateway/worker-environments/retained-lease-lifecycle.test.ts",

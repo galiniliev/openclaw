@@ -1,4 +1,10 @@
+import { coerceErrorMessage } from "openclaw/plugin-sdk/error-runtime";
+import type { WorkerProvider, WorkerLeaseStatus } from "openclaw/plugin-sdk/plugin-entry";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
+import {
+  prepareCrabboxAzureSnapshotContext,
+  type AzureSandboxSnapshotContext,
+} from "./crabbox-worker-azure-snapshot.js";
 import {
   crabboxCommandError,
   crabboxCommandOutput,
@@ -7,14 +13,27 @@ import {
   sanitizeCrabboxNotice,
   type LeaseCommandContext,
 } from "./crabbox-worker-command.js";
+import type { createCrabboxHeartbeatManager } from "./crabbox-worker-heartbeat.js";
 import { parseCrabboxLeaseLifetime, type ParsedInspect } from "./crabbox-worker-inspect.js";
-import { parseCrabboxDurationMs, type parseCrabboxProfile } from "./crabbox-worker-profile.js";
+import {
+  assertCrabboxLeaseId,
+  parseCrabboxCleanupProfile,
+  parseCrabboxDurationMs,
+  type parseCrabboxProfile,
+  resolveCrabboxWarmImageProfile,
+  resolveCrabboxProfileCommandEnv,
+} from "./crabbox-worker-profile.js";
 import { inspectWithContext, isNonRunnableState } from "./crabbox-worker-provision-commands.js";
+import {
+  inspectCrabboxRetainedLease,
+  type createCrabboxRetainedLeaseOperations,
+} from "./crabbox-worker-retention.js";
 import {
   resolveCrabboxCheckpointCaptureTimeoutMs,
   resolveCrabboxLifecycleTimeoutMs,
   WARM_IMAGE_COMMAND_ROUND_TRIP_TIMEOUT_MS,
 } from "./crabbox-worker-timeouts.js";
+import type { createCrabboxWarmImageManager } from "./crabbox-worker-warm-image.js";
 
 type CaptureContext = LeaseCommandContext & {
   profile: ReturnType<typeof parseCrabboxProfile>;
@@ -30,7 +49,7 @@ export async function prepareCrabboxCaptureLifetime(
   dependencies: {
     observe: (inspect: ParsedInspect) => void;
   },
-): Promise<void> {
+): Promise<ParsedInspect> {
   const assertCurrent = () => {
     context.signal?.throwIfAborted();
     context.assertCurrent?.();
@@ -84,7 +103,7 @@ export async function prepareCrabboxCaptureLifetime(
     dependencies.observe({ ...observed, lifetime: { ...observed.lifetime, policyNotice: notice } });
   }
   if ((observed.lifetime?.expiresAtMs ?? 0) - Date.now() >= windowMs) {
-    return;
+    return observed;
   }
 
   const totalDeadline = async (current: ParsedInspect): Promise<number | undefined> => {
@@ -133,7 +152,7 @@ export async function prepareCrabboxCaptureLifetime(
     deadline = observed.lifetime?.expiresAtMs;
   }
   if (deadline !== undefined && deadline - Date.now() >= windowMs) {
-    return;
+    return observed;
   }
   const lifetime = observed.lifetime;
   if (lifetime?.runtimeExtension === false || context.provider === "daytona") {
@@ -225,8 +244,156 @@ export async function prepareCrabboxCaptureLifetime(
     deadline = await totalDeadline(observed);
     assertCurrent();
     if (deadline !== undefined && deadline - Date.now() >= windowMs) {
-      return;
+      return observed;
     }
     failure("extension did not confirm sufficient remaining total lifetime", observed);
   }
+  return observed;
+}
+
+export function createCrabboxProviderLeaseLifecycle(dependencies: {
+  heartbeats: ReturnType<typeof createCrabboxHeartbeatManager>;
+  warmImages: ReturnType<typeof createCrabboxWarmImageManager>;
+  retainedLease: ReturnType<typeof createCrabboxRetainedLeaseOperations>;
+  resolveLeaseContext: (lease: Parameters<WorkerProvider["inspect"]>[0]) => Promise<{
+    context: LeaseCommandContext &
+      Pick<
+        ReturnType<typeof parseCrabboxProfile>,
+        "heartbeatIntervalMs" | "heartbeatTimeoutMs" | "idleTimeout"
+      >;
+    profile: ReturnType<typeof parseCrabboxProfile>;
+  }>;
+  stopLease: (context: LeaseCommandContext, onCleanupAccepted?: () => void) => Promise<void>;
+  providerAbort: Pick<AbortController, "signal">;
+  warn: (message: string) => void;
+  snapshotHelperPath?: string;
+}): Pick<WorkerProvider, "inspect" | "destroy"> {
+  const {
+    heartbeats,
+    warmImages,
+    retainedLease,
+    resolveLeaseContext,
+    stopLease,
+    providerAbort,
+    warn,
+  } = dependencies;
+  return {
+    async inspect(lease): Promise<WorkerLeaseStatus> {
+      if (lease.retention) {
+        return inspectCrabboxRetainedLease(
+          {
+            ...lease,
+            retention: lease.retention,
+            signal: lease.signal ?? providerAbort.signal,
+            assertCurrent: () => lease.signal?.throwIfAborted(),
+          },
+          retainedLease,
+        );
+      }
+
+      const { context } = await resolveLeaseContext(lease);
+      const inspected = await inspectWithContext({
+        ...context,
+        signal: lease.signal,
+      });
+      lease.signal?.throwIfAborted();
+      if (!inspected || isNonRunnableState(inspected.state)) {
+        await heartbeats.stop(context.id);
+        return { status: "unknown" };
+      }
+      // `ready` is an SSH probe; every recognized nonterminal lease remains active.
+      heartbeats.start({ ...context, lifetime: inspected.lifetime });
+      return { status: "active", sharedHost: false };
+    },
+    async destroy(lease): Promise<void> {
+      assertCrabboxLeaseId(lease.leaseId);
+      // An admitted image capture still owns the source. Plain teardown fences
+      // renewal immediately; capture transfers it until the waiting stop below.
+      if (parseCrabboxCleanupProfile(lease.profile).warmImage === false) {
+        await heartbeats.stop(lease.leaseId);
+      }
+      const { context, profile } = await resolveLeaseContext(lease).catch(
+        async (error: unknown) => {
+          await heartbeats.stop(lease.leaseId);
+          throw error;
+        },
+      );
+      let onCleanupAccepted = lease.onCleanupAccepted;
+      const teardown = (async () => {
+        try {
+          if (
+            await warmImages.releaseRejectedSnapshot({ ...context, retention: lease.retention })
+          ) {
+            return;
+          }
+          const allocation = await warmImages.lookupLease(context.id);
+          const captureProfile = resolveCrabboxWarmImageProfile(
+            profile,
+            allocation?.machineClass ?? profile.class,
+            allocation ? (allocation.os ?? "linux") : profile.target,
+          );
+          if (captureProfile.warmImage && allocation && !allocation.retentionOwnerBinding) {
+            let azureSnapshot: AzureSandboxSnapshotContext | undefined;
+            if (captureProfile.sdkPython) {
+              const helperPath = dependencies.snapshotHelperPath;
+              if (!helperPath) {
+                throw new Error(
+                  "Snapshot helper is missing; reinstall the qualified Crabbox provider package",
+                );
+              }
+              azureSnapshot = await prepareCrabboxAzureSnapshotContext({
+                binary: context.binary,
+                profile: captureProfile,
+                helperPath,
+                signal: providerAbort.signal,
+                assertCurrent: () => providerAbort.signal.throwIfAborted(),
+              });
+              captureProfile.azureSandboxScope = azureSnapshot.providerScope;
+            }
+            await warmImages.capture({
+              ...context,
+              azureSnapshot,
+              timingIdentity: allocation.timingIdentity,
+              signal: providerAbort.signal,
+              profile: captureProfile,
+              teardown: true,
+              onCaptureStart: () => {
+                onCleanupAccepted?.();
+                onCleanupAccepted = undefined;
+              },
+            });
+          }
+        } catch (error) {
+          warn(
+            `Crabbox warm image capture failed for lease ${context.id}: ${coerceErrorMessage(error)}; next step: crabbox stop --provider ${context.provider} ${context.id}`,
+          );
+        }
+        await stopLease(context, onCleanupAccepted);
+      })();
+      await teardown;
+    },
+  };
+}
+
+export async function resolveCrabboxLeaseContext(
+  lease: Parameters<WorkerProvider["inspect"]>[0],
+  resolveBinary: (
+    explicit: string | undefined,
+    signal?: AbortSignal,
+  ) => Promise<{ binary: string }>,
+) {
+  const profile = parseCrabboxCleanupProfile(lease.profile);
+  assertCrabboxLeaseId(lease.leaseId);
+  return {
+    context: {
+      binary: (await resolveBinary(profile.binary, lease.signal)).binary,
+      heartbeatIntervalMs: profile.heartbeatIntervalMs,
+      heartbeatTimeoutMs: profile.heartbeatTimeoutMs,
+      id: lease.leaseId,
+      idleTimeout: profile.idleTimeout,
+      provider: profile.provider,
+      providerEnv: resolveCrabboxProfileCommandEnv(profile),
+    },
+    profile,
+  };
 }

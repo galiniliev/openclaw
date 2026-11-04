@@ -26,6 +26,9 @@ import {
 } from "./crabbox-worker-node-enrollment.js";
 import {
   createNodeBootstrapFixture,
+  expectFailure,
+  expectAbsent,
+  expectPrivate,
   createNodePackageFixture,
   expectSetupPhases,
   readLaunch,
@@ -78,28 +81,6 @@ const desktopEnvironment = (runtimeDir = "/run/fixture") => ({
   DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/fixture/bus",
   ...(runtimeDir ? { XDG_RUNTIME_DIR: runtimeDir } : {}),
 });
-function expectFailure(
-  result: { code: number | null; output: string },
-  diagnosis: string | RegExp,
-) {
-  expect(result).toMatchObject({
-    code: 1,
-    output:
-      typeof diagnosis === "string"
-        ? expect.stringContaining(diagnosis)
-        : expect.stringMatching(diagnosis),
-  });
-}
-function expectAbsent(...files: string[]) {
-  for (const file of files) {
-    expect(fs.existsSync(file), file).toBe(false);
-  }
-}
-function expectPrivate(launch: object) {
-  expect(launch).not.toHaveProperty("token");
-  expect(launch).not.toHaveProperty("setupCode");
-}
-
 const packageFixture = (build: string, postinstall = "") =>
   createNodePackageFixture((prefix) => tempDirs.make(prefix), build, receipts, postinstall);
 
@@ -600,7 +581,7 @@ exit ${testCase.status}`,
     const manager = createCrabboxWarmImageManager({
       state: crabboxState,
       isLeaseActive: () => false,
-      prepareCapture: async () => {},
+      prepareCapture: async ({ id }) => ({ id, state: "ready", tailscaleEnabled: false }),
       warn,
     });
     for (const [index, artifact] of [oldArtifact, currentArtifact, currentArtifact].entries()) {

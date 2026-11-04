@@ -30,15 +30,78 @@ An empty committed workspace uses the profile's shared runtime image instead of 
 
 Environment status reports `stopping` while teardown is pending. Stop cloud worker can finish after session shutdown and a claimed warm-image capture, while the environment remains `destroying`. Capture and confirmed lease release continue under the environment lifecycle owner; only confirmed release changes the environment to `destroyed`. Failures remain visible and retryable. If the Gateway exits mid-capture, Crabbox's idle timeout or TTL can reap the lease, and the next Gateway reconciles the retained cleanup request.
 
+### Azure Sandbox snapshots
+
+Azure Sandbox capture uses the profile's preinstalled snapshot SDK runtime and
+canonical clean-image verifier. Configure `sdkPython`, `configFile`, `sdkIdentity`,
+and `snapshotVerifier` as described in the
+[Crabbox profile reference](/gateway/config-cloud-workers#crabbox-profile).
+The Gateway must supply the complete explicit Crabbox routing environment:
+`CRABBOX_AZURE_SANDBOX_REGION`, `CRABBOX_AZURE_SANDBOX_SUBSCRIPTION_ID`,
+`CRABBOX_AZURE_SANDBOX_RESOURCE_GROUP`, and `CRABBOX_AZURE_SANDBOX_GROUP`.
+These existing Crabbox inputs override file configuration and bind SDK snapshot
+operations to the same provider scope. Scope stored only in a Crabbox config file
+is insufficient for snapshot preparation; OpenClaw does not parse private YAML
+or infer missing routing fields.
+The verifier runs on the clean worker before node enrollment. Capture waits for
+the exact snapshot to become readable in its original provider scope before
+publishing it for reuse.
+
+Before capture, the native project owner rechecks the admitted source and completed
+workspace manifests. The verifier receives that exact root set and the current
+runtime artifact descriptors over bounded private stdin. It checks credential and
+session-state absence in both machine and prepared homes, rejects unknown cache
+roots, and verifies the current installed runtime with the native cache predicate.
+The baked runtime remains separate base-image provenance after a runtime top-up.
+Verifier failures report closed phase/process metadata, never child output or
+repository content. A capture without a current verification owner fails closed;
+an optional teardown capture is skipped visibly.
+
+New session-private retained allocations may borrow a compatible clean template
+for the exact admitted repository. Their immutable snapshot receipt is recorded
+before Crabbox's fixed allocation command. Missing receipt exports are regenerated
+from that recorded binding; retries keep the same generation. A new retained fork
+uses canonical project preparation and registers its checked paths with the new
+node owner before session binding. A completed cache at the requested revision
+does not upload source or rerun setup. Private allocations are never recaptured. Cold initial allocations prepare
+their own checkout; existing retained sessions resume their saved private lease
+without choosing another template or resetting private files.
+Private session state never becomes a capture source. Deleting one session
+releases its template borrow after physical cleanup; it does not delete a template
+shared with other allocations.
+
+Provider scope and the selected source disk participate in compatibility. Snapshot
+deletion retains its original route and remains pending until a scoped read
+confirms absence. An interrupted capture keeps its recorded source and operation
+ownership; a lost response never triggers another capture automatically.
+
 ### Later sessions and refresh
 
-A matching ready worker skips provisioning. Otherwise, a compatible snapshot starts a new machine and New Session shows **Starting from snapshot…**. The fork updates its checkout to the requested commit and installs the current runtime when needed before enrollment. Profile setup is already captured; post-create/start commands run after session binding.
+A matching ready worker skips provisioning. Otherwise, a compatible snapshot starts a new machine and New Session shows **Starting from snapshot…**. New forks update their checkout to the requested commit and install the current runtime when needed before enrollment. Profile setup is already captured; post-create/start commands run after session binding.
+
+Shared clean project snapshots do not bind the moving repository commit. A new
+session-private retained fork uses the same canonical project preparation as other
+new forks: a completed checkout at the requested revision needs no source upload
+or setup; a different revision verifies the captured baseline, advances the
+checkout, and runs the existing content-update setup before enrollment. Recipe,
+setup, machine, ABI, and source-access compatibility still apply. Ready workers
+continue to bind the exact requested commit and runtime.
+
+This applies only while preparing a new allocation from a clean shared snapshot.
+Existing retained sessions resume their exact private disk and owner binding;
+ordinary resume and settlement never refresh that checkout from a Gateway mirror
+or rerun old input. Private allocations remain ineligible for shared capture,
+including after revision reconciliation. Persisted revision-bound cache keys are
+not relabeled or rewritten: a new request starts cold once when its snapshot has
+that older incompatible key, then subsequent commits can reuse the new clean
+snapshot. Existing allocation choices, pins, borrowers, and cleanup debt remain
+with their original owners.
 
 Snapshot compatibility covers the repository and source-access scope, backend, exact machine class, operating system, desktop setting, profile setup command, setup-secret names and store references, repository recipe, and whether setup was skipped. Linked worktrees of one local repository share snapshots; separate clones do not. Repository-only sources also bind their repository instance, agent and selected GitHub identity. A changed recipe, machine configuration, or source-access scope needs compatible preparation, usually a cold build. Secret values and temporary sentinels never participate in the key.
 
 The OpenClaw runtime is separate from snapshot compatibility. Gateway updates, runtime archives, enabled plugins, execution mode, profile names, lease durations, and reserve limits do not invalidate an otherwise compatible snapshot. Ready workers, however, must match the current runtime, profile, and commit before use.
 
-A foreground fork can refresh a changed commit or top up its runtime without capturing a replacement just for that change. Background reserves and explicit builds can publish refreshed snapshots. Initial capture, interrupted capture recovery, required setup repair, and age refresh still use the capture boundary. Unpinned images become eligible for refresh after `refreshAfter` (24 hours by default); runtime-only images refresh at eligible teardown. Disabling reserves also disables automatic background refresh.
+A foreground non-retained project fork can refresh a changed commit or top up its runtime without capturing a replacement just for that change. Background reserves and explicit builds can publish refreshed snapshots. A cold build can replace the image generation recorded when it was admitted; a later publication prevents that older build from replacing the newer image. Initial capture, interrupted capture recovery, required setup repair, and age refresh still use the capture boundary. Unpinned images become eligible for refresh after `refreshAfter` (24 hours by default); runtime-only images refresh at eligible teardown. Disabling reserves also disables automatic background refresh.
 
 Retries and Gateway restarts keep the originally selected cold allocation or checkpoint. A failed fork reports an error rather than silently allocating another machine. Missing, retiring, or incompatible snapshots cause new allocations to start cold. A failed fork that finds its snapshot missing retires it, so later allocations start cold.
 
@@ -112,7 +175,28 @@ Set `cloudWorkers.profiles.<id>.readyWorkers` for the per-project target and `cl
 
 Ready workers incur running-machine charges until deletion is confirmed. Activation-driven demand expires using the provider's idle timeout; refill and Gateway restart do not extend it. Standing runtime-image demand remains while its policy is enabled, but never extends an existing worker's finite reserve deadline. Expired, incompatible, disabled, and surplus workers retire. Temporary provider or artifact-observation failures defer maintenance, retaining existing capacity and its expiry. Check the pool limits and Gateway's refill diagnostic if no reserve appears after activation.
 
-**Build on demand:** `environments.prepare` accepts `{ profileId, projectPath }` with `operator.admin`, prepares a local Git checkout's committed `HEAD`, and authorizes its setup recipe. It returns `{ environmentId, preparationKey, reused }`, reusing matching work already in progress. It requires an eligible profile and room under the pool cap. A build can finish with `readyWorkers: 0`, then ordinary reserve policy may retire it as surplus. `environments.destroy` cancels an unused build or reserve and waits for provider work and cleanup to settle.
+**Build on demand:** `environments.prepare` accepts `{ profileId, projectPath }` with `operator.admin`, prepares a local Git checkout's committed `HEAD`, and authorizes its setup recipe. It returns `{ environmentId, preparationKey, cacheKey, reused }`, reusing matching work already in progress. It requires an eligible profile and room under the pool cap. A build can finish with `readyWorkers: 0`, then ordinary reserve policy may retire it as surplus. `environments.destroy` cancels an unused build or reserve and waits for provider work and cleanup to settle.
+
+Repository-only callers can instead pass
+`{ profileId, repository: { agentId, url, ref? } }`; `projectPath` and `repository`
+are exclusive. This mode keeps the original authenticated request and repository
+access current through preparation and returns the same fields plus
+`status: "ready"` only after the native lifecycle supplies its final readiness
+receipt. `preparationKey` binds the exact commit/runtime ready-worker intent;
+`cacheKey` identifies compatible clean snapshot setup independently of the moving
+commit. Retain the returned key when correlating `crabbox.images.list` after an
+unused builder retires. Image `preparationKey` and `baseCommit` describe the
+captured generation, so they need not match a later request. The key alone does
+not prove provider readability or authorize allocation; the provider still owns
+selection and its existing scope, generation, retirement, and pin checks. Older
+responses may omit `cacheKey`; consumers must report that missing fact instead of
+reconstructing it or treating a repository label as compatibility proof. It does not dispatch a conversation turn. Repository credentials remain
+on the Gateway, and background refill cannot reuse the caller's reader after
+the request closes. A canceled or timed-out call is not proof that an admitted
+provider effect did not happen: inspect its durable environment and snapshot
+ownership before retrying. For a known unused build, `environments.destroy` uses
+that exact environment ID; it does not acknowledge or erase uncertain capture
+debt.
 
 An already-admitted capture can finish after reserve-demand expiry within its secured source lifetime and provider budget, while its worker remains counted. Reserve-demand expiry does not grant more provider lifetime or allow later enrollment, readiness, or consumption; cleanup follows settled capture custody.
 
@@ -120,9 +204,17 @@ An already-admitted capture can finish after reserve-demand expiry within its se
 
 Open **Settings → Connections → Cloud environments**. Each repository has one row showing **Ready**, **Building**, **Cold only**, or **Needs attention**. Select it to inspect its snapshots, recorded setup source, step timings, and failures. **Machine → Change** sets the repository's default profile. Inventory refreshes while builds, captures, or ready workers are present, and after deferred plugin activation.
 
+Either `environments.prepare` selector also accepts optional `executionMode`:
+`"remote-exec"` or `"worker-turn"`. An explicit target must be supported by the
+configured provider and is checked before source or runtime-artifact preparation.
+Without it, preparation retains the existing preference for `worker-turn` when
+supported, otherwise `remote-exec`. Select `remote-exec` when preparing for a
+Codex cloud session: runtime/plugin selection and preparation identity must match
+the later session's mode; a `worker-turn` build is not equivalent.
+
 **Rebuild** prepares the recorded local project's committed `HEAD` without a session. It requires administrator access, a local project root, an eligible profile, and pool capacity. Repository-only sources cannot use this action. Rebuild follows normal refresh policy and may reuse a matching build or reserve; it does not force snapshot replacement. Active builds offer **Cancel**; failed builds offer **Dismiss**, which hides the row until reload while the terminal record remains retained. Orphaned builds still awaiting cleanup cannot be dismissed.
 
-Snapshot overflow actions offer **Pin**, **Unpin**, **Delete**, and, when a previous generation exists, **Roll back**. Pinning protects an image from automatic retirement. Delete requires confirmation and is unavailable for pinned, held, or capturing images. Pin changes and rollback are unavailable during capture or retirement. Failed deletion remains pending and retries during maintenance.
+Snapshot overflow actions offer **Pin**, **Unpin**, **Delete**, and, when a previous generation exists, **Roll back**. Pinning protects an image from automatic retirement. Delete requires confirmation and is unavailable for pinned, held, or capturing images. Pin changes and rollback are unavailable during capture or when an affected generation already has a retirement obligation. Failed deletion remains pending and retries during maintenance.
 
 Rollback restores the previous checkpoint as current. The demoted current image is retained when pinned or when `keepPrevious: 1`; otherwise it retires after allocations release it. A retained previous checkpoint can still be rolled back after lowering `keepPrevious` to `0`. If both generations are pinned, unpin one before publishing another replacement.
 
@@ -162,13 +254,53 @@ and sources that are still running or unconfirmed keep the capture paused for
 manual recovery. Doctor and warm-image inspection include the candidate checkpoint
 IDs discovered during maintenance; warnings explain why automatic recovery stopped.
 
-Before manual recovery, stop the owning Gateway, any original capture processes, and the recovered worker. Inspect the reported candidate checkpoint IDs, or use the source lease and capture time to reconcile the uncertain operation in Crabbox's checkpoint catalog, and resolve any untracked provider artifact. Only after those steps, copy the exact capture selector from status:
+Azure SDK snapshot captures remain held for reconciliation in their original Azure scope.
+
+Before manual recovery, stop the owning Gateway, any original capture processes, and the recovered worker. Inspect the reported candidate checkpoint IDs, or use the source lease and capture time to reconcile the uncertain operation in Crabbox's checkpoint catalog or the original Azure snapshot inventory, and resolve any untracked provider artifact. Only after those steps, copy the exact capture selector from status:
 
 ```bash
 openclaw crabbox warm-images --recover <capture-selector> --acknowledge-provider-cleanup
 ```
 
 The acknowledgement attests that the original capture and worker are stopped and untracked artifacts are resolved; elapsed time alone does not establish those facts. Recovery clears that capture reservation and its source lease's allocation, preserves known checkpoint references and all other allocation choices, and rejects a replaced selector. It does not stop processes, run provider commands, delete snapshots, or allocate a worker. Restart the Gateway afterward; the next eligible worker can capture again. Failed checkpoint retirements retry during periodic maintenance or that profile's later capture or warm-image-enabled worker teardown after provider deletion errors are resolved; they do not use capture recovery.
+
+### V4 retirement and cutover contract
+
+The existing SQLite-backed profile row owns one capture operation and a bounded
+collection of independent retirement obligations. A held, detached retirement does
+not block another capture. Capture publication atomically preserves all prior debt
+and records any displaced generation. Allocation choices, generation fences, slots,
+pins, provider scope, original operation/effect identities, and retained disk owners
+remain authoritative; session completion never releases a borrower.
+
+The collection is limited to 64 obligations and the existing 1 MiB value budget.
+Capture admission reserves two 64 KiB descriptors before provider capture; oversized
+new descriptors refuse before submission or retain uncertain capture ownership on
+an invalid provider response. Status reports structural capture eligibility and
+held retirements separately; it does not replace project/runtime verification.
+
+Capture admission reserves debt and row capacity before provider capture. Active or
+uncertain captures, retiring selectable slots, two pinned slots, and exhausted
+capacity still block publication. Only the existing retirement owner can delete an
+unheld, unpinned generation, using its original route and independently confirmed
+result. Failure or unknown outcome retains the obligation. Pin and rollback cannot
+revive a retiring generation or discard unrelated debt.
+
+Doctor migrates v3 to v4 under exclusive maintenance using the existing single-row
+comparison update, without provider effects. V4 is not writable by c43: its writer
+refuses the version and its Doctor must leave it unchanged. No downgrade or backup
+restore may discard obligations created after cutover. Promotion therefore requires
+quiescing the old plugin writer, backing up its state, migrating with the successor,
+and activating that same successor; a reload is suitable only if its owner proves
+that exact serialized migration boundary. Local deployment owns this operation.
+The public plugin reload route replaces code but does not run the required data
+migration. Plugin updates and force replacement refuse activation when recorded
+state migration still needs maintenance. Therefore live reload alone is not a
+qualified v3-to-v4 cutover. Use a package-only successor only when the installation
+owner can select it through the public package owner; otherwise use the canonical
+immutable distribution successor. In both cases stop the old writer and capture
+processes, back up, run the selected successor's Doctor, then start that successor.
+No capture, borrower release, or destructive cleanup is authorized by migration.
 
 ### Upgrade warm-image state
 
@@ -188,3 +320,15 @@ openclaw doctor --fix
 ```
 
 This recovery deletes only the unchanged legacy row matching that selector. It does not establish provider absence or clean up a machine for you. Keep the row when cleanup is uncertain. Checkpoints already forgotten by older code are not rediscovered; reconcile those manually through Crabbox. Do not run older and newer writers against the same state or downgrade while allocations, captures, or retirements remain unresolved.
+
+Offline image preparation consumes the first native installer's typed
+`openclaw.runtime-installation.v1` result through the Crabbox CLI runtime API.
+The image producer carries that result in its existing prepared-runtime manifest;
+it does not run a second setup command to manufacture a cache hit. Snapshot
+capture carries the current preparation's result through the existing verifier
+input, so a runtime top-up never borrows the baked image's result. The resulting
+snapshot records `installationVerified: true`; existing durable receipts with an
+actual `cacheHitVerified: true` remain readable. These are installation facts,
+not permission to skip enrollment verification or any credential and ownership check.
+
+A snapshot startup rejected before allocation can finish cleanup without deleting a worker that never existed. The allocation owner requalifies its original pinned binding and requires a complete local claim inventory with no matching lease. Legacy attempts also require the qualified consumer contract; a missing contract keeps cleanup pending. This releases only the failed allocation bookkeeping and preserves the shared snapshot and rejected binding exports. Timeouts, ambiguous failures, changed evidence, and existing claims retain their normal cleanup fences.

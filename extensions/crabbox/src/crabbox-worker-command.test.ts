@@ -317,3 +317,51 @@ it.each<AbsenceCase>([
     expect(warn).not.toHaveBeenCalled();
   }
 });
+
+it("keeps the selected provider route for cleanup without changing host environment", async () => {
+  const originalConfig = process.env.CRABBOX_CONFIG;
+  const originalIdentity = process.env.CRABBOX_AZURE_SANDBOX_CLIENT_ID;
+  const run = vi.spyOn(processRunner, "runCrabboxProcess").mockResolvedValue({
+    ...absentResult,
+    code: 0,
+    stderr: "",
+  });
+  await stopCrabboxLease({
+    binary: "crabbox",
+    id: LEASE_ID,
+    provider: "azure-sandbox",
+    warn: vi.fn(),
+    providerEnv: {
+      CRABBOX_CONFIG: "/qualified/provider/config",
+      CRABBOX_AZURE_SANDBOX_CLIENT_ID: "11111111-1111-4111-8111-111111111111",
+    },
+  });
+  expect(run).toHaveBeenCalledOnce();
+  expect(run.mock.calls[0]?.[1].env).toMatchObject({
+    CRABBOX_CONFIG: "/qualified/provider/config",
+    CRABBOX_AZURE_SANDBOX_CLIENT_ID: "11111111-1111-4111-8111-111111111111",
+  });
+  expect(process.env.CRABBOX_CONFIG).toBe(originalConfig);
+  expect(process.env.CRABBOX_AZURE_SANDBOX_CLIENT_ID).toBe(originalIdentity);
+});
+
+it("preserves prepared command environment while selecting its provider route", async () => {
+  const run = vi.spyOn(processRunner, "runCrabboxProcess").mockResolvedValue({
+    ...absentResult,
+    code: 0,
+    stderr: "",
+  });
+  await runCrabboxCommand({
+    binary: "crabbox",
+    action: "setup",
+    args: ["run"],
+    timeoutMs: 1_000,
+    env: { PATH: "/qualified/bin", PREPARED_SETUP: "synthetic-value" },
+    providerEnv: { CRABBOX_CONFIG: "/qualified/provider/config" },
+  });
+  expect(run.mock.calls[0]?.[1].env).toEqual({
+    PATH: "/qualified/bin",
+    PREPARED_SETUP: "synthetic-value",
+    CRABBOX_CONFIG: "/qualified/provider/config",
+  });
+});

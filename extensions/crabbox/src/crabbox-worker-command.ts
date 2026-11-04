@@ -12,7 +12,21 @@ export function sanitizeCrabboxNotice(text: string): string {
   return sliceUtf16Safe(redactToolPayloadText(text).replace(/\s+/gu, " ").trim(), 0, 512);
 }
 
-export type LeaseCommandContext = { binary: string; id: string; provider: string };
+export type CrabboxProviderEnvironment = {
+  CRABBOX_CONFIG?: string;
+  CRABBOX_AZURE_SANDBOX_CLIENT_ID?: string;
+  CRABBOX_AZURE_SANDBOX_REGION?: string;
+  CRABBOX_AZURE_SANDBOX_SUBSCRIPTION_ID?: string;
+  CRABBOX_AZURE_SANDBOX_RESOURCE_GROUP?: string;
+  CRABBOX_AZURE_SANDBOX_GROUP?: string;
+};
+
+export type LeaseCommandContext = {
+  binary: string;
+  id: string;
+  provider: string;
+  providerEnv?: CrabboxProviderEnvironment;
+};
 
 export function leaseRunArgs(
   context: LeaseCommandContext,
@@ -42,9 +56,11 @@ export type CrabboxCommandRunner = typeof runCrabboxProcess;
 
 export async function runCrabboxCommand(params: {
   action: string;
+  observeResult?: (result: SpawnResult) => void;
   args: string[];
   binary: string;
   env?: NodeJS.ProcessEnv;
+  providerEnv?: CrabboxProviderEnvironment;
   input?: string | Uint8Array;
   signal?: AbortSignal;
   timeoutMs: number;
@@ -56,7 +72,11 @@ export async function runCrabboxCommand(params: {
       timeoutMs: params.timeoutMs,
       maxOutputBytes: MAX_OUTPUT_BYTES,
       killProcessTree: true,
-      ...(params.env === undefined ? {} : { env: params.env }),
+      ...(params.providerEnv
+        ? { env: { ...(params.env ?? process.env), ...params.providerEnv } }
+        : params.env === undefined
+          ? {}
+          : { env: params.env }),
       ...(params.input === undefined ? {} : { input: params.input }),
       ...(params.signal ? { signal: params.signal } : {}),
     });
@@ -64,6 +84,7 @@ export async function runCrabboxCommand(params: {
     params.signal?.throwIfAborted();
     throw crabboxExecutionError(params.action, error);
   }
+  params.observeResult?.(result);
   // The runner owns child/tree settlement; cancellation must not release that custody early.
   params.signal?.throwIfAborted();
   return result;
@@ -281,6 +302,7 @@ export async function stopCrabboxLease(params: {
   binary: string;
   id: string;
   provider: string;
+  providerEnv?: CrabboxProviderEnvironment;
   warn: (message: string) => void;
   onCleanupAccepted?: () => void;
   signal?: AbortSignal;
@@ -302,6 +324,7 @@ export async function stopCrabboxLease(params: {
         ...(!wait ? ["--wait=false"] : []),
       ],
       binary: params.binary,
+      providerEnv: params.providerEnv,
       timeoutMs,
       signal: params.signal,
     });

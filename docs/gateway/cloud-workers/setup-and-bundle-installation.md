@@ -23,15 +23,57 @@ Non-root images need noninteractive sudo for that command. A failed refresh stop
 enrollment with repair guidance; runtime-only preparation does not change system
 trust. Bootstrap credentials are not passed to the certificate-update command.
 
+Dedicated ephemeral native worker turns retain the node's admitted CA bundle paths,
+including when using a prepared HOME. Caller overrides for these paths remain
+forbidden. The platform image owns the certificates and tool-specific trust setup.
+
 ## The setup command
 
 `settings.setup` runs on a cold machine after readiness and before repository preparation and enrollment. Provision replay can repeat it, so make it idempotent. Snapshot forks skip it because their compatible image already contains its filesystem results. Use repository `postStartCommand` for processes that must start on each new worker.
+Worker-profile settings allow string values up to 128 KiB within the existing 256 KiB serialized JSON budget. Object keys remain limited to 64 KiB, and the depth, node-count, plain-JSON, and SecretRef checks still apply. Generic plugin hook payloads retain their 64 KiB string limit.
+
+Crabbox coordinator transport timeouts before profile setup, node runtime preparation, or node enrollment scripts start allow up to three attempts with backoff, within the existing phase budget. Only output consisting entirely of coordinator timeout diagnostics qualifies; any script output prevents retry. Lease inspection, readiness reads, heartbeat, and release use the same bounded retry policy; allocation remains owned by Gateway provisioning replay. Exhausted retries preserve the coordinator diagnostic and report the number of attempts.
 
 Do not install OpenClaw globally or maintain a versioned runtime/plugin URL in setup. Bootstrap supplies the Gateway's runtime and required plugins. For additional packages, account for image initialization: wait for cloud-init and use your package manager's lock-wait option to avoid failing the first dispatch on a held lock. Setup or enrollment failures report an error and stop the incomplete lease.
 
 ### Protected setup secrets
 
 Private package access uses [setup secrets](/gateway/config-cloud-workers#setup-secrets) through protected egress, including when snapshots are disabled. Keep raw credentials out of setup commands and files.
+
+### Worker-side setup initializer
+
+Linux Crabbox profiles may configure `settings.setupInitializer` with an absolute
+image-owned command argv and an explicit `envKeys` allowlist. This is an operator
+prerequisite, never a repository command. The helper runs outside the repository
+with the worker's platform environment before each preparation or post-binding
+lifecycle command, including each parallel branch. Completed prepared workspaces
+and inspection-only operations do not rerun preparation hooks or their initializer.
+
+The helper receives JSON `{ "timeoutMs": remainingCommandBudget }` on stdin and
+must write exactly one JSON string map to stdout. Output is limited to 32 KiB,
+each value to 4096 characters, and names must exactly match the configured list.
+Execution-control and platform identity transport variables cannot be projected.
+Initializer variables override repository variables; they cannot overlap protected
+`setupSecrets`. Returned values stay in worker memory and enter only the isolated
+lifecycle child. OpenClaw does not return initializer or credential-bearing hook
+output to Gateway diagnostics. Failure or cancellation prevents that command from
+starting; its existing owner settles the initializer process group first.
+
+Failures save a bounded diagnostic envelope in the existing recipe failure metadata
+and log its closed facts: phase, outcome, exit or signal, elapsed time, and a native
+reason even when the command emits no marker. Recognized `TEAMCLAW_SETUP_V1`
+markers retain their emitting channel (initializer or repository); they do not
+prove helper identity or grant authority. At most 32 events fit the 16 KiB
+artifact, with explicit truncation and failure events preferred over progress.
+Raw credential-bearing output remains excluded. These diagnostics describe new
+attempts; output discarded by an earlier runtime cannot be recovered afterward.
+
+The image helper owns credential scope, audience and expiry. It must reject
+credentials that cannot remain valid for the supplied command budget rather than
+relying on refresh inside a sanitized repository hook. Initializer settings are
+part of the prepared image identity. The default remains the minimal environment
+without an initializer; Gateway credentials and platform metadata are never
+forwarded to the worker by this feature.
 
 ### Native Windows prerequisites
 
@@ -82,6 +124,13 @@ For source builds, run `pnpm build` and restart the Gateway before dispatching. 
 OpenClaw worker turns install the matching worker bundle, reusing a verified archive retained in a prepared image when available. Codex remote execution starts its managed exec-server directly. Node-command allowlists and invocation approval still apply. See [runtime support](/gateway/cloud-workers/dispatching-a-session#runtime-support) and [the security model](/gateway/cloud-workers/security-model).
 
 Cross-platform Gateway installations prepare additional dependency inputs under `node-runtime-dependencies/<platform>-<arch>/` inside the immutable package (for example, `linux-x64`). Each input contains the exact root `package.json`, its complete installed production `node_modules`, linked workspace packages, and selected plugins' installed dependency directories under `extensions/`, and a `runtime-input.json` receipt with `platform`, `arch`, `packageJsonSha256`, and `lockfileSha256`. The hashes must match the Gateway's `package.json` and `pnpm-lock.yaml`. Build/install dependencies and native addons on the target platform using the frozen lockfile; copy compiled workspace distributions from the same source build. Keep all links within that input. The canonical producer materializes regular archive files from these installed dependencies; it never resolves or downloads packages. Qualify the resulting runtime with a real cold launch on each target. A macOS dependency tree alone does not qualify Linux.
+
+Offline Linux image composition records verified relative-import edges in the
+hashed composition inventory. After package lifecycle and plugin pruning, target
+finalization checks every retained importer against the files that remain,
+reusing those edges without parsing the JavaScript again. Missing targets or a
+missing import graph fail finalization; removing an importer also removes its
+closure requirement. Regenerate the composition when runtime inputs change.
 
 ### Reuse a node runtime archive after Gateway restart
 

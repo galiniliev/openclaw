@@ -12,6 +12,7 @@ import { describe, expect, it, vi } from "vitest";
 import { crabboxState, openWarmImageStore } from "./crabbox-state.test-support.js";
 import {
   createNodeBootstrapFixture,
+  createRuntimeVerificationFixture,
   createWorkerArchiveFixture,
 } from "./crabbox-worker-node-enrollment.test-support.js";
 import { operationLeaseId } from "./crabbox-worker-profile.js";
@@ -242,6 +243,22 @@ fs.writeFileSync(path.join(process.env.HOME, "runtime-verified"), "verified");
 console.log("OpenClaw 2026.8.1");
 `,
       );
+      const verification = createRuntimeVerificationFixture(
+        process.platform === "darwin" ? "darwin" : "linux",
+        {
+          arch: process.arch,
+          files: new Map(
+            ["package.json", "openclaw.mjs"].map((name) => [
+              name,
+              fs.readFileSync(path.join(packageRoot, name)),
+            ]),
+          ),
+        },
+      );
+      nodeBootstrap.manifestSha256 = verification.nodeBootstrap.manifestSha256;
+      for (const [name, bytes] of verification.files) {
+        writeFile(path.join(packageRoot, name), bytes);
+      }
       const bin = path.join(home, "bin");
       writeFile(
         path.join(bin, "node"),

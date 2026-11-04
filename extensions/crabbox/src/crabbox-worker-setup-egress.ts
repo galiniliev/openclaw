@@ -5,8 +5,12 @@ import { withSetupSecretEgress } from "openclaw/plugin-sdk/secret-egress-runtime
 import type { SecretRef } from "openclaw/plugin-sdk/secret-ref-runtime";
 import { runCrabboxProcess } from "./crabbox-process.js";
 import type { LeaseCommandContext } from "./crabbox-worker-command.js";
-import { runCrabboxCommand } from "./crabbox-worker-command.js";
-import { assertCrabboxLeaseId, parseCrabboxProfile } from "./crabbox-worker-profile.js";
+import { leaseRunArgs, runCrabboxCommand } from "./crabbox-worker-command.js";
+import {
+  assertCrabboxLeaseId,
+  parseCrabboxProfile,
+  resolveCrabboxProfileCommandEnv,
+} from "./crabbox-worker-profile.js";
 
 const UPSTREAM_PROXY_ENV = "CRABBOX_SETUP_PROXY";
 
@@ -57,13 +61,30 @@ export function createCrabboxSetupCommandRunner(params: {
   return async (lease, command) => {
     command.assertCurrent();
     const profile = parseCrabboxProfile(lease.profile);
-    if (!Object.keys(profile.setupSecrets ?? {}).length) {
+    if (!Object.keys(profile.setupSecrets ?? {}).length && !profile.setupInitializer) {
       return undefined;
     }
     assertCrabboxLeaseId(lease.leaseId);
     const binary = await params.resolveBinary(profile.binary, command.signal);
     const createScript = (env?: Record<string, string>) =>
-      `set -eu\ncd -- ${quote(command.workspaceDir)}\nexport HOME=${quote(command.homeDir)}\nnode -e ${quote(command.createScript(env))}`;
+      `set -eu\ncd -- ${quote(command.workspaceDir)}\nexport HOME=${quote(command.homeDir)}\nnode -e ${quote(command.createScript(env, profile.setupInitializer))}`;
+    if (!Object.keys(profile.setupSecrets ?? {}).length) {
+      const context = {
+        binary,
+        provider: profile.provider,
+        providerEnv: resolveCrabboxProfileCommandEnv(profile),
+        id: lease.leaseId,
+      };
+      command.assertCurrent();
+      return await runCrabboxCommand({
+        ...context,
+        action: "repository lifecycle",
+        args: leaseRunArgs(context),
+        input: createScript(),
+        timeoutMs: command.timeoutMs,
+        signal: command.signal,
+      });
+    }
     await assertCrabboxSetupEgressSupport({
       binary,
       target: profile.target,
@@ -73,6 +94,7 @@ export function createCrabboxSetupCommandRunner(params: {
     return await runCrabboxSetupEgress({
       binary,
       provider: profile.provider,
+      providerEnv: resolveCrabboxProfileCommandEnv(profile),
       id: lease.leaseId,
       secrets: profile.setupSecrets ?? {},
       createScript,
@@ -157,7 +179,11 @@ ${params.createScript(remoteEnv)}
           "--script-stdin",
         ],
         {
-          env: { CRABBOX_ENV_ALLOW: ",", [UPSTREAM_PROXY_ENV]: egress.hostEnv.HTTPS_PROXY },
+          env: {
+            CRABBOX_ENV_ALLOW: ",",
+            [UPSTREAM_PROXY_ENV]: egress.hostEnv.HTTPS_PROXY,
+            ...params.providerEnv,
+          },
           input: script,
           timeoutMs: params.timeoutMs,
           maxOutputBytes: 64 * 1024,

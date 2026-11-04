@@ -29,7 +29,11 @@ function fixture(
   failCreate = false,
   onCommand?: (argv: string[]) => ReturnType<typeof commandResult> | void,
   policy?: CrabboxWarmImagePolicy,
-  prepareCapture: ManagerOptions["prepareCapture"] = async () => {},
+  prepareCapture: ManagerOptions["prepareCapture"] = async ({ id }) => ({
+    id,
+    state: "ready",
+    tailscaleEnabled: false,
+  }),
 ) {
   vi.stubEnv("OPENCLAW_STATE_DIR", tempDirs.make("openclaw-crabbox-allocation-"));
   const calls: string[][] = [];
@@ -185,6 +189,7 @@ it("admits lifetime only for a claimed capture before preparing or scrubbing its
       phase: "scrubbing",
     });
     events.push("lifetime");
+    return { id: "cbx_lifetime", state: "ready", tailscaleEnabled: false };
   });
   const { owner, context } = fixture(false, undefined, undefined, prepareCapture);
   const source = await enroll(owner, context("cbx_lifetime"));
@@ -231,6 +236,7 @@ it.each(["runtime grant", "lifetime admission"])(
       if (phase === "lifetime admission") {
         await gate.wait();
       }
+      return { id: "cbx_recovered_admission", state: "ready", tailscaleEnabled: false };
     });
     const { owner, context, calls } = fixture(false, undefined, undefined, prepareCapture);
     const source = await enroll(owner, context("cbx_recovered_admission"));

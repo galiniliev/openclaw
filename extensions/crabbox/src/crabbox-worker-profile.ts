@@ -5,24 +5,37 @@ import {
   type WorkerMachineOption,
   type WorkerProfile,
 } from "openclaw/plugin-sdk/plugin-entry";
-import { isSecretRef, isValidSecretRef } from "openclaw/plugin-sdk/secret-input";
-import type { SecretRef } from "openclaw/plugin-sdk/secret-ref-runtime";
 import {
   asOptionalRecord,
   normalizeOptionalString as nonEmptyString,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
+import type { CrabboxProviderEnvironment } from "./crabbox-worker-command.js";
+import {
+  parseCrabboxSetupInitializer,
+  parseCrabboxSetupSecrets,
+  type CrabboxSetupInitializer,
+  type CrabboxSetupSecrets,
+} from "./crabbox-worker-setup-profile.js";
 import { CRABBOX_HEARTBEAT_TIMEOUT_MS } from "./crabbox-worker-timeouts.js";
 
 const PROFILE_KEYS = new Set([
   "azureSandboxDiskId",
+  "azureSandboxSnapshotId",
+  "azureSandboxSnapshotReceipt",
+  "azureSandboxSnapshotGeneration",
   "binary",
   "class",
+  "configFile",
   "desktop",
   "idleTimeout",
   "provider",
+  "sdkPython",
+  "sdkIdentity",
+  "snapshotVerifier",
   "setup",
   "setupEnv",
   "setupSecrets",
+  "setupInitializer",
   "ttl",
   "target",
   "warmImage",
@@ -45,7 +58,16 @@ const DURATION_UNIT_NANOSECONDS: Readonly<Record<string, bigint>> = {
 
 type CrabboxProfile = {
   azureSandboxDiskId?: string;
+  azureSandboxSnapshotId?: string;
+  azureSandboxSnapshotReceipt?: string;
+  azureSandboxSnapshotGeneration?: string;
   binary?: string;
+  sdkPython?: string;
+  configFile?: string;
+  sdkIdentity?: { kind: "azure-cli" } | { kind: "managed-identity"; clientId: string };
+  snapshotVerifier?: string[];
+  /** Resolved by the provider config owner, never accepted from profile input. */
+  azureSandboxScope?: string;
   class?: string;
   desktop?: boolean;
   heartbeatIntervalMs: number;
@@ -56,7 +78,8 @@ type CrabboxProfile = {
   ttl: string;
   target: CrabboxOperatingSystem;
   setup?: string;
-  setupSecrets?: Record<string, SecretRef & { source: "store" }>;
+  setupSecrets?: CrabboxSetupSecrets;
+  setupInitializer?: CrabboxSetupInitializer;
   warmImage?: boolean;
 };
 
@@ -183,6 +206,31 @@ export function parseCrabboxProfile(profile: Readonly<Record<string, unknown>>):
   if (binary && !path.isAbsolute(binary)) {
     throw new WorkerProviderError("Crabbox profile binary must be an absolute path");
   }
+  const configFile = nonEmptyString(profile.configFile);
+  if (profile.configFile !== undefined && (!configFile || !path.isAbsolute(configFile))) {
+    throw new WorkerProviderError("Crabbox configFile must be an absolute path");
+  }
+  const sdkPython = nonEmptyString(profile.sdkPython);
+  if (
+    profile.sdkPython !== undefined &&
+    (provider !== "azure-sandbox" || !sdkPython || !path.isAbsolute(sdkPython))
+  ) {
+    throw new WorkerProviderError(
+      "Crabbox sdkPython requires an azure-sandbox profile and an absolute qualified interpreter path",
+    );
+  }
+  const sdkIdentity = parseCrabboxSdkIdentity(profile.sdkIdentity, provider);
+  const snapshotVerifier = parseCrabboxSnapshotVerifier(profile.snapshotVerifier, provider);
+  if (sdkPython && (!configFile || !sdkIdentity)) {
+    throw new WorkerProviderError(
+      "Crabbox sdkPython requires a selected credential-free configFile and explicit sdkIdentity",
+    );
+  }
+  if (sdkIdentity?.kind === "azure-cli" && !configFile) {
+    throw new WorkerProviderError(
+      "Crabbox Azure CLI SDK identity requires its selected configFile",
+    );
+  }
   const setup = nonEmptyString(profile.setup);
   if (profile.setup !== undefined && !setup) {
     throw new WorkerProviderError("Crabbox profile setup must be a non-empty command string");
@@ -193,6 +241,11 @@ export function parseCrabboxProfile(profile: Readonly<Record<string, unknown>>):
     );
   }
   const setupSecrets = parseCrabboxSetupSecrets(profile.setupSecrets);
+  const setupInitializer = parseCrabboxSetupInitializer(
+    profile.setupInitializer,
+    target,
+    setupSecrets,
+  );
   const azureSandboxDiskId = nonEmptyString(profile.azureSandboxDiskId);
   if (
     profile.azureSandboxDiskId !== undefined &&
@@ -200,6 +253,29 @@ export function parseCrabboxProfile(profile: Readonly<Record<string, unknown>>):
   ) {
     throw new WorkerProviderError(
       "Crabbox Azure Sandbox disk ID requires an azure-sandbox profile and a non-empty string of at most 256 characters",
+    );
+  }
+  const snapshotId = nonEmptyString(profile.azureSandboxSnapshotId);
+  const snapshotReceipt = nonEmptyString(profile.azureSandboxSnapshotReceipt);
+  const snapshotGeneration = nonEmptyString(profile.azureSandboxSnapshotGeneration);
+  const snapshotSelected = [
+    profile.azureSandboxSnapshotId,
+    profile.azureSandboxSnapshotReceipt,
+    profile.azureSandboxSnapshotGeneration,
+  ].some((value) => value !== undefined);
+  if (
+    snapshotSelected &&
+    (provider !== "azure-sandbox" ||
+      !azureSandboxDiskId ||
+      !snapshotId ||
+      !/^[A-Za-z0-9._()-]{1,256}$/u.test(snapshotId) ||
+      !snapshotReceipt ||
+      !path.isAbsolute(snapshotReceipt) ||
+      !snapshotGeneration ||
+      !/^[a-f0-9]{64}$/u.test(snapshotGeneration))
+  ) {
+    throw new WorkerProviderError(
+      "Crabbox Sandbox snapshot selection requires its exact disk, snapshot ID, absolute receipt path and SHA256 generation",
     );
   }
   const desktop = profile.desktop;
@@ -217,7 +293,18 @@ export function parseCrabboxProfile(profile: Readonly<Record<string, unknown>>):
   }
   return {
     ...(azureSandboxDiskId ? { azureSandboxDiskId } : {}),
+    ...(snapshotSelected
+      ? {
+          azureSandboxSnapshotId: snapshotId,
+          azureSandboxSnapshotReceipt: snapshotReceipt,
+          azureSandboxSnapshotGeneration: snapshotGeneration,
+        }
+      : {}),
     binary,
+    ...(sdkPython ? { sdkPython } : {}),
+    ...(configFile ? { configFile } : {}),
+    ...(sdkIdentity ? { sdkIdentity } : {}),
+    ...(snapshotVerifier ? { snapshotVerifier } : {}),
     class: machineClass,
     desktop,
     heartbeatIntervalMs: heartbeatIntervalMs(idleTimeoutMs),
@@ -230,9 +317,82 @@ export function parseCrabboxProfile(profile: Readonly<Record<string, unknown>>):
     provider,
     setup,
     setupSecrets,
+    ...(setupInitializer ? { setupInitializer } : {}),
     ttl,
     target,
     warmImage,
+  };
+}
+
+function parseCrabboxSdkIdentity(value: unknown, provider: string): CrabboxProfile["sdkIdentity"] {
+  if (value === undefined) {
+    return undefined;
+  }
+  const identity = asOptionalRecord(value);
+  if (provider === "azure-sandbox" && identity) {
+    if (identity.kind === "azure-cli" && Object.keys(identity).length === 1) {
+      return { kind: "azure-cli" };
+    }
+    if (
+      identity.kind === "managed-identity" &&
+      Object.keys(identity).length === 2 &&
+      typeof identity.clientId === "string" &&
+      /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/iu.test(identity.clientId)
+    ) {
+      return { kind: "managed-identity", clientId: identity.clientId };
+    }
+  }
+  throw new WorkerProviderError(
+    "Crabbox sdkIdentity requires an explicit Azure CLI or managed identity client ID on azure-sandbox",
+  );
+}
+
+function parseCrabboxSnapshotVerifier(value: unknown, provider: string): string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (
+    provider !== "azure-sandbox" ||
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > 16 ||
+    !value.every(
+      (arg): arg is string =>
+        typeof arg === "string" && arg.length > 0 && arg.length <= 2048 && !arg.includes("\0"),
+    )
+  ) {
+    throw new WorkerProviderError("Crabbox snapshotVerifier must be bounded executable arguments");
+  }
+  return value;
+}
+
+/** The same selected route reaches every provider subprocess; never change host globals. */
+export function resolveCrabboxProfileCommandEnv(
+  profile: Pick<CrabboxProfile, "sdkIdentity"> & { configFile: string },
+): CrabboxProviderEnvironment;
+export function resolveCrabboxProfileCommandEnv(
+  profile: Pick<CrabboxProfile, "configFile" | "sdkIdentity">,
+): CrabboxProviderEnvironment | undefined;
+export function resolveCrabboxProfileCommandEnv(
+  profile: Pick<CrabboxProfile, "configFile" | "sdkIdentity">,
+): CrabboxProviderEnvironment | undefined {
+  if (!profile.configFile && !profile.sdkIdentity) {
+    return undefined;
+  }
+  return {
+    // Explicit Crabbox env inputs override config files. Snapshot SDK routing
+    // consumes this same projection; it never parses the private config file.
+    CRABBOX_AZURE_SANDBOX_REGION: process.env.CRABBOX_AZURE_SANDBOX_REGION,
+    CRABBOX_AZURE_SANDBOX_SUBSCRIPTION_ID: process.env.CRABBOX_AZURE_SANDBOX_SUBSCRIPTION_ID,
+    CRABBOX_AZURE_SANDBOX_RESOURCE_GROUP: process.env.CRABBOX_AZURE_SANDBOX_RESOURCE_GROUP,
+    CRABBOX_AZURE_SANDBOX_GROUP: process.env.CRABBOX_AZURE_SANDBOX_GROUP,
+    ...(profile.configFile ? { CRABBOX_CONFIG: profile.configFile } : {}),
+    ...(profile.sdkIdentity
+      ? {
+          CRABBOX_AZURE_SANDBOX_CLIENT_ID:
+            profile.sdkIdentity.kind === "managed-identity" ? profile.sdkIdentity.clientId : "",
+        }
+      : {}),
   };
 }
 
@@ -242,53 +402,6 @@ export function parseCrabboxCleanupProfile(profile: WorkerProfile): CrabboxProfi
   const parsed = parseCrabboxProfile(settings);
   if (retiredSetupEnv !== undefined) {
     parsed.warmImage = false;
-  }
-  return parsed;
-}
-
-export function parseCrabboxSetupSecrets(value: unknown): CrabboxProfile["setupSecrets"] {
-  if (value === undefined) {
-    return undefined;
-  }
-  const entries = asOptionalRecord(value);
-  if (!entries) {
-    throw new WorkerProviderError("Crabbox profile setupSecrets must be a map of store SecretRefs");
-  }
-  if (Object.keys(entries).length > 16) {
-    throw new WorkerProviderError("Crabbox profile setupSecrets must contain at most 16 names");
-  }
-  const parsed: NonNullable<CrabboxProfile["setupSecrets"]> = {};
-  for (const [name, ref] of Object.entries(entries)) {
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
-      throw new WorkerProviderError(
-        "Crabbox profile setupSecrets keys must be valid POSIX environment variable names",
-      );
-    }
-    if (
-      [
-        "CRABBOX_ENV_ALLOW",
-        "HOME",
-        "PATH",
-        "LANG",
-        "NODE_EXTRA_CA_CERTS",
-        "SSL_CERT_FILE",
-        "CURL_CA_BUNDLE",
-        "GIT_SSL_CAINFO",
-        "REQUESTS_CA_BUNDLE",
-        "NODE_USE_ENV_PROXY",
-        "CRABBOX_SETUP_PROXY",
-      ].includes(name) ||
-      /^(?:https?|all|no)_proxy$/iu.test(name) ||
-      name.startsWith("OPENCLAW_")
-    ) {
-      throw new WorkerProviderError(`Crabbox profile setupSecrets name ${name} is reserved`);
-    }
-    if (!isSecretRef(ref) || !isValidSecretRef(ref) || ref.source !== "store") {
-      throw new WorkerProviderError(
-        `Crabbox profile setupSecrets entry ${name} must use a store SecretRef { source: "store", provider, id }; inline values and other sources are unavailable`,
-      );
-    }
-    parsed[name] = { source: "store", provider: ref.provider, id: ref.id };
   }
   return parsed;
 }
@@ -322,9 +435,15 @@ export function resolveCrabboxWarmImageProfileKey(
       JSON.stringify({
         backendProvider: profile.provider,
         ...(profile.azureSandboxDiskId ? { azureSandboxDiskId: profile.azureSandboxDiskId } : {}),
+        ...(profile.azureSandboxScope ? { azureSandboxScope: profile.azureSandboxScope } : {}),
+        ...(profile.azureSandboxSnapshotGeneration
+          ? { azureSandboxSnapshotGeneration: profile.azureSandboxSnapshotGeneration }
+          : {}),
+        ...(profile.snapshotVerifier ? { snapshotVerifier: profile.snapshotVerifier } : {}),
         // Missing target in persisted Linux keys already means Linux.
         ...(profile.target !== "linux" ? { target: profile.target } : {}),
         setup: profile.setup ?? "",
+        ...(profile.setupInitializer ? { setupInitializer: profile.setupInitializer } : {}),
         setupSecretMode: "protected-egress-v1",
         setupSecrets: Object.entries(profile.setupSecrets ?? {}).toSorted(([left], [right]) =>
           left.localeCompare(right),
@@ -504,6 +623,15 @@ export function buildCrabboxAllocationArgs(
     "--provider",
     profile.provider,
     ...(profile.azureSandboxDiskId ? ["--azure-sandbox-disk-id", profile.azureSandboxDiskId] : []),
+    ...(profile.azureSandboxSnapshotId
+      ? ["--azure-sandbox-snapshot-id", profile.azureSandboxSnapshotId]
+      : []),
+    ...(profile.azureSandboxSnapshotReceipt
+      ? ["--azure-sandbox-snapshot-receipt", profile.azureSandboxSnapshotReceipt]
+      : []),
+    ...(profile.azureSandboxSnapshotGeneration
+      ? ["--azure-sandbox-snapshot-generation", profile.azureSandboxSnapshotGeneration]
+      : []),
     "--network",
     "public",
     "--tailscale=false",

@@ -1,7 +1,14 @@
 import { toErrorObject } from "openclaw/plugin-sdk/error-runtime";
+import { sha256File } from "openclaw/plugin-sdk/file-access-runtime";
 import { racePromiseWithAbortSignal } from "openclaw/plugin-sdk/time-runtime";
 import { resolveCrabboxBinary } from "./crabbox-binary.js";
 import { ensureManagedCrabboxBinary, type CrabboxBinary } from "./crabbox-managed-binary.js";
+
+// Closed compatibility for the pristine ce7e7554 legacy consumer that rejected v1
+// installationVerified bindings before acquire. Other artifacts retain unknown cleanup.
+// Retire this proof once its pending legacy allocations have been settled.
+const CE7_SNAPSHOT_BINDING_REJECTION_SHA256 =
+  "101454dcb36d087e6c63ec2d556aa1178bfea4dac3f095077677133b2f17aa50";
 
 export function createCrabboxWorkerBinaryResolver(dependencies: {
   openclawRoot: string;
@@ -11,6 +18,7 @@ export function createCrabboxWorkerBinaryResolver(dependencies: {
   const pathEnv = process.env.PATH;
   const binaries = new Map<string, Promise<CrabboxBinary>>();
   const reportedFallbacks = new Set<string>();
+  const legacySnapshotContracts = new Map<string, Promise<boolean>>();
   let defaultCandidate: string | undefined;
   const discoverDefault = () =>
     (defaultCandidate ??= resolveCrabboxBinary({
@@ -52,8 +60,20 @@ export function createCrabboxWorkerBinaryResolver(dependencies: {
       }
       return resolved;
     },
+    qualifyLegacySnapshotContract(this: void, binary: string): Promise<boolean> {
+      let proof = legacySnapshotContracts.get(binary);
+      if (!proof) {
+        // The binary resolver owns executable identity for this provider lifetime.
+        // Public version strings can be "dev"; never infer a parser contract from them.
+        proof = sha256File(binary)
+          .then(({ digest }) => digest === CE7_SNAPSHOT_BINDING_REJECTION_SHA256)
+          .catch(() => false);
+        legacySnapshotContracts.set(binary, proof);
+      }
+      return proof;
+    },
     async settle() {
-      await Promise.allSettled(binaries.values());
+      await Promise.allSettled([...binaries.values(), ...legacySnapshotContracts.values()]);
     },
   };
 }

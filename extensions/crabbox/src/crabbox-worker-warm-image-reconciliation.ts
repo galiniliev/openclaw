@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { coerceErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
+import type { AzureSandboxImage } from "./crabbox-worker-azure-snapshot-binding.js";
 import { parseCrabboxJson } from "./crabbox-worker-command.js";
 import { inspectWithContext } from "./crabbox-worker-provision-commands.js";
 import { WARM_IMAGE_COMMAND_TIMEOUT_MS } from "./crabbox-worker-timeouts.js";
@@ -14,12 +15,10 @@ import {
 import {
   crabboxWarmImageHoldingLeaseIds,
   isCrabboxWarmImageHeld,
-  withoutCrabboxWarmImageOperation,
   type WarmProfileRecord,
 } from "./crabbox-worker-warm-image-records.js";
 import {
   clearCrabboxWarmImageCapture,
-  sameCrabboxWarmImageGeneration as sameImage,
   type openCrabboxWarmImageStore,
 } from "./crabbox-worker-warm-image-store.js";
 
@@ -27,6 +26,11 @@ type RetirementContext = CheckpointContext | MaintenanceContext;
 
 export function createCrabboxWarmImageRetirement(dependencies: {
   openStore: () => ReturnType<typeof openCrabboxWarmImageStore>;
+  deleteSnapshot: (
+    context: RetirementContext,
+    image: AzureSandboxImage,
+    remainingMs: () => number,
+  ) => Promise<boolean>;
   isLeaseActive: (leaseId: string) => boolean;
   warn: (message: string) => void;
   warnOnce: (action: string, error: unknown, failed?: boolean) => void;
@@ -43,11 +47,15 @@ export function createCrabboxWarmImageRetirement(dependencies: {
     record: WarmProfileRecord,
     remainingMs: () => number,
   ) => {
-    if (record.operation?.type !== "retire") {
+    if (!record.retirements?.length) {
       return record;
     }
-    const checkpointId = record.operation.checkpointId;
-    for (const leaseId of crabboxWarmImageHoldingLeaseIds(record, checkpointId)) {
+    const holders = new Set(
+      record.retirements.flatMap((debt) =>
+        crabboxWarmImageHoldingLeaseIds(record, debt.checkpointId),
+      ),
+    );
+    for (const leaseId of holders) {
       if (dependencies.isLeaseActive(leaseId) || remainingMs() <= 0) {
         continue;
       }
@@ -87,69 +95,74 @@ export function createCrabboxWarmImageRetirement(dependencies: {
     context: RetirementContext,
     key: string,
     record: WarmProfileRecord,
-    remainingMs: () => number = () => WARM_IMAGE_COMMAND_TIMEOUT_MS,
+    remainingMs?: () => number,
   ): Promise<void> => {
-    const operation = record.operation;
-    const pinned = (current: WarmProfileRecord) =>
-      [current.image, current.previous].some(
-        (image) =>
-          operation?.type === "retire" &&
-          image?.checkpointId === operation.checkpointId &&
-          image.pinned,
-      );
-    if (operation?.type !== "retire") {
-      return;
-    }
-    const holders = crabboxWarmImageHoldingLeaseIds(record, operation.checkpointId);
-    if (holders.length > 0) {
-      warnOnce(
-        `checkpoint ${operation.checkpointId} retirement held`,
-        `allocation leases: ${holders.join(", ").slice(0, 1024)}`,
-        false,
-      );
-      return;
-    }
-    if (pinned(record)) {
-      return;
-    }
-    const matches = (current: WarmProfileRecord | undefined) =>
-      current?.operation?.type === "retire" &&
-      current.operation.checkpointId === operation.checkpointId &&
-      sameImage(current.image, record.image) &&
-      sameImage(current.previous, record.previous) &&
-      !pinned(current) &&
-      !isCrabboxWarmImageHeld(current, operation.checkpointId);
-    if (!matches(await openStore().lookup(key))) {
-      return;
-    }
-    try {
-      if (!(await deleteCheckpoint(context, operation.checkpointId, remainingMs))) {
-        return;
-      }
-    } catch (error) {
-      assertCurrent(context);
-      if (matches(await openStore().lookup(key))) {
-        // Command errors already bound provider output; report every failed retry.
-        dependencies.warn(
-          `Crabbox warm image checkpoint retirement (${operation.checkpointId} deletion obligation retained; retry during periodic maintenance or next warm-image-enabled worker teardown; inspect with openclaw crabbox warm-images) failed: ${coerceErrorMessage(error)}`,
+    const deadline = performance.now() + WARM_IMAGE_COMMAND_TIMEOUT_MS;
+    const remaining = remainingMs ?? (() => deadline - performance.now());
+    for (const operation of record.retirements ?? []) {
+      const pinned = (current: WarmProfileRecord) =>
+        [current.image, current.previous].some(
+          (image) => image?.checkpointId === operation.checkpointId && image.pinned,
         );
+      const matches = (current: WarmProfileRecord | undefined) =>
+        current &&
+        current.retirements?.some((debt) => isDeepStrictEqual(debt, operation)) &&
+        !pinned(current) &&
+        !isCrabboxWarmImageHeld(current, operation.checkpointId);
+      // An already-held generation can wait for the next pass; effects still use fresh facts.
+      const holders = crabboxWarmImageHoldingLeaseIds(record, operation.checkpointId);
+      if (holders.length > 0) {
+        warnOnce(
+          `checkpoint ${operation.checkpointId} retirement held`,
+          `allocation leases: ${holders.join(", ").slice(0, 1024)}`,
+          false,
+        );
+        continue;
       }
-      return;
+      if (pinned(record)) {
+        continue;
+      }
+      const admitted = await openStore().lookup(key);
+      if (!matches(admitted) || admitted?.operation || remaining() <= 0) {
+        continue;
+      }
+      try {
+        const deleted = operation.azureSandbox
+          ? await dependencies.deleteSnapshot(context, operation.azureSandbox, remaining)
+          : await deleteCheckpoint(context, operation.checkpointId, remaining);
+        if (!deleted) {
+          continue;
+        }
+      } catch (error) {
+        assertCurrent(context);
+        if (matches(await openStore().lookup(key))) {
+          dependencies.warn(
+            `Crabbox warm image checkpoint retirement (${operation.checkpointId} deletion obligation retained; retry during periodic maintenance or next warm-image-enabled worker teardown; inspect with openclaw crabbox warm-images) failed: ${coerceErrorMessage(error)}`,
+          );
+        }
+        continue;
+      }
+      await openStore().update(key, (current) => {
+        assertCurrent(context);
+        if (!current || !matches(current)) {
+          return undefined;
+        }
+        const next: WarmProfileRecord = {
+          ...current,
+          retirements: current.retirements!.filter((debt) => !isDeepStrictEqual(debt, operation)),
+        };
+        if (!next.retirements?.length) {
+          delete next.retirements;
+        }
+        if (next.image?.checkpointId === operation.checkpointId) {
+          delete next.image;
+        }
+        if (next.previous?.checkpointId === operation.checkpointId) {
+          delete next.previous;
+        }
+        return next;
+      });
     }
-    await openStore().update(key, (current) => {
-      assertCurrent(context);
-      if (!current || !matches(current)) {
-        return undefined;
-      }
-      const next = withoutCrabboxWarmImageOperation(current);
-      if (next.image?.checkpointId === operation.checkpointId) {
-        delete next.image;
-      }
-      if (next.previous?.checkpointId === operation.checkpointId) {
-        delete next.previous;
-      }
-      return next;
-    });
     await deleteEmptyProfile(key);
   };
 
@@ -209,6 +222,9 @@ export async function reconcileCrabboxWarmImageCapture(
   info: (message: string) => void,
   isLeaseActive: (leaseId: string) => boolean,
 ): Promise<string | undefined> {
+  if (capture.azureSnapshotCapture) {
+    return "Azure snapshot capture requires reconciliation in its original provider scope";
+  }
   const ids = new Set<string>();
   const assertCurrent = () => {
     context.assertCurrent?.();

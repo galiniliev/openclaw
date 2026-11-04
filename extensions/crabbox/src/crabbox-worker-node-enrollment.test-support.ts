@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import {
   fixtureReceiptClientSource,
   type FixtureReceiptChannel,
@@ -182,8 +183,30 @@ export async function expectSetupPhases(
     .trim()
     .split("\n")
     .filter((line) => !installation || !line.startsWith("openclaw.runtime-installed:"));
-  // Successful bootstrap emits only the bounded diagnostics consumed by the Gateway.
-  for (const line of lines) {
+  const timing = lines.filter((line) => line.startsWith('{"runnerPhases":'));
+  expect(timing).toHaveLength(1);
+  const report: unknown = JSON.parse(timing[0]!);
+  expect(report).toEqual({ runnerPhases: expect.any(Array) });
+  if (!isRecord(report) || !Array.isArray(report.runnerPhases)) {
+    throw new Error("Expected a structured bootstrap timing report");
+  }
+  expect(report.runnerPhases.length).toBeLessThanOrEqual(64);
+  for (const phase of report.runnerPhases) {
+    if (!isRecord(phase)) {
+      throw new Error("Expected a named bootstrap timing observation");
+    }
+    expect(phase).toEqual({
+      name: expect.stringMatching(
+        /^bootstrap\.(?:runtime\.transfer|worker\.transfer|extraction|verification(?:\.identity)?|worker\.verification|activation)$/u,
+      ),
+      ms: expect.any(Number),
+      ...(phase.overlapping === undefined ? {} : { overlapping: true }),
+    });
+    expect(Number.isFinite(phase.ms)).toBe(true);
+    expect(phase.ms).toBeGreaterThanOrEqual(0);
+  }
+  // Accept only this validated timing envelope beside the existing bounded markers.
+  for (const line of lines.filter((candidate) => candidate !== timing[0])) {
     expect(line).toMatch(
       /^(?:CRABBOX_PHASE:[a-z.-]{1,80}|CRABBOX_TIMING:[a-z.-]{1,80}:\d+|CRABBOX_WARNING:openclaw-bootstrap-unlocked-install:[a-zA-Z0-9 _-]+)$/,
     );
@@ -209,4 +232,66 @@ export async function runtimeManifestSha256(archive: Buffer): Promise<string | u
   });
   await pipeline(Readable.from([archive]), parser).catch(() => undefined);
   return digest;
+}
+
+/** Real bytes and hashes for virtual-filesystem runtime verification tests. */
+export function createRuntimeVerificationFixture(
+  platform: "linux" | "darwin",
+  options: { arch?: string; files?: ReadonlyMap<string, Buffer> } = {},
+) {
+  const files = new Map<string, Buffer>([
+    ["package.json", Buffer.from(JSON.stringify({ name: "openclaw", version: "2026.8.1" }))],
+    [
+      "node-runtime.json",
+      Buffer.from(
+        JSON.stringify({
+          buildId: "fixture-runtime-build",
+          openclawVersion: "2026.8.1",
+          platforms: [{ platform, arch: options.arch ?? "x64", prefix: "" }],
+        }),
+      ),
+    ],
+    ["openclaw.mjs", Buffer.from("// synthetic runtime probe entrypoint\n")],
+  ]);
+  for (const [name, bytes] of options.files ?? []) {
+    files.set(name, bytes);
+  }
+  const inventory = [...files].map(([name, bytes]) => ({
+    path: "package/" + name,
+    size: bytes.length,
+    mode: 0o600,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  }));
+  const manifest = Buffer.from(JSON.stringify(inventory));
+  files.set("node-runtime.manifest.json", manifest);
+  return {
+    files,
+    nodeBootstrap: createNodeBootstrapFixture({
+      install: "bundle",
+      buildId: "fixture-runtime-build",
+      manifestSha256: createHash("sha256").update(manifest).digest("hex"),
+    }),
+  };
+}
+
+export function expectFailure(
+  result: { code: number | null; output: string },
+  diagnosis: string | RegExp,
+) {
+  expect(result).toMatchObject({
+    code: 1,
+    output:
+      typeof diagnosis === "string"
+        ? expect.stringContaining(diagnosis)
+        : expect.stringMatching(diagnosis),
+  });
+}
+export function expectAbsent(...files: string[]) {
+  for (const file of files) {
+    expect(fs.existsSync(file), file).toBe(false);
+  }
+}
+export function expectPrivate(launch: object) {
+  expect(launch).not.toHaveProperty("token");
+  expect(launch).not.toHaveProperty("setupCode");
 }
