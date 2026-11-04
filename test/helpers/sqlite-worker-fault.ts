@@ -6,6 +6,7 @@ import * as workerCpu from "../../src/infra/worker-cpu.js";
 type SqliteWorkerFault = { match: RegExp } & (
   | { name: string; sql: string }
   | { exitOnMatch: number }
+  | { pauseOnMatch: SharedArrayBuffer; errorOnResume?: string }
 );
 
 /** Register before fixture setup so retained workers inherit the disabled fault controls. */

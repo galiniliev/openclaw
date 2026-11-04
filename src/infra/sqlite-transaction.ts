@@ -399,6 +399,28 @@ function runSqliteTransactionSync<T>(
   return settleSqliteTransactionSync(db, operation, mode, beginMs, prepareMs, options);
 }
 
+/** Acquire without waiting while the multi-store fence owns retry and release ordering. */
+export function tryReserveSqliteTransactionSync(db: DatabaseSync | PostgresSqlConnection): boolean {
+  assertTransactionUsable(db);
+  if (isMainThread || db.isTransaction) {
+    throw new Error("Source reservation requires an idle worker-owned transaction");
+  }
+  if (isPostgresSqlConnection(db)) {
+    db.exec("BEGIN ISOLATION LEVEL READ COMMITTED");
+    // All engine writers use this store lock; the fence must never wait holding another store.
+    return (
+      db.prepare("SELECT pg_try_advisory_xact_lock(?) AS acquired").get(db.advisoryLockKey)
+        ?.acquired === 1
+    );
+  }
+  runWithSqliteBusyTimeout(db, 0, () => db.exec("BEGIN IMMEDIATE"));
+  const timing = currentSqliteOperationTiming();
+  if (timing) {
+    timing.transactions.count += 1;
+  }
+  return true;
+}
+
 /** Settle a reservation acquired by the closed, multi-database worker fence. */
 export function runSqliteReservedTransactionSync<T>(
   db: DatabaseSync | PostgresSqlConnection,
