@@ -104,6 +104,7 @@ export const GATEWAY_CLIENT_CAPS = {
   SESSION_ROW_DELTAS: "session-row-deltas",
   SESSION_EVENT_FIELD_REFS: "session-event-field-refs",
   PLUGIN_APPROVALS: "plugin-approvals",
+  PLANNED_HANDOFF_RETENTION_V1: "planned-handoff-retention-v1",
   PRESENCE_DELTAS: "presence-deltas",
   TASK_SUGGESTIONS: "task-suggestions",
   TERMINAL_OFFSET_SEQ: "terminal-offset-seq",

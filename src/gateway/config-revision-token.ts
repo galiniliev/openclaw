@@ -1,10 +1,16 @@
 import { createHmac, randomBytes } from "node:crypto";
+import {
+  isDatabaseEngineReadOnlyAdmission,
+  getDatabaseEngineInput,
+} from "../infra/database-engine/context.js";
 import { registerSecretValueForRedaction } from "../logging/secret-redaction-registry.js";
 import type { OpenClawStateDatabaseOptions } from "../state/openclaw-state-db-contract.js";
+import { executeExistingOpenClawStateRead } from "../state/openclaw-state-db-readonly.js";
 import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
 import { runOpenClawStateWorkerOperation } from "../state/openclaw-state-worker-store.js";
 
 export type GatewayConfigRevisionProjector = {
+  logicalStoreIdentity?: string;
   projectRawHash: (hash: string) => string;
   projectResolvedHash: (hash: string) => string;
   hashResponseSessionBearer: (bearer: string) => string;
@@ -38,11 +44,23 @@ function projectRevision(key: Uint8Array, domain: string, hash: string): string 
   return `hmac-sha256:v1:${digest}`;
 }
 
-function createGatewayConfigRevisionProjector(key: Uint8Array): GatewayConfigRevisionProjector {
+function createGatewayConfigRevisionProjector(
+  key: Uint8Array,
+  store?: { id: string; namespace: string },
+): GatewayConfigRevisionProjector {
   if (key.byteLength !== CONFIG_REVISION_KEY_BYTES) {
     throw new Error("config revision key must be 32 bytes");
   }
   return {
+    ...(store
+      ? {
+          logicalStoreIdentity: projectRevision(
+            key,
+            "openclaw.gateway.planned-handoff-store.v1",
+            JSON.stringify(store),
+          ),
+        }
+      : {}),
     projectRawHash: (hash) => projectRevision(key, CONFIG_REVISION_RAW_DOMAIN, hash),
     projectResolvedHash: (hash) => projectRevision(key, CONFIG_REVISION_RESOLVED_DOMAIN, hash),
     hashResponseSessionBearer: (bearer) => hashGatewayResponseSessionBearer(bearer, key),
@@ -52,7 +70,18 @@ function createGatewayConfigRevisionProjector(key: Uint8Array): GatewayConfigRev
 /** Loads the durable installation key once for the Gateway request lifecycle. */
 export async function loadGatewayConfigRevisionProjector(
   options: OpenClawStateDatabaseOptions = {},
+  behavior: { existingOnly?: true } = {},
 ): Promise<GatewayConfigRevisionProjector> {
+  if (behavior.existingOnly || isDatabaseEngineReadOnlyAdmission()) {
+    const result = await executeExistingOpenClawStateRead(options, {
+      type: "machineState.configRevisionKey.read",
+      input: {},
+    });
+    if (!result) {
+      throw new Error("Rolling Gateway requires the existing config revision key");
+    }
+    return createGatewayConfigRevisionProjector(parseConfigRevisionKey(result.key), result.store);
+  }
   const context = captureOpenClawStateWorkerContext(options);
   const key = await runOpenClawStateWorkerOperation(context, (scope) =>
     scope.execute({
@@ -60,7 +89,13 @@ export async function loadGatewayConfigRevisionProjector(
       input: { candidateKey: randomBytes(CONFIG_REVISION_KEY_BYTES) },
     }),
   );
-  return createGatewayConfigRevisionProjector(parseConfigRevisionKey(key));
+  const admittedStore = getDatabaseEngineInput("state")
+    ? await executeExistingOpenClawStateRead(options, {
+        type: "machineState.configRevisionKey.read",
+        input: {},
+      })
+    : undefined;
+  return createGatewayConfigRevisionProjector(parseConfigRevisionKey(key), admittedStore?.store);
 }
 
 function hashGatewayResponseSessionBearer(bearer: string, key: Uint8Array): string {

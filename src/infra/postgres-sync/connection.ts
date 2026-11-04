@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import type { DatabaseSync, SQLInputValue, SQLOutputValue } from "node:sqlite";
 import { receiveMessageOnPort, threadId } from "node:worker_threads";
 import { assertEngineStoreExecutionAllowed } from "../database-engine/admission-scope.js";
+import { isDatabaseEngineReadOnlyAdmission } from "../database-engine/context.js";
 import { observeDatabaseOperation } from "../database-engine/observation.js";
 import type { PostgresSqlConnection, SqlStatement } from "../sql-connection.js";
 import { sqlPublicationAnchor } from "../sql-connection.js";
@@ -47,6 +48,7 @@ export class PostgresSyncConnection implements PostgresSqlConnection {
   private pendingWrite = false;
   private readonly mainThread = threadId === 0;
   private readonly reuseKey?: string;
+  private readonly admissionReadOnly: boolean;
 
   constructor(
     url: string,
@@ -57,9 +59,11 @@ export class PostgresSyncConnection implements PostgresSqlConnection {
       lockTimeoutMs?: number;
       statementTimeoutMs?: number;
       reuse?: boolean;
+      readOnly?: boolean;
     },
   ) {
     assertEngineStoreExecutionAllowed();
+    this.admissionReadOnly = options?.readOnly === true;
     Object.defineProperty(this, Symbol.for("openclaw.postgres-sync-connection"), { value: true });
     this.advisoryLockKey = createHash("sha256").update(storeId).digest().readBigInt64BE();
     this.bridgeParameters = { url, schema, storeId, ...options };
@@ -96,7 +100,13 @@ export class PostgresSyncConnection implements PostgresSqlConnection {
     options?: { withCommit?: (commit: () => void) => void },
     ...modes: [readOnly?: boolean, reserved?: boolean]
   ): T {
-    return runPostgresTransactionSync(this, operation, options, ...modes);
+    return runPostgresTransactionSync(
+      this,
+      operation,
+      options,
+      this.admissionReadOnly || isDatabaseEngineReadOnlyAdmission() || modes[0],
+      modes[1],
+    );
   }
 
   readRecoveryGeneration(lock = false): string {
@@ -242,8 +252,21 @@ export class PostgresSyncConnection implements PostgresSqlConnection {
     { sql, mutation: hintedMutation }: ReturnType<typeof preparePostgresQuery>,
     parameters: readonly SQLInputValue[],
     readBigInts: boolean,
-  ) {
+  ): { rows: Record<string, SQLOutputValue>[]; rowCount: number; columns: { name: string }[] } {
     validatePostgresBindings(parameters);
+    if (isDatabaseEngineReadOnlyAdmission()) {
+      if (/^\s*BEGIN\b/i.test(sql) && !/\bREAD\s+ONLY\b/i.test(sql)) {
+        throw new Error("Gateway read-only admission cannot begin a writable transaction");
+      }
+      if (!this.isTransaction && !/^\s*(?:BEGIN|COMMIT|ROLLBACK)\b/i.test(sql)) {
+        // Enforced by PostgreSQL, including functions and data-modifying CTEs.
+        return this.runTransaction(
+          () => this.execute({ sql, mutation: hintedMutation }, parameters, readBigInts),
+          undefined,
+          true,
+        );
+      }
+    }
     const wasTransaction = this.isTransaction;
     // A later statement in a combined BEGIN request can fail after BEGIN succeeded.
     if (/^\s*BEGIN\b/i.test(sql)) {

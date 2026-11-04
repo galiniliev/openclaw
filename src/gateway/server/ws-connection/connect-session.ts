@@ -52,6 +52,7 @@ import { truncateCloseReason } from "../close-reason.js";
 import type { GatewayWsClient } from "../ws-types.js";
 import {
   rejectGatewayConnectOrigin,
+  rejectIncompatibleRollingConnect,
   rejectUnavailableProfileConnect,
   resolveEffectiveConnectionScopes,
   resolveGatewayConnectPolicyFailure,
@@ -553,6 +554,12 @@ export async function attachAuthenticatedGatewayConnect(
   prepareGatewayRecipientProfile(nextClient, {
     identity: remoteIngressPrincipal?.preparedSessionProfile ?? preparedProfile?.recipient,
   });
+  // No await between this final inventory check and registration: a handshake
+  // begun before the rolling fence cannot introduce an unprepared legacy reader.
+  if (rejectIncompatibleRollingConnect(context)) {
+    await releasePendingNodePairingCleanup();
+    return;
+  }
   if (!setClient(nextClient)) {
     await releasePendingNodePairingCleanup();
     setCloseCause("connect-aborted-before-register", {

@@ -1,14 +1,27 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { listAgentIds } from "../agents/agent-scope-config.js";
 import { getRuntimeConfig } from "../config/io.js";
+import { setDatabaseEngineReadOnlyAdmission } from "../infra/database-engine/context.js";
 import { formatErrorMessage } from "../infra/errors.js";
+import { getGatewaySuspendStatus } from "../infra/gateway-suspend-coordinator.js";
 import { retireQuestionChannelGateway } from "../infra/question-channel-runtime.js";
 import type { createSubsystemLogger } from "../logging/subsystem.js";
 import { bindLegacyPluginSdkResourceHost } from "../plugins/legacy-sdk-resource-host.js";
 import { bindGatewayContextResolver } from "../plugins/runtime/gateway-request-scope.js";
-import { runWithGatewayIndependentRootWorkAdmission } from "../process/gateway-work-admission.js";
+import {
+  runWithGatewayIndependentRootWorkAdmission,
+  clearGatewayRollingAdmission,
+  getGatewayRollingAdmission,
+} from "../process/gateway-work-admission.js";
+import { executeExistingOpenClawStateRead } from "../state/openclaw-state-db-readonly.js";
 import { closeGatewayDeviceRevocation } from "./device-revocation.js";
 import { shouldUseGatewayOwnerProfile } from "./gateway-owner-profile.js";
+import {
+  isCoreGatewayRollingRead,
+  listCoreGatewayMethodNames,
+} from "./methods/core-method-policy.js";
+import { readGatewayRollingCompatibility } from "./rolling-release-compatibility.js";
+import { runOrDeferGatewayMutableStartup } from "./rolling-startup.js";
 import { createGatewayChatMetadataLifecycle } from "./server-chat-metadata-lifecycle.js";
 import type { startGatewayCoreRuntime } from "./server-core-runtime.js";
 import { attachInitialGatewayLifetimeSidecars } from "./server-lifetime-sidecars.js";
@@ -39,6 +52,14 @@ export async function prepareGatewayKernelRequestRuntime(params: {
     startupState,
     shutdownRuntime,
   } = runtime;
+  // Candidate reads open only after their observational startup is published.
+  if (runtime.opts.rollingStartup) {
+    for (const method of listCoreGatewayMethodNames()) {
+      if (isCoreGatewayRollingRead(method)) {
+        runtime.unavailableGatewayMethods.add(method);
+      }
+    }
+  }
   const [chatMetadataLifecycle, configRevisionProjector] = await Promise.all([
     startupTrace.measure("gateway.chat-metadata-lifecycle", () =>
       createGatewayChatMetadataLifecycle({
@@ -62,6 +83,96 @@ export async function prepareGatewayKernelRequestRuntime(params: {
       logHealth,
     });
   });
+  let yieldedReleaseId: string | undefined;
+  gatewayRequestContext.yieldRollingExecution = async (contract) => {
+    const owner = runtime.opts.gatewayStateOwner;
+    if (
+      !owner?.yieldExecutionForRollingHandoff ||
+      runtime.bootId !== contract.predecessorBootId ||
+      getGatewayRollingAdmission()?.releaseId !== contract.releaseId
+    ) {
+      throw new Error("Gateway rolling execution handoff does not name this prepared owner");
+    }
+    const actual = await readGatewayRollingCompatibility(getRuntimeConfig());
+    if (actual.compatibilityDigest !== contract.compatibilityDigest) {
+      throw new Error("Gateway rolling compatibility changed before execution yield");
+    }
+    await owner.yieldExecutionForRollingHandoff(contract);
+    yieldedReleaseId = contract.releaseId;
+  };
+  gatewayRequestContext.getPendingRollingReleaseId = () =>
+    runtime.opts.rollingStartup && !runtime.opts.rollingStartup.writableReady
+      ? runtime.opts.rollingStartup.releaseId
+      : yieldedReleaseId;
+  if (runtime.opts.rollingStartup) {
+    gatewayRequestContext.isRollingReadReady = () => runtime.opts.rollingStartup!.readReady;
+  }
+  gatewayRequestContext.observeRollingExecution = async () => {
+    const owner = runtime.opts.gatewayStateOwner;
+    if (!getGatewayRollingAdmission() || !owner?.observeRollingExecutionHandoff) {
+      throw new Error("Gateway has no observable rolling execution handoff");
+    }
+    return owner.observeRollingExecutionHandoff();
+  };
+  gatewayRequestContext.rebindRollingExecution = async (
+    suspensionId,
+    previous,
+    candidateBootId,
+    expectedOwner,
+    assertCallerCurrent,
+  ) => {
+    const owner = runtime.opts.gatewayStateOwner;
+    if (!owner?.rebindRollingExecutionHandoff || runtime.bootId !== previous.predecessorBootId) {
+      throw new Error("Gateway rebind does not name this physical predecessor");
+    }
+    assertCallerCurrent();
+    const actual = await readGatewayRollingCompatibility(getRuntimeConfig());
+    assertCallerCurrent();
+    const suspension = getGatewaySuspendStatus(suspensionId, true);
+    if (
+      actual.compatibilityDigest !== previous.compatibilityDigest ||
+      getGatewayRollingAdmission()?.releaseId !== previous.releaseId ||
+      suspension.status !== "ready" ||
+      suspension.executionYielded !== true
+    ) {
+      throw new Error("Gateway is no longer the matching held read-only predecessor");
+    }
+    return owner.rebindRollingExecutionHandoff(previous, candidateBootId, expectedOwner);
+  };
+  gatewayRequestContext.resumeRollingExecution = async () => {
+    const rolling = getGatewayRollingAdmission();
+    const owner = runtime.opts.gatewayStateOwner;
+    if (!rolling || !owner?.restoreExecutionAfterRollingHandoff) {
+      throw new Error("Gateway rolling execution owner is unavailable");
+    }
+    await owner.restoreExecutionAfterRollingHandoff();
+    gatewayRequestContext.reopenRollingAdmission?.();
+  };
+  gatewayRequestContext.reopenRollingAdmission = () => {
+    const rolling = getGatewayRollingAdmission();
+    if (!rolling) {
+      return;
+    }
+    const owner = runtime.opts.gatewayStateOwner;
+    if (!owner?.assertExecutionCurrent) {
+      throw new Error("Gateway rolling writer custody is unavailable");
+    }
+    setDatabaseEngineReadOnlyAdmission(false, () => owner.assertExecutionCurrent!());
+    clearGatewayRollingAdmission(rolling.releaseId);
+    yieldedReleaseId = undefined;
+  };
+  gatewayRequestContext.readRollingCompatibility = async () => {
+    const actual = await readGatewayRollingCompatibility(getRuntimeConfig());
+    const lease = await executeExistingOpenClawStateRead(
+      {},
+      { type: "gatewayOwnerLease.read", schemaMaintenance: false },
+    );
+    const executionOwner = lease?.lease?.owner;
+    if (!executionOwner) {
+      throw new Error("Gateway execution ownership is unavailable");
+    }
+    return { ...actual, bootId: runtime.bootId, executionOwner };
+  };
   const projectionReady = runtime.opts.updateCanary
     ? undefined
     : startupTrace.measure("sessions.projection", async () => {
@@ -116,19 +227,21 @@ export async function prepareGatewayKernelRequestRuntime(params: {
           rolesConfigured: Boolean(getRuntimeConfig().gateway?.roles),
         })
       ) {
-        try {
-          await startupTrace.measure("gateway.owner-profile", async () => {
-            const [{ ensureCanonicalGatewayOwnerProfile }, { resolveHostAccountName }] =
-              await Promise.all([
-                import("../state/user-profile-writes.js"),
-                import("../infra/host-account-name.js"),
-              ]);
-            // Projection owns the admitted catalog; first connect consumes its committed owner.
-            await ensureCanonicalGatewayOwnerProfile(resolveHostAccountName);
-          });
-        } catch (error) {
-          log.warn(`Gateway owner profile preparation failed: ${formatErrorMessage(error)}`);
-        }
+        await runOrDeferGatewayMutableStartup(runtime.opts.rollingStartup, async () => {
+          try {
+            await startupTrace.measure("gateway.owner-profile", async () => {
+              const [{ ensureCanonicalGatewayOwnerProfile }, { resolveHostAccountName }] =
+                await Promise.all([
+                  import("../state/user-profile-writes.js"),
+                  import("../infra/host-account-name.js"),
+                ]);
+              // Projection owns the admitted catalog; first connect consumes its committed owner.
+              await ensureCanonicalGatewayOwnerProfile(resolveHostAccountName);
+            });
+          } catch (error) {
+            log.warn(`Gateway owner profile preparation failed: ${formatErrorMessage(error)}`);
+          }
+        });
       }
       // The initial roster must be usable before reconnecting clients can issue lists.
       // Load-bearing: exact preparations outrank the bulk drain, so an un-awaited drain can
@@ -163,19 +276,21 @@ export async function prepareGatewayKernelRequestRuntime(params: {
         });
     }
     if (!runtime.opts.updateCanary) {
-      await startupTrace.measure("gateway.lifetime-sidecars", () =>
-        attachInitialGatewayLifetimeSidecars({
-          scheduler: runtime.scheduler,
-          chatMetadataLifecycle,
-          gatewayRequestContext,
-          flushPendingSessionsChangedEvents: shutdownRuntime.flushPendingSessionsChangedEvents,
-          minimalTestGateway,
-          logWarning: (message) => log.warn(message),
-          ...(!workerPlacementRuntime && githubPublicationRuntime
-            ? { reconcileGitHubPublications: githubPublicationRuntime.reconcilePublications }
-            : {}),
-          publishSidecars: runtimeState.gatewayLifetimeSidecars.publish,
-        }),
+      await runOrDeferGatewayMutableStartup(runtime.opts.rollingStartup, () =>
+        startupTrace.measure("gateway.lifetime-sidecars", () =>
+          attachInitialGatewayLifetimeSidecars({
+            scheduler: runtime.scheduler,
+            chatMetadataLifecycle,
+            gatewayRequestContext,
+            flushPendingSessionsChangedEvents: shutdownRuntime.flushPendingSessionsChangedEvents,
+            minimalTestGateway,
+            logWarning: (message) => log.warn(message),
+            ...(!workerPlacementRuntime && githubPublicationRuntime
+              ? { reconcileGitHubPublications: githubPublicationRuntime.reconcilePublications }
+              : {}),
+            publishSidecars: runtimeState.gatewayLifetimeSidecars.publish,
+          }),
+        ),
       );
     }
   });

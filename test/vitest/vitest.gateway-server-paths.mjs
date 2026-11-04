@@ -11,6 +11,7 @@ export const gatewayPluginTestFiles = [
 
 // Native database consumers retain lifecycle cleanup within each forked process.
 export const gatewayDatabaseWorkerTestFiles = [
+  "src/gateway/github-user-identity.read-only.test.ts",
   "src/gateway/server-methods/sessions.dispatch.retained-original.test.ts",
   "src/gateway/worker-environments/retained-workspace-owner-repair.kernel.test.ts",
   "src/gateway/worker-environments/retained-workspace-resume.test.ts",

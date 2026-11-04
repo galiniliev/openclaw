@@ -5,6 +5,7 @@ import type { OpenClawStateIntegrityAdmission } from "../state/openclaw-state-db
 import { withExistingOpenClawStateSchema } from "../state/openclaw-state-db-schema-policy.js";
 import {
   getDatabaseEngineSelection,
+  withDatabaseEngineSelection,
   type DatabaseEngineSelection,
 } from "./database-engine/context.js";
 import {
@@ -149,9 +150,13 @@ export function runWithSqliteWorkerStateContext<T>(
           : withExistingOpenClawStateSchema({ path: context.existingSchemaPath }, operation),
       ),
     );
-  return context.artifactPreservingReads
-    ? withArtifactPreservingStateReads(run, { agentDatabases: true })
-    : run();
+  const readPolicy = () =>
+    context.artifactPreservingReads
+      ? withArtifactPreservingStateReads(run, { agentDatabases: true })
+      : run();
+  return context.databaseEngineSelection
+    ? withDatabaseEngineSelection(context.databaseEngineSelection, readPolicy)
+    : readPolicy();
 }
 
 export function getSqliteWorkerStateContext(): SqliteWorkerStateContext {

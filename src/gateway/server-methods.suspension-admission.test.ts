@@ -1,6 +1,7 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi, type Mock } from "vitest";
 import { awaitGateBeforeSettlement } from "../../test/helpers/promise.js";
+import { createAgentRunRestartAbortError } from "../agents/run-termination.js";
 import {
   resetGatewaySuspendCoordinatorForLifecycleRestart,
   resumeGatewaySuspend,
@@ -10,6 +11,7 @@ import {
   captureGatewayRootWorkAdmissionContinuationScope,
   getActiveGatewayRootWorkCount,
   markGatewayRestartDraining,
+  setGatewayRollingAdmission,
   resetGatewayWorkAdmission,
   retainGatewayRootWorkAdmissionContinuation,
   tryBeginGatewayRootWorkAdmission,
@@ -141,6 +143,37 @@ afterEach(() => {
 const restartTarget = { pid: process.pid, ownerId: "gateway-owner", port: 18_789 };
 
 describe("gateway request suspension admission", () => {
+  it("retains the retiring release for an entered pure read after global admission resets", async () => {
+    const { context } = createSuspendContext({ size: 0 });
+    context.getPendingRollingReleaseId = () => "retiring-release";
+    setGatewayRollingAdmission("retiring-release", true);
+    const gate = createRequestGate();
+    const read = dispatch(
+      "health",
+      async () => {
+        await gate.pause();
+        throw createAgentRunRestartAbortError();
+      },
+      { scope: "operator.read", context, core: true },
+    );
+    await gate.entered;
+    resetGatewayWorkAdmission();
+    gate.release();
+    await read.request;
+    expect(read.respond).toHaveBeenCalledWith(
+      false,
+      undefined,
+      expect.objectContaining({
+        details: expect.objectContaining({
+          reason: "gateway-planned-handoff",
+          method: "health",
+          rollingReleaseId: "retiring-release",
+          handlerNotEntered: false,
+          readInterrupted: true,
+        }),
+      }),
+    );
+  });
   it.each([false, true])(
     "reopens user RPCs after an abandoned drain, even with renewal: %s",
     async (renew) => {

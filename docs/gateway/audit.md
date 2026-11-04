@@ -517,6 +517,13 @@ days, and the ledger is capped at 100,000 rows; expired rows are pruned during
 startup, hourly maintenance, and later writes. Each ledger or progress cleanup
 transaction deletes at most 1,024 expired rows and schedules more work until
 settled. Retention maintenance keeps running even when collection is disabled.
+A read-only rolling candidate defers audit writer startup, including maintenance,
+until the Gateway admits mutable startup. Events offered before that start or
+while read-only admission is active are not queued. Accepted audit persistence
+and buffered run settlement count as lifecycle work, so a planned handoff joins
+them before fencing writes. Retiring a quiescent predecessor does not start a
+new pruning pass. Collection defaults, row limits, and retention periods are
+unchanged.
 
 Outbound `queued` and `platform-started` records live in the narrowly owned
 `outbound_message_progress` table. The table is created if needed on

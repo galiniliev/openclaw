@@ -1,11 +1,11 @@
 import fs, { existsSync, renameSync } from "node:fs";
 import { hostname } from "node:os";
-import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { expectBytesEqual } from "../../test/helpers/file-snapshots.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { withDoctorSqliteMaintenanceLock } from "../commands/doctor-sqlite-maintenance-lock.js";
 import { runStartupConfigPreflight } from "../commands/startup-config-preflight.js";
+import type { GatewayRollingContract } from "../gateway/rolling-release-contract.js";
 import * as pidAlive from "../shared/pid-alive.js";
 import * as provenance from "../state/openclaw-agent-db-lease-provenance.js";
 import { readOpenClawDatabaseQuarantineFailure } from "../state/openclaw-quarantine-store.js";
@@ -30,14 +30,11 @@ import {
 } from "./gateway-lock-payload.js";
 import { parseShippedStateLeaseProcessOwner } from "./gateway-lock-rollback.test-support.js";
 import { acquireGatewayLock } from "./gateway-lock.js";
-import {
-  acquireGatewayOwnerLease,
-  readGatewayOwnerLease,
-  type GatewayOwnerLease,
-} from "./gateway-owner-lease.js";
+import { acquireGatewayOwnerLease, readGatewayOwnerLease } from "./gateway-owner-lease.js";
 import * as ownerLeaseRead from "./gateway-owner-lease.read.js";
+import { createGatewayOwnerLeaseFixture } from "./gateway-owner-lease.test-support.js";
 import * as stateOwners from "./gateway-state-owner.js";
-import { acquireGatewayStateOwner, tryAcquireGatewayStateOwner } from "./gateway-state-owner.js";
+import { tryAcquireGatewayStateOwner } from "./gateway-state-owner.js";
 import { requireNodeSqlite } from "./node-sqlite.js";
 import { writeGatewayServiceRestartIntentSync } from "./restart-intent.js";
 import {
@@ -56,42 +53,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function fixture() {
-  const env = { OPENCLAW_STATE_DIR: tempDirs.make("openclaw-gateway-owner-") };
-  const databasePath = resolveOpenClawStateSqlitePath(env);
-  const coordinator = acquireGatewayStateOwner({
-    databasePath,
-    payload: {
-      pid: process.pid,
-      createdAt: new Date().toISOString(),
-      configPath: path.join(env.OPENCLAW_STATE_DIR, "openclaw.json"),
-      role: "gateway",
-      processNamespace: readGatewayLockProcessNamespace(),
-    },
-  });
-  let lease: GatewayOwnerLease | undefined;
-  return {
-    env,
-    acquire(params: Partial<Omit<Parameters<typeof acquireGatewayOwnerLease>[0], "env">> = {}) {
-      lease = acquireGatewayOwnerLease({
-        env,
-        port: 19483,
-        mode: "foreground",
-        supervisor: null,
-        ...params,
-      });
-      return lease;
-    },
-    async [Symbol.asyncDispose]() {
-      try {
-        await lease?.ready;
-      } finally {
-        await lease?.release();
-        coordinator.release();
-      }
-    },
-  };
-}
+const fixture = () => createGatewayOwnerLeaseFixture(tempDirs.make("openclaw-gateway-owner-"));
 
 function seedOwner(
   env: NodeJS.ProcessEnv,
@@ -103,6 +65,7 @@ function seedOwner(
     heartbeatAt = Date.now(),
     processNamespace = readGatewayLockProcessNamespace(),
     machineIdentity: ownerMachineIdentity,
+    rollingHandoff,
   }: {
     pid?: number;
     host?: string;
@@ -111,6 +74,7 @@ function seedOwner(
     heartbeatAt?: number;
     processNamespace?: unknown;
     machineIdentity?: string | null;
+    rollingHandoff?: GatewayRollingContract;
   } = {},
 ) {
   withOpenClawStateStartupMigrationCheckpointDatabase(
@@ -127,6 +91,7 @@ function seedOwner(
           port: 19483,
           mode: "foreground",
           supervisor: null,
+          ...(rollingHandoff ? { rollingHandoff } : {}),
         }),
         Date.now(),
         Date.now(),
@@ -890,5 +855,109 @@ describe("Gateway owner lease", () => {
     expect(readGatewayOwnerLease({ env })?.listeningAt).toBeUndefined();
     await lease.release();
     expect(readGatewayOwnerLease({ env })?.owner).toBe("replacement");
+  });
+
+  it.each([
+    { state: "dead", expired: true, previous: { pid: 2_147_483_647, startedAt: 1 } },
+    { state: "dead", expired: false, previous: { pid: 2_147_483_647, startedAt: 1 } },
+    { state: "live", expired: true, previous: {} },
+    { state: "unknown", expired: true, previous: { host: "other-gateway-host" } },
+  ] as const)(
+    "recovers a $state rolling owner only after grant expiry ($expired)",
+    async ({ state, expired, previous }) => {
+      await using owner = fixture();
+      const contract: GatewayRollingContract = {
+        version: 1,
+        releaseId: "interrupted-release",
+        predecessorBootId: "old-boot",
+        candidateBootId: "candidate-boot",
+        predecessorOwner: "previous-generation",
+        compatibilityDigest: "a".repeat(64),
+        companionGeneration: "final-companion",
+        expiresAtMs: Date.now() + (expired ? -1 : 60_000),
+      };
+      seedOwner(owner.env, { ...previous, rollingHandoff: contract });
+      expect(readGatewayOwnerLease({ env: owner.env })).toMatchObject({
+        state,
+        rollingHandoff: contract,
+      });
+      if (state !== "dead" || !expired) {
+        expect(() => owner.acquire()).toThrow("reserved for its exact rolling successor");
+        return;
+      }
+      const next = owner.acquire();
+      await next.ready;
+      expect(readGatewayOwnerLease({ env: owner.env })).toMatchObject({
+        owner: next.owner,
+        state: "live",
+      });
+      expect(() =>
+        acquireGatewayOwnerLease({
+          env: owner.env,
+          port: 19484,
+          mode: "foreground",
+          supervisor: null,
+          owner: "late-candidate",
+          rollingHandoff: contract,
+        }),
+      ).toThrow("Exact yielded Gateway rolling execution handoff was not observed");
+      expect(readGatewayOwnerLease({ env: owner.env })?.owner).toBe(next.owner);
+    },
+  );
+
+  it("returns an unactivated successor grant without retiring the predecessor's reader owner", async () => {
+    await using owner = fixture();
+    const predecessor = owner.acquire();
+    await predecessor.ready;
+    const contract = {
+      version: 1 as const,
+      releaseId: "same-release",
+      predecessorBootId: "old-boot",
+      candidateBootId: "new-boot",
+      predecessorOwner: predecessor.owner,
+      compatibilityDigest: "a".repeat(64),
+      companionGeneration: "final-companion",
+      expiresAtMs: Date.now() + 60_000,
+    };
+    await predecessor.yieldTo(contract);
+    expect(() => predecessor.assertCurrent()).toThrow(/not current/);
+    const candidate = acquireGatewayOwnerLease({
+      env: owner.env,
+      port: 19484,
+      mode: "foreground",
+      supervisor: null,
+      owner: "exact-candidate-owner",
+      rollingHandoff: contract,
+    });
+    await candidate.ready;
+    await expect(predecessor.restoreYield()).rejects.toThrow(/transferred/);
+    await candidate.returnToPredecessor();
+    await candidate.release();
+    expect(readGatewayOwnerLease({ env: owner.env })).toMatchObject({
+      owner: candidate.owner,
+      rollingReturnToOwner: predecessor.owner,
+      rollingHandoff: contract,
+    });
+    await predecessor.restoreYield();
+    predecessor.assertCurrent();
+    expect(readGatewayOwnerLease({ env: owner.env })).toMatchObject({ owner: predecessor.owner });
+    expect(readGatewayOwnerLease({ env: owner.env })?.rollingHandoff).toBeUndefined();
+  });
+
+  it("routes an unexpected execution-lease loss through the existing process-owner shutdown signal", async () => {
+    await using owner = fixture();
+    let lost: ((error: Error) => void) | undefined;
+    const realHeartbeat = leaseHeartbeat.startOpenClawStateLeaseHeartbeat;
+    vi.spyOn(leaseHeartbeat, "startOpenClawStateLeaseHeartbeat").mockImplementation((params) => {
+      lost = params.onLost;
+      return realHeartbeat(params);
+    });
+    const lease = owner.acquire();
+    await lease.ready;
+    const current = stateOwners.captureGatewayStateOwner(resolveOpenClawStateSqlitePath(owner.env));
+    expect(current?.signal.aborted).toBe(false);
+    lost?.(new Error("synthetic unexpected lease replacement"));
+    expect(current?.signal.aborted).toBe(true);
+    expect(() => lease.assertCurrent()).toThrow();
   });
 });

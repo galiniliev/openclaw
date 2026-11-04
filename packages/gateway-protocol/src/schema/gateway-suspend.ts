@@ -48,6 +48,7 @@ export const GatewaySuspendPrepareParamsSchema = closedObject({
   requestId: SuspensionTokenSchema,
   terminalPolicy: Type.Optional(stringLiteralUnion(["preserve", "terminate"])),
   drain: Type.Optional(Type.Boolean()),
+  rollingReleaseId: Type.Optional(SuspensionTokenSchema),
 });
 
 export const GatewaySuspendPrepareBusyResultSchema = closedObject({
@@ -89,11 +90,25 @@ export const GatewaySuspendStatusParamsSchema = closedObject({
   includeLifecycle: Type.Optional(Type.Boolean()),
 });
 
+const GatewaySuspendResumeObservationSchema = closedObject({
+  suspensionId: SuspensionTokenSchema,
+  ownerId: SuspensionTokenSchema,
+  executionYielded: Type.Boolean(),
+  schedulingResumed: Type.Boolean(),
+  admissionReopened: Type.Boolean(),
+  reason: stringLiteralUnion(["resume", "expired"]),
+  observedAtMs: CountSchema,
+});
+
 export const GatewaySuspendStatusRunningResultSchema = closedObject({
   status: Type.Literal("running"),
+  resumeObservationVersion: Type.Optional(Type.Literal(1)),
+  resumeObservation: Type.Optional(GatewaySuspendResumeObservationSchema),
 });
 
 export const GatewaySuspendStatusDrainingResultSchema = closedObject({
+  resumeObservationVersion: Type.Optional(Type.Literal(1)),
+  executionYielded: Type.Optional(Type.Boolean()),
   status: Type.Literal("draining"),
   ownerId: Type.Optional(SuspensionTokenSchema),
   phase: Type.Optional(stringLiteralUnion(["draining", "interrupting", "exiting"])),
@@ -105,6 +120,8 @@ export const GatewaySuspendStatusDrainingResultSchema = closedObject({
 });
 
 export const GatewaySuspendStatusReadyResultSchema = closedObject({
+  resumeObservationVersion: Type.Optional(Type.Literal(1)),
+  executionYielded: Type.Optional(Type.Boolean()),
   status: Type.Literal("ready"),
   ownerId: Type.Optional(SuspensionTokenSchema),
   expiresAtMs: CountSchema,
@@ -127,10 +144,30 @@ export const GatewaySuspendResumeResultSchema = closedObject({
   resumed: Type.Boolean(),
 });
 
+const GatewaySuspendExecutionContractSchema = closedObject({
+  version: Type.Literal(1),
+  releaseId: SuspensionTokenSchema,
+  predecessorBootId: SuspensionTokenSchema,
+  candidateBootId: SuspensionTokenSchema,
+  predecessorOwner: SuspensionTokenSchema,
+  compatibilityDigest: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+  companionGeneration: SuspensionTokenSchema,
+  expiresAtMs: Type.Integer({ minimum: 1 }),
+});
+
 /** Arms cleanup, or commits the exact host's shutdown before external native stop. */
 export const GatewaySuspendHandoffParamsSchema = closedObject({
   suspensionId: SuspensionTokenSchema,
   commit: Type.Optional(Type.Literal(true)),
+  yieldExecution: Type.Optional(GatewaySuspendExecutionContractSchema),
+  inspectExecution: Type.Optional(Type.Literal(true)),
+  rebindExecution: Type.Optional(
+    closedObject({
+      previous: GatewaySuspendExecutionContractSchema,
+      candidateBootId: SuspensionTokenSchema,
+      expectedOwner: SuspensionTokenSchema,
+    }),
+  ),
   target: closedObject({
     pid: Type.Integer({ minimum: 1 }),
     processInstanceId: SuspensionTokenSchema,
@@ -138,9 +175,22 @@ export const GatewaySuspendHandoffParamsSchema = closedObject({
 });
 
 export const GatewaySuspendHandoffResultSchema = closedObject({
-  status: stringLiteralUnion(["armed", "committed"]),
+  status: stringLiteralUnion([
+    "armed",
+    "committed",
+    "execution-yielded",
+    "execution-observed",
+    "execution-rebound",
+  ]),
   suspensionId: SuspensionTokenSchema,
   expiresAtMs: CountSchema,
+  execution: Type.Optional(
+    closedObject({
+      owner: SuspensionTokenSchema,
+      contract: GatewaySuspendExecutionContractSchema,
+      returnedToOwner: Type.Optional(SuspensionTokenSchema),
+    }),
+  ),
 });
 
 // Wire types derive directly from local schema consts so public d.ts graphs never

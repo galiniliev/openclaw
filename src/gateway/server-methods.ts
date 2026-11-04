@@ -16,6 +16,8 @@ import {
 import {
   tryBeginGatewayPreparedRestartRootWorkAdmission,
   tryBeginGatewayRootWorkAdmission,
+  tryBeginGatewayReadRootWorkAdmission,
+  getGatewayRollingAdmission,
 } from "../process/gateway-work-admission.js";
 import { getAsyncWorkSignal } from "../shared/async-work-scope.js";
 import { AgentDatabaseAdmissionError } from "../state/agent-database-admission.js";
@@ -29,6 +31,7 @@ import {
 import { errorShapeFromError } from "./error-shape.js";
 import { createExpectedProfileBinding } from "./expected-profile.js";
 import { ADMIN_SCOPE } from "./method-scopes.js";
+import { isCoreGatewayRollingRead } from "./methods/core-method-policy.js";
 import type { GatewayMethodRegistryView } from "./methods/descriptor.js";
 import {
   createCoreGatewayMethodDescriptors,
@@ -66,6 +69,7 @@ import {
   runGatewayPendingWorkContinuation,
   runWithGatewayObservationScope,
   workAdmissionUnavailableError,
+  gatewayRollingReadInterruptionError,
 } from "./server-request-lifecycle.js";
 import { GatewayRpcDiagnostics } from "./server/ws-connection/request-diagnostics.js";
 import type { GatewaySessionAccessAuthority } from "./session-access-authority.js";
@@ -160,6 +164,21 @@ export async function runWithGatewayRequestEnvelope<T>(
     );
   };
   const isSuspendPrepare = method === "gateway.suspend.prepare";
+  const rollingRead =
+    isCoreGatewayRollingRead(method) &&
+    options.methodRegistry
+      .descriptors()
+      .some((descriptor) => descriptor.name === method && descriptor.owner.kind === "core");
+  const pendingReleaseId = options.context.getPendingRollingReleaseId?.();
+  if (
+    pendingReleaseId &&
+    !rollingRead &&
+    !(isGatewayRootlessRequestAllowed(method) && method !== "gateway.suspend.prepare")
+  ) {
+    return await options.reject(
+      workAdmissionUnavailableError(method, { rollingReleaseId: pendingReleaseId }),
+    );
+  }
   const preAdmissionRateLimitError = isSuspendPrepare
     ? rejectRateLimitedControlPlaneWrite()
     : undefined;
@@ -170,8 +189,15 @@ export async function runWithGatewayRequestEnvelope<T>(
   const rootWorkAdmission =
     options.admission === "continuation"
       ? null
-      : (tryBeginGatewayRootWorkAdmission(`ws:${method}`) ??
-        (method === "gateway.restart.request" &&
+      : ((getGatewayRollingAdmission() &&
+        isCoreGatewayRollingRead(method) &&
+        options.methodRegistry
+          .descriptors()
+          .some((descriptor) => descriptor.name === method && descriptor.owner.kind === "core")
+          ? tryBeginGatewayReadRootWorkAdmission(`ws:${method}`)
+          : tryBeginGatewayRootWorkAdmission(`ws:${method}`)) ??
+        (!getGatewayRollingAdmission() &&
+        method === "gateway.restart.request" &&
         isTargetedNonSafeGatewayRestartRequest(options.requestParams)
           ? tryBeginGatewayPreparedRestartRootWorkAdmission()
           : null));
@@ -303,6 +329,18 @@ export async function handleGatewayRequest(
       : undefined;
   const diffAdmissionStarted = diffTiming ? (diagnostics?.startedAt ?? performance.now()) : 0;
   const observation = methodRegistry.isObservation(req.method);
+  const retainedRollingReleaseId =
+    getGatewayRollingAdmission()?.releaseId ?? context.getPendingRollingReleaseId?.();
+  const interruptedRollingReadError = (error?: unknown) =>
+    gatewayRollingReadInterruptionError({
+      method: req.method,
+      context,
+      methodRegistry,
+      releaseId: retainedRollingReleaseId,
+      signal,
+      connectionSignal: client?.connectionSignal,
+      error,
+    });
   let observationResponded = false;
   let respondCancelled = opts.respond;
   const dispatch = async (retainRoot?: () => void) => {
@@ -363,14 +401,27 @@ export async function handleGatewayRequest(
           }
         }
       : profileRespond;
-    respondCancelled = respondUnobserved;
+    const respondRead: GatewayRequestOptions["respond"] = (...response) => {
+      const interruption =
+        !response[0] && response[2]?.code === ErrorCodes.UNAVAILABLE
+          ? interruptedRollingReadError(response[2])
+          : undefined;
+      if (!interruption) {
+        respondUnobserved(...response);
+      } else if (response.length > 3) {
+        respondUnobserved(false, response[1], interruption, response[3]);
+      } else {
+        respondUnobserved(false, response[1], interruption);
+      }
+    };
+    respondCancelled = respondRead;
     const respond: GatewayRequestOptions["respond"] = observation
       ? (...response) => {
           observationSignal?.throwIfAborted();
           respondUnobserved(...response);
           observationResponded = true;
         }
-      : respondUnobserved;
+      : respondRead;
     const entry = opts.requestEntry ?? context.requestEntryLifetime?.enter(opts);
     const releaseForegroundWork = retainSessionListForegroundWork();
     let sessionAccessAuthority: GatewaySessionAccessAuthority | undefined;
@@ -595,6 +646,11 @@ export async function handleGatewayRequest(
         reject: (error) => respond(false, undefined, error),
       });
     } catch (error) {
+      const readInterruption = interruptedRollingReadError(error);
+      if (readInterruption) {
+        respondRead(false, undefined, readInterruption);
+        return;
+      }
       if (error instanceof AgentDatabaseAdmissionError) {
         respond(false, undefined, errorShapeFromError(ErrorCodes.UNAVAILABLE, error));
         return;

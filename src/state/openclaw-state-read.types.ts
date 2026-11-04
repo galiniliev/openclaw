@@ -51,6 +51,7 @@ import type { UserProfileAvatarReadCommand } from "./user-profiles-avatar.types.
 import type {
   UserChannelIdentitySelector,
   CachedGitHubIdentityBinding,
+  ExistingUserProfileAuthentication,
 } from "./user-profiles.types.js";
 
 export type OpenClawStateReadLocation = {
@@ -143,6 +144,13 @@ export type OpenClawStateReadCommand =
   | { type: "onboardingRecommendations.read"; configKey: string }
   | { type: "userProfiles.reconcile"; profileId: string }
   | { type: "userProfiles.identity"; profileId: string }
+  | {
+      type: "userProfiles.authenticationIdentity";
+      selector: Extract<
+        ExistingUserProfileAuthentication,
+        { kind: "provider" | "enterprise-github" }
+      >;
+    }
   | UserBackgroundReadCommand
   | UserProfileAvatarReadCommand
   | { type: "userProfiles.channelIdentity.list"; profileId: string }

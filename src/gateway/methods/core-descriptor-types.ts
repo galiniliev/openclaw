@@ -17,6 +17,8 @@ export type CoreGatewayMethodSpec = Partial<GatewayReadSharing> & {
   description?: string;
   sessionAccess?: GatewayMethodSessionAccess;
   profileAccess?: "required";
+  /** Audited non-mutating core read admitted while rolling domain writes are fenced. */
+  rollingRead?: true;
 };
 
 type CoreGatewayMethodPolicy = Pick<
@@ -32,6 +34,7 @@ type CoreGatewayMethodPolicy = Pick<
   | "description"
   | "sessionAccess"
   | "profileAccess"
+  | "rollingRead"
 >;
 export type CoreGatewayMethodSpecRow = readonly [
   name: string,

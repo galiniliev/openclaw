@@ -512,6 +512,12 @@ export function captureGatewayStateOwner(databasePath: string) {
     role: owner.payload.role ?? "gateway",
     assertCurrent,
     signal: owner.lost.signal,
+    /** A subordinate execution lease may revoke only the process owner it captured. */
+    invalidate(error: Error) {
+      if (owners.get(key) === owner && owner.accepting) {
+        loseOwner(owner, error);
+      }
+    },
   };
 }
 

@@ -25,7 +25,7 @@ import { locked } from "./locked.js";
 import { normalizeOptionalAgentId } from "./normalize.js";
 import { reloadProvisionedCronJobs } from "./ops-lifecycle.js";
 import { ensureLoadedForRead, resolveCurrentDefaultAgentId } from "./ops-shared.js";
-import { prepareCronServiceStore, type CronServiceState } from "./state.js";
+import { isCronServiceReadOnly, prepareCronServiceStore, type CronServiceState } from "./state.js";
 import { captureCronJobMutationSource, ensureLoaded } from "./store.js";
 
 /** Called under the read lock, after loading passive or newly committed state. */
@@ -77,6 +77,7 @@ export async function readJob(state: CronServiceState, id: string) {
   return await locked(state, async () => {
     if (
       state.deps.cronEnabled &&
+      !isCronServiceReadOnly() &&
       state.schedulerStarted &&
       !state.stopped &&
       !state.store?.jobs.some((job) => job.id === id)

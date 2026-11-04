@@ -5,6 +5,7 @@ import {
   PORTAL_SESSION_WRITE,
   PROFILE_DEPENDENT,
   PROFILE_STARTUP,
+  ROLLING_READ,
   SESSION_METADATA_READ,
   SESSION_WRITE,
   SIDECAR_CONTROL_PLANE_WRITE,
@@ -12,13 +13,13 @@ import {
   UNADVERTISED_OBSERVATION,
 } from "./core-descriptor-options.js";
 import type { CoreGatewayMethodSpecRow } from "./core-descriptor-types.js";
-import { cronListShareKey, modelsListShareKey, operatorReadShareKey } from "./read-share-keys.js";
+import { cronListShareKey, modelsListShareKey } from "./read-share-keys.js";
 
 // Canonical append-only method table; derived lookup and dispatch policy lives in core-method-policy.ts.
 // This is the canonical core method policy table: every core handler must appear here so
 // listing, authorization, startup availability, and write throttling stay in sync.
 export const CORE_GATEWAY_METHOD_SPECS = [
-  ["health", "health", "operator.read", "<=2026.7"],
+  ["health", "health", "operator.read", "<=2026.7", ROLLING_READ],
   ["diagnostics.stability", "diagnostics", "operator.read", "<=2026.7"],
   ["doctor.memory.status", "doctor", "operator.read", "<=2026.7"],
   ["doctor.memory.dreamDiary", "doctor", "operator.read", "<=2026.7"],
@@ -43,7 +44,7 @@ export const CORE_GATEWAY_METHOD_SPECS = [
   ["tts.convert", "tts", "operator.write", "<=2026.7"],
   ["tts.setProvider", "tts", "operator.write", "<=2026.7"],
   ["tts.setPersona", "tts", "operator.write", "<=2026.7"],
-  ["config.get", "config", "operator.read", "<=2026.7"],
+  ["config.get", "config", "operator.read", "<=2026.7", ROLLING_READ],
   ["config.set", "config", "operator.admin", "<=2026.7"],
   ["config.apply", "config", "operator.admin", "<=2026.7", CONTROL_PLANE_WRITE],
   ["config.patch", "config", "operator.admin", "<=2026.7", CONTROL_PLANE_WRITE],
@@ -130,7 +131,7 @@ export const CORE_GATEWAY_METHOD_SPECS = [
   ["mcp.app.readResource", "mcp-app", "operator.read", "<=2026.7"],
   ["mcp.app.callTool", "mcp-app", "operator.write", "<=2026.7"],
   ["mcp.app.updateModelContext", "mcp-app", "operator.write", "<=2026.7"],
-  ["board.get", "board", "operator.read", "<=2026.7"],
+  ["board.get", "board", "operator.read", "<=2026.7", ROLLING_READ],
   ["board.update", "board", "operator.write", "<=2026.7"],
   ["board.widget.put", "board", "operator.write", "<=2026.7"],
   ["board.widget.grant", "board", "operator.approvals", "<=2026.7"],
@@ -138,7 +139,7 @@ export const CORE_GATEWAY_METHOD_SPECS = [
   ["board.event", "board", "operator.write", "<=2026.7"],
   ["audit.list", "audit", "operator.read", "2026.7"],
   ["audit.activity.list", "audit", "operator.read", "2026.7"],
-  ["users.list", "users", "operator.read", "<=2026.7"],
+  ["users.list", "users", "operator.read", "<=2026.7", ROLLING_READ],
   // Resolve identity before the router captures the caller's profile guard.
   ["users.self", "users", "operator.read", "<=2026.7", PROFILE_DEPENDENT],
   ["users.linkEmail", "users", "operator.admin", "<=2026.7", PROFILE_DEPENDENT],
@@ -172,7 +173,7 @@ export const CORE_GATEWAY_METHOD_SPECS = [
   ["worktrees.remove", "worktrees", "operator.admin", "2026.7", CONTROL_PLANE_WRITE],
   ["worktrees.restore", "worktrees", "operator.admin", "2026.7", CONTROL_PLANE_WRITE],
   ["worktrees.gc", "worktrees", "operator.admin", "2026.7", CONTROL_PLANE_WRITE],
-  ["agents.list", "agents", "operator.read", "<=2026.7"],
+  ["agents.list", "agents", "operator.read", "<=2026.7", ROLLING_READ],
   ["agents.create", "agents", "operator.admin", "<=2026.7"],
   ["agents.update", "agents", "operator.admin", "<=2026.7"],
   ["agents.delete", "agents", "operator.admin", "<=2026.7"],
@@ -229,7 +230,7 @@ export const CORE_GATEWAY_METHOD_SPECS = [
   ["secrets.resolve", null, "operator.admin", "<=2026.7"],
   ["voicewake.routing.get", "voicewake-routing", "operator.read", "<=2026.7"],
   ["sessions.list", "sessions-read", "operator.read", "<=2026.7", SESSION_METADATA_READ],
-  ["sessions.subscribe", "sessions-subscriptions", "operator.read", "<=2026.7"],
+  ["sessions.subscribe", "sessions-subscriptions", "operator.read", "<=2026.7", ROLLING_READ],
   ["sessions.messages.subscribe", "sessions-subscriptions", "operator.read", "<=2026.7"],
   ["sessions.messages.unsubscribe", "sessions-subscriptions", "operator.read", "<=2026.7"],
   ["sessions.viewers.set", "sessions-subscriptions", "operator.read", "2026.7"],
@@ -296,13 +297,14 @@ export const CORE_GATEWAY_METHOD_SPECS = [
   ["node.invoke.progress", "nodes", "node", "<=2026.7"],
   ["node.invoke.result", "nodes", "node", "<=2026.7"],
   ["node.event", "nodes", "node", "<=2026.7"],
-  ["cron.get", "cron", "operator.read", "<=2026.7"],
+  ["cron.get", "cron", "operator.read", "<=2026.7", ROLLING_READ],
   [
     "cron.list",
     "cron",
     "operator.read",
     "<=2026.7",
     {
+      ...ROLLING_READ,
       shareKey: cronListShareKey,
       shareMaxAgeMs: 1_000,
       shareInvalidationEvents: ["cron", "sessions.changed"],
@@ -314,8 +316,7 @@ export const CORE_GATEWAY_METHOD_SPECS = [
     "operator.read",
     "<=2026.7",
     {
-      shareKey: operatorReadShareKey,
-      shareMaxAgeMs: 1_000,
+      ...SESSION_METADATA_READ,
       shareInvalidationEvents: ["cron"],
     },
   ],
@@ -325,7 +326,7 @@ export const CORE_GATEWAY_METHOD_SPECS = [
   ["cron.update", "cron", "operator.admin", "<=2026.7", CONTROL_PLANE_WRITE],
   ["cron.remove", "cron", "operator.admin", "<=2026.7", CONTROL_PLANE_WRITE],
   ["cron.run", "cron", "operator.admin", "<=2026.7", CONTROL_PLANE_WRITE],
-  ["cron.runs", "cron", "operator.read", "<=2026.7"],
+  ["cron.runs", "cron", "operator.read", "<=2026.7", ROLLING_READ],
   ["gateway.identity.get", "system", "operator.read", "<=2026.7"],
   // Deprecated read-only compatibility preview; new restart flows request the
   // restart directly, while atomic host suspension uses gateway.suspend.prepare.
@@ -346,9 +347,9 @@ export const CORE_GATEWAY_METHOD_SPECS = [
   ["send", "send", "operator.write", "<=2026.7"],
   // Params-aware: ordinary turns need write; /new and /reset mutate lifecycle state as admin.
   ["agent", "agent", "dynamic", "<=2026.7", { startup: true }],
-  ["agent.identity.get", "agent-identity", "operator.read", "<=2026.7"],
+  ["agent.identity.get", "agent-identity", "operator.read", "<=2026.7", ROLLING_READ],
   ["agent.wait", "agent", "operator.write", "<=2026.7", { ...PROFILE_STARTUP, ...OBSERVATION }],
-  ["chat.history", "chat", "operator.read", "<=2026.7"],
+  ["chat.history", "chat", "operator.read", "<=2026.7", ROLLING_READ],
   ["chat.startup", "chat", "operator.read", "<=2026.7"],
   ["chat.metadata", "chat", "operator.read", "<=2026.7", SESSION_METADATA_READ],
   ["chat.message.get", "chat", "operator.read", "<=2026.7"],
@@ -403,7 +404,7 @@ export const CORE_GATEWAY_METHOD_SPECS = [
   ["terminal.attach", "terminal", "operator.admin", "2026.7"],
   ["terminal.list", "terminal", "operator.admin", "2026.7"],
   ["controlUi.githubPreview", "control-ui", "operator.read", "<=2026.7"],
-  ["system.info", "system", "operator.read", "<=2026.7"],
+  ["system.info", "system", "operator.read", "<=2026.7", ROLLING_READ],
   // Workspace contents stay in the documented trusted operator domain, like session and log
   // reads. Strong user/tenant isolation requires separate Gateways; see operator-scopes.md.
   ["agents.workspace.list", "agents-workspace", "operator.read", "2026.7"],
@@ -461,7 +462,7 @@ export const CORE_GATEWAY_METHOD_SPECS = [
   ["session.discussion.info", "session-discussion", "operator.read", "2026.7"],
   ["session.discussion.open", "session-discussion", "operator.write", "2026.7"],
   ["board.prompt.authorize", "board", "operator.read", "2026.7"],
-  ["board.data.read", "board", "operator.read", "2026.7"],
+  ["board.data.read", "board", "operator.read", "2026.7", ROLLING_READ],
   ["board.action", "board", "operator.write", "2026.7"],
   ["sessions.observer.visibility", "session-observer-rpc", "operator.read", "2026.7"],
   ["session.visibility.set", "sessions-sharing", "operator.write", "2026.7"],
@@ -503,7 +504,7 @@ export const CORE_GATEWAY_METHOD_SPECS = [
   ["secrets.store.list", null, "operator.admin", "2026.8"],
   ["secrets.store.set", null, "operator.admin", "2026.8", CONTROL_PLANE_WRITE],
   ["secrets.store.delete", null, "operator.admin", "2026.8", CONTROL_PLANE_WRITE],
-  ["users.prefs.get", "users", "operator.read", "2026.8"],
+  ["users.prefs.get", "users", "operator.read", "2026.8", ROLLING_READ],
   ["users.prefs.set", "users", "operator.read", "2026.8"],
   ["projects.add", "projects", "operator.write", "2026.8", CONTROL_PLANE_WRITE],
   [
@@ -654,7 +655,7 @@ export const CORE_GATEWAY_METHOD_SPECS = [
   ["portal.session.list", "portals", "operator.write", "2026.9", PORTAL_SESSION_WRITE],
   ["portal.session.open", "portals", "operator.write", "2026.9", PORTAL_SESSION_WRITE],
   ["portal.session.close", "portals", "operator.write", "2026.9", PORTAL_SESSION_WRITE],
-  ["cron.history", "cron", "operator.read", "2026.9"],
+  ["cron.history", "cron", "operator.read", "2026.9", ROLLING_READ],
   // The first UI interaction may precede post-hello identity hydration.
   ["presence.activity", "system", "operator.read", "2026.9", PROFILE_DEPENDENT],
   ["presence.query", "presence", "operator.read", "2026.9", PROFILE_DEPENDENT],

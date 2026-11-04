@@ -11,6 +11,7 @@ import type { GatewayTlsConfig } from "../../config/types.gateway.js";
 import { runExec } from "../../process/exec.js";
 import { CONFIG_DIR, resolveUserPath, shortenHomeInString } from "../../utils.js";
 import { readFileDescriptorBounded } from "../boundary-file-read.js";
+import { isDatabaseEngineReadOnlyAdmission } from "../database-engine/context.js";
 import { canonicalPathFromExistingAncestor, pathExists } from "../fs-safe.js";
 import { resolveSystemBin } from "../resolve-system-bin.js";
 
@@ -210,7 +211,7 @@ export async function loadGatewayTlsServerRuntime(
     return { enabled: false };
   }
 
-  const autoGenerate = cfg.autoGenerate !== false;
+  const autoGenerate = cfg.autoGenerate !== false && !isDatabaseEngineReadOnlyAdmission();
   const baseDir = path.join(CONFIG_DIR, "gateway", "tls");
   // Only blank/whitespace values fall back to the default. Any non-empty path is
   // passed through verbatim so resolveUserPath owns all normalization (it trims

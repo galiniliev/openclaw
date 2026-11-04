@@ -3,6 +3,7 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { resolveOpenClawStateSqlitePath } from "../../state/openclaw-state-db.paths.js";
 import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.js";
 import { describeUnavailableCronAgent } from "../agent-availability.js";
+import { captureCronJobConfigRevision } from "../config-revision.js";
 import { captureCronMutationCommit } from "../mutation-completion.js";
 import { normalizeCronJobInput } from "../normalize.js";
 import { getInvalidPersistedCronJobReason } from "../persisted-shape.js";
@@ -25,6 +26,7 @@ import type {
   CronJobMutationSnapshot,
 } from "../store/job-mutations.types.js";
 import { publishCronJobNames } from "../store/job-name.js";
+import { loadCronJobsStoreWithConfigJobsReadOnlyByKey } from "../store/read-only.js";
 import { CronRunReceiptRevisionError } from "../store/run-receipt-store.js";
 import type { CronRuntimeMutationInputs } from "../store/runtime-worker.types.js";
 import { CronJobsStoreChangedError } from "../store/save-error.js";
@@ -40,12 +42,16 @@ import {
   assertCronHostExecutionAllowed,
   describeCronHostExecutionRestriction,
   emitCronDefinitionChanges,
+  isCronServiceReadOnly,
   type CronAddOptions,
   type CronServiceState,
   type DeferredCronNotifications,
 } from "./state.js";
 
-const loadedCronStoreRevisions = new WeakMap<CronServiceState, { revision: number }>();
+const loadedCronStoreRevisions = new WeakMap<
+  CronServiceState,
+  { revision: number; access?: "read" }
+>();
 
 /** Advance a complete resident store after its committed row postimages are installed. */
 export function noteLoadedCronStoreCommit(state: CronServiceState, observedRevision: number): void {
@@ -98,21 +104,35 @@ export async function ensureLoaded(
     deferQuarantinePersist?: boolean;
   },
 ) {
+  const readOnly = isCronServiceReadOnly();
   // Keep scheduler-local pacing/catch-up mutations while the publication fact
   // still matches; evicted partitions conservatively use the global sequence.
   if (state.store && !opts?.forceReload) {
-    const loadedRevision = loadedCronStoreRevisions.get(state)?.revision;
+    const loaded = loadedCronStoreRevisions.get(state);
+    const loadedRevision = loaded?.revision;
     if (
-      loadedRevision === undefined ||
-      loadedRevision === getCronJobsStoreRevision(state.deps.storeKey)
+      (readOnly || loaded?.access !== "read") &&
+      (loadedRevision === undefined ||
+        loadedRevision === getCronJobsStoreRevision(state.deps.storeKey))
     ) {
       return;
     }
   }
   const loadedRevision = getCronJobsStoreRevision(state.deps.storeKey);
-  const loaded = await loadCronJobsStoreWithConfigJobsByKey(state.deps.storeKey, {
-    includeConfigRevisions: Boolean(state.deps.onDefinitionChange),
-  });
+  const loaded = readOnly
+    ? await loadCronJobsStoreWithConfigJobsReadOnlyByKey(state.deps.storeKey, state.deps.env).then(
+        (snapshot) => ({
+          ...snapshot,
+          configRevisions: new Map(
+            state.deps.onDefinitionChange
+              ? snapshot.store.jobs.map((job) => [job.id, captureCronJobConfigRevision(job)])
+              : [],
+          ),
+        }),
+      )
+    : await loadCronJobsStoreWithConfigJobsByKey(state.deps.storeKey, {
+        includeConfigRevisions: Boolean(state.deps.onDefinitionChange),
+      });
   const loadNowMs = state.deps.nowMs();
   // Persisted cron rows are validated lazily, so treat them as raw records at the
   // store boundary and only trust the CronJob shape after validation below.
@@ -212,10 +232,12 @@ export async function ensureLoaded(
   // A writer or load repair during the await leaves this snapshot conservatively stale.
   loadedCronStoreRevisions.set(state, {
     revision: loadedRevision,
+    // A read-only load cannot certify the mutable loader's deferred repairs after activation.
+    ...(readOnly ? { access: "read" as const } : {}),
   });
   emitCronDefinitionChanges(state, previousJobs, jobs, loaded.configRevisions);
 
-  if (quarantinedConfigJobs.length > 0 && !opts?.deferQuarantinePersist) {
+  if (quarantinedConfigJobs.length > 0 && !opts?.deferQuarantinePersist && !readOnly) {
     // Config decoding and runtime validation reject rows in separate passes;
     // restore their original durable order before writing operator-visible quarantine.
     quarantinedConfigJobs.sort((left, right) => left.sourceIndex - right.sourceIndex);

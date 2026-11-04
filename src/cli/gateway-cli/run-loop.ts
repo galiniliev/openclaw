@@ -14,6 +14,7 @@ import { consumeGatewaySuspendHandoff } from "../../infra/gateway-suspend-coordi
 import type { GatewayRestartIntent } from "../../infra/restart-intent.js";
 import { findStartupMaintenanceRequiredError } from "../../infra/startup-maintenance-required.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { rollbackGatewayRestartSignalFence } from "../../process/gateway-work-admission.js";
 import type { GatewayDrainReason } from "../../process/gateway-work-admission.js";
 import { runWithProcessCleanupBudget } from "../../process/supervisor/cleanup-budget.js";
 import { drainGlobalSingletonLifecycleState } from "../../shared/global-singleton.js";
@@ -23,6 +24,7 @@ import { createGatewayHostLifecycle } from "./host-lifecycle.js";
 import { installGatewayHostLifeline } from "./host-lifeline.js";
 import { createGatewayRunCleanup } from "./run-loop-cleanup.js";
 import * as loopExit from "./run-loop-exit.js";
+import type { GatewayRunLoopOptions } from "./run-loop-options.js";
 import {
   isUpdateProcessRestartReason,
   registerGatewayRunInstallationReplacement,
@@ -41,8 +43,6 @@ import {
   createGatewayStartupOperations,
   prepareGatewayRestartIteration,
   prepareGatewayRunLoop,
-  type GatewayRunLoopStartOptions,
-  type GatewayRestartStartupFailureHandler,
 } from "./run-loop-startup.js";
 import {
   createGatewayRunTerminal,
@@ -56,21 +56,7 @@ import { GatewayUpdateSuccessor } from "./update-successor.js";
 const gatewayLog = createSubsystemLogger("gateway");
 const HARD_EXIT_WATCHDOG_GRACE_MS = 2_000;
 
-export async function runGatewayLoop(params: {
-  start: (
-    params?: GatewayRunLoopStartOptions,
-  ) => Promise<Awaited<ReturnType<typeof startGatewayServer>>>;
-  /** Grants this run loop authority over the process it exclusively owns. */
-  ownsProcessLifecycle?: boolean;
-  lockPort?: number;
-  lifecycleLockDeadlineMs?: number;
-  healthHost?: string;
-  beginBoot?: (startedAtMs: number) => void | Promise<void>;
-  completeBoot?: (completion: GatewayBootLifecycleCompletion) => void | Promise<void>;
-  /** Reports terminal cleanup disposition, never mere invocation or exit intent. */
-  onProcessResourcesSettled?: (outcome: "drained" | "retained") => void;
-  onRestartStartupFailure?: GatewayRestartStartupFailureHandler;
-}): Promise<number> {
+export async function runGatewayLoop(params: GatewayRunLoopOptions): Promise<number> {
   startDiagnosticsTimeline(params.ownsProcessLifecycle === true);
   // macOS/BSD process inspection reports process.title instead of the original
   // argv. Give the long-running Gateway a verifiable identity for lock readers.
@@ -193,6 +179,9 @@ export async function runGatewayLoop(params: {
   );
   const releaseLockIfHeld = async (): Promise<void> => {
     await cleanup.waitForPersistence(bootCompletion);
+    if (lock && params.beforeReleaseLock) {
+      await cleanup.waitForPersistence(params.beforeReleaseLock(lock));
+    }
     await cleanup.waitForPersistence(lock?.release());
     lock = null;
   };
@@ -886,6 +875,11 @@ export async function runGatewayLoop(params: {
     hostedStop?: ReturnType<typeof createGatewayHostLifecycle>,
     signalContext?: GatewayRunSignalContext,
   ) => {
+    if (action !== "stop" && params.canRestart?.() === false) {
+      rollbackGatewayRestartSignalFence();
+      gatewayLog.warn("Gateway restart deferred until rolling writer activation");
+      return;
+    }
     if (terminalExitCode !== undefined || (hostExitRequested && action !== "stop")) {
       return;
     }
@@ -1057,6 +1051,7 @@ export async function runGatewayLoop(params: {
   });
   let loopFailure: { error: unknown } | undefined;
   try {
+    params.controlReady?.({ stop: () => request("stop", "host lifeline closed") });
     if (params.ownsProcessLifecycle) {
       releaseOutputOwner = registerSignalExitOwner((code, reason) => {
         hostExitCode ||= Number(code);

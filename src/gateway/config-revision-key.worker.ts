@@ -1,4 +1,5 @@
 import { executeSqliteQueryTakeFirstSync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
+import type { EngineConnection } from "../infra/sql-connection.js";
 import { getAdmittedSqliteSchemaFacts } from "../infra/sqlite-schema-facts.js";
 import type {
   OpenClawStateDatabase,
@@ -7,6 +8,21 @@ import type {
 import { ensureConfigRevisionKeySchema } from "../state/openclaw-state-db-schema-additive.js";
 import type { DB } from "../state/openclaw-state-db.generated.js";
 import { runOpenClawStateWriteTransaction } from "../state/openclaw-state-db.js";
+
+/** Compatible rolling readers must consume the installation key without an upsert. */
+export function readConfigRevisionKeyInDatabase(db: EngineConnection): Uint8Array {
+  const row = executeSqliteQueryTakeFirstSync(
+    db,
+    getNodeSqliteKysely<Pick<DB, "config_revision_keys">>(db)
+      .selectFrom("config_revision_keys")
+      .select("hmac_key")
+      .where("id", "=", 1),
+  );
+  if (!row) {
+    throw new Error("Rolling Gateway requires the existing config revision key");
+  }
+  return row.hmac_key;
+}
 
 /** Return the installation key without rotating existing revision or response-session tokens. */
 export function loadOrCreateConfigRevisionKeyInDatabase(

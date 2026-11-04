@@ -1,6 +1,7 @@
 // Gateway WebSocket connect admission validates protocol, role, and browser origin.
 import type { IncomingMessage } from "node:http";
 import { isDeepStrictEqual } from "node:util";
+import { rawDataToString } from "@openclaw/gateway-client/websocket-data";
 import { hasNonEmptyString } from "@openclaw/normalization-core/string-coerce";
 import {
   GATEWAY_CLIENT_IDS,
@@ -11,6 +12,8 @@ import {
 } from "../../../../packages/gateway-protocol/src/client-info.js";
 import { ConnectErrorDetailCodes } from "../../../../packages/gateway-protocol/src/connect-error-details.js";
 import {
+  validateRequestFrame,
+  validateConnectParams,
   ErrorCodes,
   errorShape,
   MIN_NODE_PROTOCOL_VERSION,
@@ -26,6 +29,12 @@ import {
   GATEWAY_STARTUP_RETRY_AFTER_MS,
 } from "../../../../packages/gateway-protocol/src/startup-unavailable.js";
 import { getRuntimeConfig } from "../../../config/io.js";
+import { isDatabaseEngineReadOnlyAdmission } from "../../../infra/database-engine/context.js";
+import { rawDataByteLength } from "../../../infra/ws.js";
+import {
+  getGatewayRollingAdmission,
+  onGatewaySuspendAdmissionChange,
+} from "../../../process/gateway-work-admission.js";
 import { intersectOperatorScopes, roleScopesAllow } from "../../../shared/operator-scope-compat.js";
 import {
   isBrowserCopilotClient,
@@ -43,9 +52,11 @@ import { resolveIdentityOperatorScopes } from "../../operator-identity-scopes.js
 import type { OperatorScope } from "../../operator-scopes.js";
 import { checkGatewayWsBrowserOrigin, normalizeChromeExtensionOrigin } from "../../origin-check.js";
 import { parseGatewayRole } from "../../role-policy.js";
+import { MAX_PREAUTH_PAYLOAD_BYTES } from "../../server-constants.js";
 import { authenticatedProfileUnavailableError } from "../../server-methods/gateway-client-identity.js";
 import { formatForLog } from "../../ws-log.js";
 import { truncateCloseReason } from "../close-reason.js";
+import type { GatewayConnectionFrame } from "../connection-transport.js";
 import type {
   AuthenticatedGatewayConnect,
   GatewayConnectPhaseContext,
@@ -198,7 +209,78 @@ export function resolveGatewayConnectPolicyFailure(
   return undefined;
 }
 
+/** Connection reads stay observational until trusted startup has opened external mutations. */
+export function isGatewayConnectReadOnly(): boolean {
+  return getGatewayRollingAdmission() !== undefined || isDatabaseEngineReadOnlyAdmission();
+}
+
+/** A legacy connection must not join after the live-client rolling inventory fence. */
+export function rejectIncompatibleRollingConnect(context: GatewayConnectPhaseContext): boolean {
+  if (
+    !(
+      getGatewayRollingAdmission() ||
+      context.handler.buildRequestContext().getPendingRollingReleaseId?.()
+    ) ||
+    context.connectParams.role === "node" ||
+    hasGatewayClientCap(
+      context.connectParams.caps,
+      GATEWAY_CLIENT_CAPS.PLANNED_HANDOFF_RETENTION_V1,
+    )
+  ) {
+    return false;
+  }
+  const message = "Upgrade client before reconnecting during rolling release";
+  context.markHandshakeFailure("gateway-rolling-client-upgrade-required");
+  context.sendHandshakeErrorResponse(ErrorCodes.UNAVAILABLE, message, {
+    retryable: false,
+    details: {
+      reason: "gateway-rolling-client-upgrade-required",
+      requiredCapability: GATEWAY_CLIENT_CAPS.PLANNED_HANDOFF_RETENTION_V1,
+    },
+  });
+  context.handler.close(1008, message);
+  return true;
+}
+
+/** Retain only this live connection's existing metadata work, never an old authentication grant. */
+export function runWhenGatewayConnectMutable(
+  context: GatewayConnectPhaseContext,
+  state: AuthenticatedGatewayConnect,
+  run: () => void,
+): void {
+  if (!isGatewayConnectReadOnly()) {
+    run();
+    return;
+  }
+  if (!getGatewayRollingAdmission()) {
+    return;
+  }
+  const close = () => unsubscribe();
+  const unsubscribe = onGatewaySuspendAdmissionChange((phase) => {
+    if (phase !== "accepting" || isGatewayConnectReadOnly()) {
+      return;
+    }
+    unsubscribe();
+    context.handler.socket.off("close", close);
+    const client = context.handler.getClient();
+    if (
+      !client ||
+      client.invalidated ||
+      context.handler.isClosed() ||
+      context.handler.connectionWork.signal.aborted ||
+      resolveGatewayConnectPolicyFailure(context, state)
+    ) {
+      return;
+    }
+    run();
+  });
+  context.handler.socket.once("close", close);
+}
+
 export async function admitGatewayConnect(context: GatewayConnectPhaseContext) {
+  if (rejectIncompatibleRollingConnect(context)) {
+    return undefined;
+  }
   const {
     connId,
     remoteAddr,
@@ -224,9 +306,14 @@ export async function admitGatewayConnect(context: GatewayConnectPhaseContext) {
 
   const isNodeClient = isStartupNodeConnect(connectParams);
   const startupPending = isNodeClient && isStartupPending?.() === true;
-  // Operator hello needs prepared auth and request snapshots, not autonomous recovery.
-  // Nodes retain their stricter startup enrollment policy until sidecars are ready.
-  if (context.handler.isConnectPending?.() && !isNodeClient) {
+  // Normal operator startup keeps the prepared auth/request boundary. A rolling
+  // candidate additionally waits for its observational readers to be published.
+  const rolling = getGatewayRollingAdmission();
+  if (
+    !isNodeClient &&
+    (context.handler.isConnectPending?.() ||
+      (rolling && !(context.handler.buildRequestContext().isRollingReadReady?.() ?? rolling.reads)))
+  ) {
     await rejectGatewayStartupConnect(context);
     return undefined;
   }
@@ -386,3 +473,25 @@ export async function admitGatewayConnect(context: GatewayConnectPhaseContext) {
     startupPending,
   };
 }
+
+export const parseGatewayPreauthConnectFrame = (
+  data: GatewayConnectionFrame,
+): { id: string; params: ConnectParams } | null => {
+  if (rawDataByteLength(data) > MAX_PREAUTH_PAYLOAD_BYTES) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawDataToString(data));
+  } catch {
+    return null;
+  }
+  if (
+    !validateRequestFrame(parsed) ||
+    parsed.method !== "connect" ||
+    !validateConnectParams(parsed.params)
+  ) {
+    return null;
+  }
+  return { id: parsed.id, params: parsed.params };
+};

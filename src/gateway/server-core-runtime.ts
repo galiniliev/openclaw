@@ -146,6 +146,7 @@ export async function startGatewayCoreRuntime(input: {
       .measure("runtime.early", () =>
         import("./server-startup-early.js").then(({ startGatewayEarlyRuntime }) =>
           startGatewayEarlyRuntime({
+            rollingStartup: runtime.opts.rollingStartup,
             scheduler: runtime.scheduler,
             getCronStorePath: () => runtimeState.cronState.storePath,
             minimalTestGateway,
@@ -203,6 +204,9 @@ export async function startGatewayCoreRuntime(input: {
     ...runtimeSubscriptionUnsubs
   } = await startupTrace.measure("runtime.subscriptions", () =>
     startGatewayEventSubscriptions({
+      deferAuditStart: runtime.opts.rollingStartup
+        ? (start) => runtime.opts.rollingStartup!.defer(async () => start())
+        : undefined,
       resolveGatewayContext: runtime.resolvePluginGatewayContext,
       scheduler: runtime.scheduler,
       signal: runtime.connectionWork.signal,
@@ -270,6 +274,7 @@ export async function startGatewayCoreRuntime(input: {
     const [{ createGatewayAuxHandlers }, { coreGatewayHandlers: coreGatewayHandlersLocal }] =
       await Promise.all([import("./server-aux-handlers.js"), import("./server-methods.js")]);
     const auxHandlers = createGatewayAuxHandlers({
+      rollingStartup: runtime.opts.rollingStartup,
       scheduler: runtime.scheduler,
       log,
       hasRunAbortMarker: (runId) => chatRunState.hasAbortMarker(runId),

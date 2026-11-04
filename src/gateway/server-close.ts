@@ -12,6 +12,7 @@ import { type ChannelId, listChannelPlugins } from "../channels/plugins/index.js
 import { memorySessionActorOwners } from "../config/sessions/session-actor-memory-owner.js";
 import { closeSessionTranscriptReconcileWorkerPool } from "../config/sessions/session-transcript-reconcile-pool.js";
 import { createInternalHookEvent, triggerInternalHook } from "../hooks/internal-hooks.js";
+import { isDatabaseEngineReadOnlyAdmission } from "../infra/database-engine/context.js";
 import { formatErrorMessage, hasErrnoCode } from "../infra/errors.js";
 import { heartbeatNotifications } from "../infra/heartbeat-events.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
@@ -257,6 +258,9 @@ export async function prepareGatewayClose(
   fenceSessionSuspensionWritesForGatewayShutdown();
 
   const triggerLifecycleHook = async (action: "shutdown" | "pre-restart", timeoutMs: number) => {
+    if (isDatabaseEngineReadOnlyAdmission()) {
+      return;
+    }
     const hookName = `gateway:${action}` as const;
     try {
       const event = createInternalHookEvent("gateway", action, hookName, {

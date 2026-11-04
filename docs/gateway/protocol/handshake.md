@@ -372,6 +372,23 @@ Nodes declare capability claims at connect time:
 
 The gateway treats these as claims and enforces server-side allowlists.
 
+## Planned handoff request retention
+
+Operator clients using the shared Gateway client advertise
+`planned-handoff-retention-v1`. An authenticated hello can supply
+`auth.recoveryScope`, `auth.storeIdentity`, and
+`features.plannedHandoffReadMethods`. These connection facts bind retained
+requests to the same authenticated recovery scope and logical store.
+
+Across an admitted reconnect, the client can repeat listed observational reads
+and requests the Gateway explicitly refused before entering their handler with
+`gateway-planned-handoff`. Requests with unknown write outcomes and requests already acknowledged as
+accepted are rejected on connection close and are not replayed.
+A changed scope, store identity, or read-method qualification rejects the retained
+request. Its original deadline and cancellation signal remain in force, and a
+new send consumes the earlier non-delivery proof. After reconnect, replays begin only after the replacement hello is authenticated;
+writes wait for mutation admission to reopen.
+
 ## Roles and scopes
 
 For the full operator scope model, approval-time checks, and shared-secret

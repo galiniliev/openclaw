@@ -9,6 +9,7 @@ import { installGlobalProxy, type ProxylineHandle } from "@openclaw/proxyline";
 import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { TEST_TLS_CERT_PEM, TEST_TLS_KEY_PEM } from "../../../test/helpers/tls-fixture.js";
+import { GATEWAY_CLIENT_CAPS } from "../../gateway-protocol/src/client-info.js";
 import { validatePreviousConnectParams } from "../../gateway-protocol/src/connect-compatibility.test-support.js";
 import {
   GATEWAY_SERVER_CAPS,
@@ -315,10 +316,15 @@ it.each([
     await connected.promise;
     const frame = await received.promise;
     if (advertised) {
-      expect(frame.params).toMatchObject({ modelCatalog, caps: ["model-catalog-snapshot"] });
+      expect(frame.params).toMatchObject({
+        modelCatalog,
+        caps: ["model-catalog-snapshot", GATEWAY_CLIENT_CAPS.PLANNED_HANDOFF_RETENTION_V1],
+      });
     } else {
       expect(frame.params).not.toHaveProperty("modelCatalog");
-      expect(frame.params).toMatchObject({ caps: [] });
+      expect(frame.params).toMatchObject({
+        caps: [GATEWAY_CLIENT_CAPS.PLANNED_HANDOFF_RETENTION_V1],
+      });
     }
   },
 );

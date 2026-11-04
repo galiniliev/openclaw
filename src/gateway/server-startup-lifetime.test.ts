@@ -25,6 +25,7 @@ import { createPluginRecord } from "../plugins/status.test-helpers.js";
 import { getActiveGatewayRootWorkCount } from "../process/gateway-work-admission.js";
 import { getActiveSecretsRuntimeConfigSnapshot } from "../secrets/runtime-state.js";
 import { getFreePort } from "../test-utils/ports.js";
+import { GatewayRollingStartup } from "./rolling-startup.js";
 import { createGatewayKernel } from "./server-kernel.js";
 import type { GatewayServer } from "./server-public.js";
 import { createStartupTestState, gatewayStartupOptions } from "./server-startup.test-support.js";
@@ -78,18 +79,27 @@ function expectStartupCleanupError(failure: unknown, cause: unknown) {
 }
 
 describe("Gateway startup lifetime", () => {
-  it.each([false, true])(
-    "initializes worker presence after plugin publication with placement=%s",
-    async (withPlacement) => {
+  it.each([
+    { withPlacement: false, rolling: false },
+    { withPlacement: true, rolling: false },
+    { withPlacement: false, rolling: true },
+    { withPlacement: true, rolling: true },
+  ])(
+    "initializes worker presence after plugin publication (placement=$withPlacement, rolling=$rolling)",
+    async ({ withPlacement, rolling }) => {
       const state = await createStartupTestState("gateway-plugin-presence-order", {
         OPENCLAW_TEST_MINIMAL_GATEWAY: undefined,
       });
       const port = await getFreePort();
       const order: string[] = [];
+      const rollingStartup = rolling
+        ? new GatewayRollingStartup(() => order.push("read-ready"), "presence-order")
+        : undefined;
+      const activationOrder = rolling ? ["read-ready", "activate", "early-discovery"] : [];
       let server: GatewayServer | undefined;
       const setHumanPresence = vi.fn(async (present: boolean) => {
         expect(present).toBe(false);
-        expect(order).toEqual(["publish", "after-commit"]);
+        expect(order).toEqual(["publish", "after-commit", ...activationOrder]);
         order.push("presence");
       });
       const startupModule = await import("./server-startup-finish.js");
@@ -98,6 +108,14 @@ describe("Gateway startup lifetime", () => {
         .spyOn(startupModule, "finishGatewayStartup")
         .mockImplementation(async (...args) => {
           const runtime = args[0].kernelRuntime;
+          if (rollingStartup) {
+            // The full PG handoff proves bootstrap fencing; this fixture isolates
+            // post-publication ordering behind the real deferred-startup owner.
+            runtime.opts.rollingStartup = rollingStartup;
+            rollingStartup.defer(async () => {
+              order.push("early-discovery");
+            });
+          }
           assert.ok(runtime.workerEnvironmentService);
           vi.spyOn(runtime.workerEnvironmentService, "setHumanPresence").mockImplementation(
             setHumanPresence,
@@ -122,7 +140,7 @@ describe("Gateway startup lifetime", () => {
             },
           });
           vi.spyOn(runtime, "refreshAttachedGatewayDiscovery").mockImplementation(async () => {
-            expect(order).toEqual(["publish", "after-commit", "presence"]);
+            expect(order).toEqual(["publish", "after-commit", ...activationOrder, "presence"]);
             order.push("discovery");
           });
           return finishStartup(...args);
@@ -136,6 +154,19 @@ describe("Gateway startup lifetime", () => {
             pluginRegistry: createEmptyPluginRegistry(),
             gatewayMethods: [],
           });
+          if (rollingStartup) {
+            expect(order).toEqual(["publish", "after-commit"]);
+            expect(setHumanPresence).not.toHaveBeenCalled();
+            rollingStartup.publishReadReady();
+            expect(rollingStartup.readReady).toBe(true);
+            expect(rollingStartup.mutableActivationStarted).toBe(false);
+            await rollingStartup.activate(
+              () => {},
+              () => {
+                order.push("activate");
+              },
+            );
+          }
           await params.startWorkerEnvironmentRuntime?.();
           return {
             stopGatewayUpdateCheck: async () => {},
@@ -152,12 +183,14 @@ describe("Gateway startup lifetime", () => {
         expect(order).toEqual([
           "publish",
           "after-commit",
+          ...activationOrder,
           "presence",
           "discovery",
           ...(withPlacement ? ["recovery"] : []),
         ]);
       } finally {
         await server?.close();
+        await rollingStartup?.close();
         postAttach.mockRestore();
         startupFactory.mockRestore();
         vi.restoreAllMocks();

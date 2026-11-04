@@ -1,10 +1,15 @@
 import { resolveHostAccountName } from "../../../infra/host-account-name.js";
 import { prepareUserProfileRoleAuthority } from "../../../state/user-channel-identity-operations.js";
 import {
+  prepareExistingUserProfileAuthentication,
+  type ExistingUserProfileAuthentication,
+} from "../../../state/user-profile-reads.js";
+import {
   ensureCanonicalGatewayOwnerProfile,
   ensureCanonicalUserProfileForEmail,
   ensureCanonicalUserProfileForTailscaleIdentity,
 } from "../../../state/user-profile-writes.js";
+import { classifyTailscaleLogin } from "../../../state/user-profiles-tailscale-login.js";
 import { adoptTailscaleProfileAvatar } from "../../../state/user-profiles.js";
 import { prepareGatewayRecipientProfile } from "../../expected-profile.js";
 import type { createAuthenticatedGitHubIdentitySync } from "../../github-user-identity.js";
@@ -19,6 +24,8 @@ import type { GatewayWsClient } from "../ws-types.js";
 import {
   rejectUnavailableProfileConnect,
   resolveGatewayConnectPolicyFailure,
+  isGatewayConnectReadOnly,
+  runWhenGatewayConnectMutable,
 } from "./connect-admission.js";
 import {
   bindGatewayConnectOperatorAccess,
@@ -41,6 +48,12 @@ export function scheduleGatewayConnectProfileSync(params: {
     profile: PreparedConnectProfile["profile"],
   ) => ReturnType<typeof prepareGatewayLocalUserIngress>;
 }): void {
+  if (isGatewayConnectReadOnly()) {
+    runWhenGatewayConnectMutable(params.context, params.state, () =>
+      scheduleGatewayConnectProfileSync(params),
+    );
+    return;
+  }
   const { context, state, client, lifecycle, prepareIngress } = params;
   const { connId, logGateway } = context.handler;
   const { runDetachedConnectWork } = context;
@@ -107,9 +120,17 @@ export function createGatewayConnectProfileLifecycle(
   };
   return {
     assertCurrent,
-    isCurrent: (prepared: PreparedConnectProfile | undefined) =>
-      (!prepared || prepared.authority.isCurrent()) &&
-      !resolveGatewayConnectPolicyFailure(context, state),
+    isCurrent: (prepared: PreparedConnectProfile | undefined) => {
+      try {
+        prepared?.assertIdentityCurrent?.();
+      } catch {
+        return false;
+      }
+      return (
+        (!prepared || prepared.authority.isCurrent()) &&
+        !resolveGatewayConnectPolicyFailure(context, state)
+      );
+    },
     bind: (registered: GatewayWsClient) => {
       client = registered;
     },
@@ -157,18 +178,22 @@ async function resolveAuthenticatedProfile(
   updatedAt: number,
   assertCurrent?: () => void,
   recordTiming?: GatewayConnectPhaseContext["recordAttachTiming"],
+  assertIdentityCurrent?: () => void,
 ) {
   assertCurrent?.();
+  assertIdentityCurrent?.();
   const authorityStartedAt = performance.now();
   const authority = await prepareUserProfileRoleAuthority(profileId);
   recordTiming?.("profileAuthorityMs", authorityStartedAt);
   assertCurrent?.();
+  assertIdentityCurrent?.();
   if (!authority?.isCurrent()) {
     throw new Error("Gateway profile changed during acquisition");
   }
   const projectionStartedAt = performance.now();
   const { id, displayName, avatarRevision, hasAvatar } = authority.display;
   const prepared = {
+    ...(assertIdentityCurrent ? { assertIdentityCurrent } : {}),
     profile: { profileId: id, displayName, avatarRevision, hasAvatar, updatedAt },
     authority,
     recipient: {
@@ -198,12 +223,14 @@ export async function resolveGatewayConnectProfileAdmission(params: {
   assertCurrent?: () => void;
 }): Promise<{ ok: true; prepared?: PreparedConnectProfile } | { ok: false }> {
   const { context, state, ownerProfileExpected, authenticatedUserId } = params;
+  const readOnly = isGatewayConnectReadOnly();
   const profileRequired =
     Boolean(context.configSnapshot.gateway?.roles) ||
     hasGatewayOperatorAccessPolicies(context.configSnapshot);
   if (
     !ownerProfileExpected &&
-    (!authenticatedUserId || (params.resolveAuthenticatedGitHubIdentity && !profileRequired))
+    (!authenticatedUserId ||
+      (!readOnly && params.resolveAuthenticatedGitHubIdentity && !profileRequired))
   ) {
     return { ok: true };
   }
@@ -212,16 +239,48 @@ export async function resolveGatewayConnectProfileAdmission(params: {
     const options = { assertCurrent: params.assertCurrent };
     const ensureStartedAt = performance.now();
     context.setConnectPhase?.("profile-ensure");
-    const profile = ownerProfileExpected
-      ? await ensureCanonicalGatewayOwnerProfile(resolveHostAccountName, options)
-      : params.resolveAuthenticatedGitHubIdentity
-        ? await params.resolveAuthenticatedGitHubIdentity()
-        : state.authResult.tailscaleIdentity
-          ? await ensureCanonicalUserProfileForTailscaleIdentity(
-              state.authResult.tailscaleIdentity,
-              options,
-            )
-          : await ensureCanonicalUserProfileForEmail(authenticatedUserId!, options);
+    let assertIdentityCurrent: (() => void) | undefined;
+    const readExistingProfile = async () => {
+      let selector: ExistingUserProfileAuthentication;
+      const tailscale = state.authResult.tailscaleIdentity
+        ? classifyTailscaleLogin(state.authResult.tailscaleIdentity.login)
+        : undefined;
+      if (ownerProfileExpected) {
+        selector = { kind: "owner" };
+      } else if (params.resolveAuthenticatedGitHubIdentity?.existingAuthentication) {
+        selector = await params.resolveAuthenticatedGitHubIdentity.existingAuthentication();
+      } else if (tailscale?.kind === "provider") {
+        selector =
+          tailscale.provider === "github"
+            ? { kind: "github", binding: { login: tailscale.subject } }
+            : { kind: "provider", provider: tailscale.provider, subject: tailscale.subject };
+      } else if (params.resolveAuthenticatedGitHubIdentity) {
+        throw new Error(
+          "Gateway rolling read phase requires an existing verified provider binding",
+        );
+      } else {
+        selector = { kind: "email", email: authenticatedUserId! };
+      }
+      const existing = await prepareExistingUserProfileAuthentication(selector);
+      existing.assertCurrent();
+      if (!existing.profile) {
+        throw new Error("Gateway rolling read phase cannot create or reconcile a user profile");
+      }
+      assertIdentityCurrent = existing.assertCurrent;
+      return existing.profile;
+    };
+    const profile = isGatewayConnectReadOnly()
+      ? await readExistingProfile()
+      : ownerProfileExpected
+        ? await ensureCanonicalGatewayOwnerProfile(resolveHostAccountName, options)
+        : params.resolveAuthenticatedGitHubIdentity
+          ? await params.resolveAuthenticatedGitHubIdentity()
+          : state.authResult.tailscaleIdentity
+            ? await ensureCanonicalUserProfileForTailscaleIdentity(
+                state.authResult.tailscaleIdentity,
+                options,
+              )
+            : await ensureCanonicalUserProfileForEmail(authenticatedUserId!, options);
     params.assertCurrent?.();
     params.context.recordAttachTiming?.("profileEnsureMs", ensureStartedAt);
     context.setConnectPhase?.("profile-authority");
@@ -230,13 +289,19 @@ export async function resolveGatewayConnectProfileAdmission(params: {
       profile.updatedAt,
       params.assertCurrent,
       context.recordAttachTiming,
+      assertIdentityCurrent,
     );
     params.assertCurrent?.();
+    assertIdentityCurrent?.();
     if (!prepared.authority.isCurrent()) {
       throw new Error("Gateway profile changed during acquisition");
     }
     return { ok: true, prepared };
   } catch (error) {
+    if (readOnly || isGatewayConnectReadOnly()) {
+      await rejectUnavailableProfileConnect(context, error);
+      return { ok: false };
+    }
     context.handler.logWsControl.warn(
       `user profile resolution failed conn=${context.handler.connId} user=${formatForLog(authenticatedUserId)}: ${formatForLog(error)}`,
     );

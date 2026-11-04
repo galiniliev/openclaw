@@ -85,6 +85,7 @@ export function startGatewayEventSubscriptions(params: GatewayEventSubscriptionP
     getRpcSourceForGateway(runId, params.resolveGatewayContext);
   // Collection changes gate new work; the writer retains accepted work and maintenance.
   const auditRecorder = createAuditEventRecorder({
+    deferStart: params.deferAuditStart,
     getConfig: getRuntimeConfig,
     scheduler: params.scheduler,
   });

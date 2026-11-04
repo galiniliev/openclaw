@@ -3,7 +3,9 @@ import type { ExecutionIdentityAdmissionFacts } from "../../audit/execution-iden
 import type { ReplyPayload } from "../../auto-reply/reply-payload.js";
 import type { SessionEventTarget } from "../../auto-reply/reply/session-event-contract.js";
 import type { CronConfig } from "../../config/types.cron.js";
+import { isDatabaseEngineReadOnlyAdmission } from "../../infra/database-engine/context.js";
 import type { GatewayScheduler, GatewaySchedulerScope } from "../../infra/gateway-scheduler.js";
+import { isGatewaySubordinateWorkAdmissionClosed } from "../../process/gateway-work-admission.js";
 import { LEGACY_IMPLICIT_AGENT_ID } from "../../routing/session-key.js";
 import type { ReplyOperationObservation } from "../../sessions/reply-operation-state.js";
 import {
@@ -491,6 +493,11 @@ const preparedStoreSelections = new WeakMap<
   }
 >();
 
+/** Read requests retain the canonical handoff fence instead of borrowing writer startup. */
+export function isCronServiceReadOnly(): boolean {
+  return isDatabaseEngineReadOnlyAdmission() || isGatewaySubordinateWorkAdmissionClosed();
+}
+
 /** Resolve once per admission; warm callers enter their operation queue without yielding. */
 export function prepareCronServiceStore(state: CronServiceState): Promise<void> | undefined {
   const { admission } = captureOpenClawStateReadContext();
@@ -507,7 +514,10 @@ export function prepareCronServiceStore(state: CronServiceState): Promise<void> 
   }
   const promise = (async () => {
     const env = state.deps.env;
-    if (cronStoreKey(state.deps.storePath) === resolveDefaultCronStorePath(env)) {
+    if (
+      cronStoreKey(state.deps.storePath) === resolveDefaultCronStorePath(env) &&
+      !isCronServiceReadOnly()
+    ) {
       await runOpenClawStateWorkerOperation(context, async () => {});
     }
     state.deps.storeKey = await resolveCronStoreKeyAsync(state.deps.storePath, env, context);

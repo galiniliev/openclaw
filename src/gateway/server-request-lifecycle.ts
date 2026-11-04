@@ -6,17 +6,22 @@ import {
 } from "../../packages/gateway-protocol/src/index.js";
 import {
   GATEWAY_RESTART_UNAVAILABLE_REASON,
+  GATEWAY_PLANNED_HANDOFF_UNAVAILABLE_REASON,
   GATEWAY_SUSPEND_IDENTITY_RETRY_AFTER_MS,
   GATEWAY_SUSPEND_UNAVAILABLE_REASON,
 } from "../../packages/gateway-protocol/src/restart-unavailable.js";
+import { isAgentRunRestartAbortReason } from "../agents/run-termination.js";
 import { racePromiseWithAbortSignal } from "../infra/abort-signal.js";
 import {
   getGatewayRestartDrainSignal,
   getGatewaySuspendAdmissionPhase,
+  getGatewayRollingAdmission,
   isGatewayRestartDraining,
   retainGatewayRootWorkAdmissionContinuation,
 } from "../process/gateway-work-admission.js";
 import { AsyncWorkScope, getAsyncWorkSignal } from "../shared/async-work-scope.js";
+import { isCoreGatewayRollingRead } from "./methods/core-method-policy.js";
+import type { GatewayMethodRegistryView } from "./methods/descriptor.js";
 import { canSelectQuestion } from "./question-access.js";
 import type { GatewayRequestContext, GatewayRequestOptions } from "./server-methods/types.js";
 
@@ -103,7 +108,16 @@ export function runGatewayPendingWorkContinuation<T>(params: {
   return manager?.runPendingContinuation(request.id, params.run) ?? null;
 }
 
-export function workAdmissionUnavailableError(method: string) {
+export function workAdmissionUnavailableError(
+  method: string,
+  options: {
+    rollingReleaseId?: string;
+    handlerNotEntered?: boolean;
+    readInterrupted?: boolean;
+  } = {},
+) {
+  const rolling = getGatewayRollingAdmission();
+  const rollingReleaseId = options.rollingReleaseId ?? rolling?.releaseId;
   const restartDraining = isGatewayRestartDraining();
   return errorShape(
     ErrorCodes.UNAVAILABLE,
@@ -116,13 +130,58 @@ export function workAdmissionUnavailableError(method: string) {
           : 1_000,
       details: {
         method,
-        reason: restartDraining
-          ? GATEWAY_RESTART_UNAVAILABLE_REASON
-          : GATEWAY_SUSPEND_UNAVAILABLE_REASON,
-        phase: getGatewaySuspendAdmissionPhase(),
+        ...(rollingReleaseId
+          ? {
+              rollingReleaseId,
+              handlerNotEntered: options.handlerNotEntered ?? true,
+              ...(options.readInterrupted ? { readInterrupted: true } : {}),
+            }
+          : {}),
+        reason: rollingReleaseId
+          ? GATEWAY_PLANNED_HANDOFF_UNAVAILABLE_REASON
+          : restartDraining
+            ? GATEWAY_RESTART_UNAVAILABLE_REASON
+            : GATEWAY_SUSPEND_UNAVAILABLE_REASON,
+        phase: rollingReleaseId ? "prepared" : getGatewaySuspendAdmissionPhase(),
       },
     },
   );
+}
+
+/** Projects only an audited read interrupted within a captured rolling lifetime. */
+export function gatewayRollingReadInterruptionError(params: {
+  method: string;
+  context: Pick<GatewayRequestContext, "getPendingRollingReleaseId">;
+  methodRegistry?: GatewayMethodRegistryView;
+  releaseId?: string;
+  signal?: AbortSignal;
+  connectionSignal?: AbortSignal;
+  error?: unknown;
+}): ErrorShape | undefined {
+  const releaseId =
+    getGatewayRollingAdmission()?.releaseId ??
+    params.context.getPendingRollingReleaseId?.() ??
+    params.releaseId;
+  if (
+    !releaseId ||
+    !(
+      isGatewayRestartDraining() ||
+      params.signal?.aborted ||
+      params.connectionSignal?.aborted ||
+      isAgentRunRestartAbortReason(params.error)
+    ) ||
+    !isCoreGatewayRollingRead(params.method) ||
+    !params.methodRegistry
+      ?.descriptors()
+      .some((descriptor) => descriptor.name === params.method && descriptor.owner.kind === "core")
+  ) {
+    return undefined;
+  }
+  return workAdmissionUnavailableError(params.method, {
+    rollingReleaseId: releaseId,
+    handlerNotEntered: false,
+    readInterrupted: true,
+  });
 }
 
 /** Cancels passive waiters without abandoning their owner's admitted writes. */
@@ -170,7 +229,7 @@ export async function runWithGatewayObservationScope<T>(
     }
     return await cancelled(
       getGatewayRestartDrainSignal().aborted
-        ? workAdmissionUnavailableError(method)
+        ? workAdmissionUnavailableError(method, { handlerNotEntered: false })
         : errorShape(
             ErrorCodes.UNAVAILABLE,
             timeoutError && work.signal.reason === timeoutError

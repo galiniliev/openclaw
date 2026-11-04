@@ -7,6 +7,7 @@ import type { GatewayActiveWorkInspectors } from "../infra/gateway-active-work.j
 import type { GatewayScheduler } from "../infra/gateway-scheduler.js";
 import type { PluginRegistry } from "../plugins/registry-types.js";
 import { withPluginRuntimeGatewayContextResolver } from "../plugins/runtime/gateway-request-scope.js";
+import type { GatewayRollingStartup } from "./rolling-startup.js";
 import type { GatewayDiscovery } from "./server-discovery-runtime.js";
 import type { GatewayContextResolver } from "./server-methods/types.js";
 import { measureStartup, type GatewayStartupTrace } from "./server-startup-trace.js";
@@ -14,9 +15,17 @@ import { measureStartup, type GatewayStartupTrace } from "./server-startup-trace
 type StartGatewayMaintenanceTimers =
   typeof import("./server-maintenance.js").startGatewayMaintenanceTimers;
 type GatewayMaintenanceParams = Parameters<StartGatewayMaintenanceTimers>[0];
+type EarlyRuntime = {
+  skillsChangeUnsub: (options?: { exitAfterClose?: boolean }) => Promise<void>;
+  startMaintenance: (
+    inspectors: Partial<GatewayActiveWorkInspectors>,
+    context?: GatewayContextResolver,
+  ) => Promise<ReturnType<StartGatewayMaintenanceTimers> | null>;
+};
 
 /** Start early Gateway side runtimes before the main server is fully ready. */
 export async function startGatewayEarlyRuntime(params: {
+  rollingStartup?: GatewayRollingStartup;
   scheduler: GatewayScheduler;
   getCronStorePath: () => string;
   minimalTestGateway: boolean;
@@ -51,7 +60,23 @@ export async function startGatewayEarlyRuntime(params: {
   >;
   getRuntimeConfig: () => OpenClawConfig;
   startupTrace?: GatewayStartupTrace;
-}) {
+}): Promise<EarlyRuntime> {
+  if (params.rollingStartup) {
+    const admission = params.rollingStartup;
+    let active: EarlyRuntime | undefined;
+    admission.defer(async () => {
+      active = await startGatewayEarlyRuntime({ ...params, rollingStartup: undefined });
+    });
+    return {
+      skillsChangeUnsub: async (options) => {
+        await active?.skillsChangeUnsub(options);
+      },
+      startMaintenance: async (inspectors, context) => {
+        await admission.waitForMutableStartup();
+        return (await active?.startMaintenance(inspectors, context)) ?? null;
+      },
+    };
+  }
   await setSessionMcpRuntimeScheduler(params.scheduler);
   const startSideRuntimes = !params.minimalTestGateway && !params.updateCanary;
   // Startup failure can occur immediately after discovery; publish its owner first.

@@ -53,6 +53,7 @@ export const databaseEngineAdapters: {
             reuse: store.reusePostgresConnection,
             lockTimeoutMs: POSTGRES_LOCK_TIMEOUT_MS,
             statementTimeoutMs: POSTGRES_STATEMENT_TIMEOUT_MS,
+            ...(store.input.readOnly ? { readOnly: true } : {}),
           },
         );
       } catch (error) {

@@ -110,7 +110,10 @@ export function openEngineStore(ref: {
       `Existing SQLite ${schema.id} data cannot switch engines; stop the Gateway and use openclaw database port for a supported store family before changing ${familySetting(schema)}.`,
     );
   }
-  ref.prepareAnchor();
+  const readOnly = ref.input?.readOnly === true || ref.input?.readOnlySchema === true;
+  if (!readOnly) {
+    ref.prepareAnchor();
+  }
   const readOrCreateAnchor = () => {
     const inspection = ref.inspectSqlite();
     if (inspection.hasExistingData) {
@@ -118,7 +121,7 @@ export function openEngineStore(ref: {
         `Existing SQLite ${schema.id} data cannot switch engines; stop the Gateway and use openclaw database port for a supported store family before changing ${familySetting(schema)}.`,
       );
     }
-    if (!inspection.hasEngineAnchor && ref.existingOnly) {
+    if (!inspection.hasEngineAnchor && (ref.existingOnly || readOnly)) {
       throw new Error(
         "Missing PostgreSQL anchor; restore the matching PostgreSQL schema and anchor.",
       );
@@ -158,7 +161,7 @@ export function openEngineStore(ref: {
   const identity =
     known?.engine === "postgres"
       ? known
-      : ref.existingOnly
+      : ref.existingOnly || readOnly
         ? readOrCreateAnchor()
         : runSqliteImmediateTransactionSync(anchor, readOrCreateAnchor);
   const store: AdmittedStore = { ...ref, input: ref.input, ...identity };
@@ -186,6 +189,18 @@ export function openEngineStore(ref: {
           ref.existingVersion ? 1 : schema.postgresVectorSearchVersion,
         )
       : undefined;
+    if (readOnly) {
+      // Exact current schema admission reads the existing seal/catalog only. The
+      // PostgreSQL session also enforces READ ONLY, including accidental writes.
+      db.runTransaction(() => admit(false), undefined, true);
+      publishSqliteDatabaseAdmission(anchor, admissionKey, {
+        engine: "postgres",
+        ...identity,
+        version: schema.version,
+      });
+      publishSearch?.();
+      return db;
+    }
     if (!known || (known.engine === "postgres" && known.version !== schema.version)) {
       admitPostgresCapabilities(db);
       // Bootstrap borrows opening custody; ordinary writes still require domain admission.
