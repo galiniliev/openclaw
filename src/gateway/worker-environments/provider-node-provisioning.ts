@@ -95,7 +95,9 @@ export function createWorkerNodeProvisioning(options: WorkerNodeProvisioningOpti
       }
       const nodeBootstrapSha256 = bootstrapResult.value;
       installation = installationResult.value;
-      const preparation = readWorkerPreparation(record.profileSnapshot);
+      const preparation = record.retention?.receipt
+        ? undefined
+        : readWorkerPreparation(record.profileSnapshot);
       if (
         preparation &&
         (preparation.artifacts.nodeBootstrapSha256 !== nodeBootstrapSha256 ||
@@ -321,7 +323,9 @@ export function createWorkerNodeProvisioning(options: WorkerNodeProvisioningOpti
       nodeDeviceId: lease.node.deviceId,
       sshEndpoint: null,
     };
-    const preparation = readWorkerPreparation(record.profileSnapshot);
+    const preparation = record.retention?.receipt
+      ? undefined
+      : readWorkerPreparation(record.profileSnapshot);
     const projectPreparation = readWorkerProjectPreparation(record.profileSnapshot.project);
     const enrollmentOwner = options.store.get(record.environmentId);
     const assertCurrent = () => {

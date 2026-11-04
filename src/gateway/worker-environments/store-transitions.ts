@@ -73,24 +73,47 @@ export function createWorkerEnvironmentTransitionOps(db: EngineConnection, now: 
       const updatedAtMs = now();
       if (input.expectedState === "attached") {
         const attachedSessionId = current.attachedSessionIds[0];
+        const initial = input.initialDispatch;
         const placements = executeSqliteQuerySync(
           db,
           queryWorkerEnvironmentStore(db)
             .selectFrom("worker_session_placements")
             .selectAll()
             .where("environment_id", "=", environmentId)
-            .where("state", "=", input.expectedReclaimResult ? "draining" : "active"),
+            .where(
+              "state",
+              "=",
+              initial ? "provisioning" : input.expectedReclaimResult ? "draining" : "active",
+            ),
         ).rows;
         const placement = placements.length === 1 ? placements[0] : undefined;
         if (
           current.attachedSessionIds.length !== 1 ||
           !placement ||
           placement.session_id !== attachedSessionId ||
-          placement.active_owner_epoch !== current.ownerEpoch ||
+          (initial
+            ? placement.active_owner_epoch !== null
+            : placement.active_owner_epoch !== current.ownerEpoch) ||
           placement.transition_generation !== input.expectedPlacementGeneration ||
-          placement.worker_bundle_hash !== expectedReceipt.bundleHash
+          (!initial && placement.worker_bundle_hash !== expectedReceipt.bundleHash)
         ) {
           throw new Error("Worker placement changed during runtime refresh");
+        }
+        if (initial) {
+          const facts = readWorkerWorkspaceReconciliationFacts(db, [placement.session_id]);
+          if (
+            current.lastActivatedAtMs !== null ||
+            current.sharedHost !== false ||
+            current.leaseId !== initial.leaseId ||
+            current.nodeDeviceId !== initial.nodeDeviceId ||
+            placement.transition_generation !== initial.generation ||
+            placement.agent_id !== initial.agentId ||
+            placement.session_key !== initial.sessionKey ||
+            facts.placements.get(placement.session_id)?.turnClaim ||
+            facts.pendingResults.has(placement.session_id)
+          ) {
+            throw new Error("Initial worker runtime refresh lost its exact dispatch owner");
+          }
         }
         if (input.expectedReclaimResult) {
           const retained = readWorkerWorkspaceReconciliationFacts(db, [placement.session_id]);
@@ -119,13 +142,16 @@ export function createWorkerEnvironmentTransitionOps(db: EngineConnection, now: 
         ) {
           throw new Error("Cannot refresh a worker runtime while its session is moving");
         }
-        executeWorkerEnvironmentWrite(
-          db,
-          queryWorkerEnvironmentStore(db)
-            .updateTable("worker_session_placements")
-            .set({ worker_bundle_hash: receipt.bundleHash, updated_at_ms: updatedAtMs })
-            .where("session_id", "=", placement.session_id),
-        );
+        // Initial startup publishes its bundle while transitioning to syncing after this receipt.
+        if (!initial) {
+          executeWorkerEnvironmentWrite(
+            db,
+            queryWorkerEnvironmentStore(db)
+              .updateTable("worker_session_placements")
+              .set({ worker_bundle_hash: receipt.bundleHash, updated_at_ms: updatedAtMs })
+              .where("session_id", "=", placement.session_id),
+          );
+        }
       }
       // The epoch also names the node workspace directory. Rotate executable authority
       // through fresh credentials and turn claims without replacing that workspace owner.

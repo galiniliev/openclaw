@@ -89,6 +89,8 @@ export async function createHarness(
     isShuttingDown?: () => boolean;
     hasCurrentRunner?: DispatchOptions["hasCurrentRunner"];
     waitForRecoveryNode?: DispatchOptions["waitForRecoveryNode"];
+    waitForInitialNode?: DispatchOptions["waitForInitialNode"];
+    needsAcceptedWorkspacePublication?: DispatchOptions["needsAcceptedWorkspacePublication"];
     prepareAcceptedWorkspacePublication?: DispatchOptions["prepareAcceptedWorkspacePublication"];
     publishAcceptedWorkspace?: DispatchOptions["publishAcceptedWorkspace"];
     beforeMoveBegin?: (abandoned: { runId: string } | undefined) => Promise<void>;
@@ -458,6 +460,7 @@ export async function createHarness(
     isShuttingDown: options.isShuttingDown,
     hasCurrentRunner: options.hasCurrentRunner,
     waitForRecoveryNode: options.waitForRecoveryNode,
+    waitForInitialNode: options.waitForInitialNode,
     prepareGatewayMove: options.prepareGatewayMove,
     runReclaimPreparation: options.runReclaimPreparation ?? runReclaimPreparation,
     runnerAvailability: createWorkerPlacementRunnerAvailabilityReader({
@@ -574,6 +577,9 @@ export async function createHarness(
       }),
     }),
     ...(options.withPreparedRecovery ? { withPreparedRecovery: options.withPreparedRecovery } : {}),
+    ...(options.needsAcceptedWorkspacePublication
+      ? { needsAcceptedWorkspacePublication: options.needsAcceptedWorkspacePublication }
+      : {}),
     ...(options.prepareAcceptedWorkspacePublication
       ? { prepareAcceptedWorkspacePublication: options.prepareAcceptedWorkspacePublication }
       : {}),

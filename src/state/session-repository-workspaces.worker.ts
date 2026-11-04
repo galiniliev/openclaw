@@ -12,6 +12,7 @@ import {
   deleteSessionRepositoryWorkspaceInDatabase,
   findSessionRepositoryWorkspaceInDatabase,
   readSessionRepositoryWorkspaceInDatabase,
+  rebindSessionRepositoryWorkspaceOwnerInDatabase,
   resetSessionRepositoryWorkspaceToBranchInDatabase,
 } from "./session-repository-workspaces.kernel.js";
 import { repositoryWorkspacePublication } from "./session-repository-workspaces.receipts.js";
@@ -22,6 +23,7 @@ import type {
   RepositoryWorkspaceCreate,
   RepositoryWorkspaceMutationResult,
   RepositoryWorkspaceOwner,
+  RepositoryWorkspaceRetainedOwner,
 } from "./session-repository-workspaces.types.js";
 import type { WorkerOperationHandlers } from "./worker-operation-registry.js";
 
@@ -43,6 +45,13 @@ export const repositoryWorkspaceOperations = {
   ) =>
     mutate(open(), "repositoryWorkspaces.bindBase", (db) =>
       bindSessionRepositoryWorkspaceBaseInDatabase(db, input, input.nowMs ?? Date.now()),
+    ),
+  "repositoryWorkspaces.rebindRetainedOwner": (
+    input: RepositoryWorkspaceRetainedOwner & { nowMs?: number },
+    { open },
+  ) =>
+    mutate(open(), "repositoryWorkspaces.rebindRetainedOwner", (db) =>
+      rebindSessionRepositoryWorkspaceOwnerInDatabase(db, input, input.nowMs ?? Date.now()),
     ),
   "repositoryWorkspaces.resetToBranch": (
     input: RepositoryWorkspaceBranchReset & { nowMs?: number },

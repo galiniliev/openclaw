@@ -6,7 +6,11 @@ import type { createNodeWorkerLaunchAdapter } from "./node-launch-adapter.js";
 import type { NodeWorkspaceTransferService } from "./node-workspace-transfer-service.js";
 import type { WorkerSessionTurnClaim } from "./placement-record.js";
 import type { WorkerEnvironmentRecord } from "./store.js";
-import type { WorkerTunnelStopReason, WorkerTurnTunnelHandle } from "./tunnel-contract.js";
+import type {
+  WorkerTunnelRequest,
+  WorkerTunnelStopReason,
+  WorkerTurnTunnelHandle,
+} from "./tunnel-contract.js";
 
 export type NodeWorkerTunnelManagerOptions = {
   gatewayDeviceId: string;
@@ -19,6 +23,9 @@ export type NodeWorkerTunnelManagerOptions = {
 };
 
 export type NodeWorkerTunnelStartRequest = {
+  /** Live pending-result authority retained only by workspace-only recovery handles. */
+  workspaceAuthority?: () => void;
+  initialPlacement?: WorkerTunnelRequest["initialPlacement"];
   executionMode: "worker-turn" | "remote-exec";
   environmentId: string;
   ownerEpoch: number;

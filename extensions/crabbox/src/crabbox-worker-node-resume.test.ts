@@ -17,9 +17,17 @@ import { createCrabboxNodeResumeScript } from "./crabbox-worker-node-resume.js";
 const temporary = useAutoCleanupTempDirTracker((cleanup) => afterEach(cleanup));
 
 describe("enrolled node resume", () => {
-  it.for(["retained", "wrong-device", "wrong-runtime", "setup-failed"] as const)(
+  it.for([
+    "retained",
+    "wrong-device",
+    "wrong-runtime",
+    "setup-failed",
+    "cleanup-installed",
+    "cleanup-wrong-device",
+  ] as const)(
     "preserves the lease workspace and resumes only its %s identity",
     async (scenario, { signal }) => {
+      const cleanup = scenario.startsWith("cleanup-");
       const receipts = await openFixtureReceiptChannel();
       const home = fs.realpathSync(temporary.make("crabbox-node-resume-"));
       const node = resolveTestNodeExecPath();
@@ -40,23 +48,29 @@ describe("enrolled node resume", () => {
         mode: 0o700,
       });
       fs.symlinkSync(node, path.join(managedBin, "node"));
-      fs.symlinkSync(oldNode, path.join(binding, "node"));
-      const request = {
+      fs.symlinkSync(cleanup ? node : oldNode, path.join(binding, "node"));
+      const capturedBootstrap = "a".repeat(64);
+      const capturedVersion = "2026.10.3";
+      const request: Parameters<typeof createCrabboxNodeResumeScript>[0] = {
         leaseId: "cbx_resume_fixture",
         deviceId: "retained-device",
-        nodeBootstrapSha256: "a".repeat(64),
-        openclawVersion: "2026.10.3",
-        linuxToolchainSetup:
-          scenario === "setup-failed"
-            ? "exit 9\n"
-            : `printf prepared >> '${preparation}'\nexport PATH='${managedBin}':"$PATH"\n`,
+        ...(cleanup
+          ? { retainedRuntimeOnly: true as const }
+          : {
+              nodeBootstrapSha256: capturedBootstrap,
+              openclawVersion: capturedVersion,
+              linuxToolchainSetup:
+                scenario === "setup-failed"
+                  ? "exit 9\n"
+                  : `printf prepared >> '${preparation}'\nexport PATH='${managedBin}':"$PATH"\n`,
+            }),
       };
       const state = path.join(home, ".openclaw", "cloud-workers", request.leaseId);
       const runtime = path.join(
         home,
         ".openclaw-worker",
         "node-runtimes",
-        request.nodeBootstrapSha256,
+        cleanup ? "b".repeat(64) : capturedBootstrap,
       );
       const packageRoot = path.join(runtime, "node_modules", "openclaw");
       fs.mkdirSync(state, { recursive: true });
@@ -64,7 +78,7 @@ describe("enrolled node resume", () => {
       fs.symlinkSync(runtime, path.join(state, "runtime"));
       fs.writeFileSync(
         path.join(packageRoot, "package.json"),
-        JSON.stringify({ name: "openclaw", version: request.openclawVersion }),
+        JSON.stringify({ name: "openclaw", version: cleanup ? "2026.10.9" : capturedVersion }),
       );
       fs.writeFileSync(path.join(state, "dirty-workspace"), "unpublished work and unknown effects");
       // A positively dead PID, not an absent launch receipt or a live unrelated process.
@@ -77,7 +91,7 @@ describe("enrolled node resume", () => {
 import fs from "node:fs";
 ${fixtureReceiptClientSource(receipts.endpoint)}
 if (process.argv[3] === "identity") {
-  console.log(JSON.stringify({deviceId: ${JSON.stringify(scenario === "wrong-device" ? "other-device" : request.deviceId)}}));
+  console.log(JSON.stringify({deviceId: ${JSON.stringify(scenario.endsWith("wrong-device") ? "other-device" : request.deviceId)}}));
 } else {
   process.title = "openclaw-node";
   fs.writeFileSync(${JSON.stringify(path.join(state, "launched-node"))}, process.execPath);
@@ -97,10 +111,17 @@ if (process.argv[3] === "identity") {
           error += value.toString();
         });
         child.stdin.end(
-          createCrabboxNodeResumeScript({
-            ...request,
-            ...(scenario === "wrong-runtime" ? { nodeBootstrapSha256: "b".repeat(64) } : {}),
-          }),
+          createCrabboxNodeResumeScript(
+            scenario === "wrong-runtime"
+              ? {
+                  leaseId: request.leaseId,
+                  deviceId: request.deviceId,
+                  nodeBootstrapSha256: "b".repeat(64),
+                  openclawVersion: capturedVersion,
+                  linuxToolchainSetup: request.linuxToolchainSetup,
+                }
+              : request,
+          ),
         );
         const [code] = await once(child, "close");
         return { code, error };
@@ -114,13 +135,21 @@ if (process.argv[3] === "identity") {
           }
           await withinTest(receipts.waitFor(state, "ready"), signal);
         }
-        if (scenario === "retained") {
+        if (scenario === "retained" || scenario === "cleanup-installed") {
           expect(result).toEqual({ code: 0, error: "" });
           expect(fs.readFileSync(path.join(state, "launched-node"), "utf8")).toBe(node);
           expect(fs.readlinkSync(path.join(binding, "node"))).toBe(node);
-          expect(fs.readFileSync(preparation, "utf8")).toBe("prepared");
+          if (cleanup) {
+            expect(fs.existsSync(preparation)).toBe(false);
+          } else {
+            expect(fs.readFileSync(preparation, "utf8")).toBe("prepared");
+          }
           expect(await run()).toEqual({ code: 0, error: "" });
-          expect(fs.readFileSync(preparation, "utf8")).toBe("prepared");
+          if (cleanup) {
+            expect(fs.existsSync(preparation)).toBe(false);
+          } else {
+            expect(fs.readFileSync(preparation, "utf8")).toBe("prepared");
+          }
           expect(Number(fs.readFileSync(path.join(state, "node.pid"), "utf8"))).toBe(pid);
           expect(fs.existsSync(path.join(state, "setup-code"))).toBe(false);
         } else {

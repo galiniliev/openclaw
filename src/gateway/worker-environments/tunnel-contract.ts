@@ -9,7 +9,7 @@ import type {
 } from "../../worker/node-workspace-protocol.js";
 import type { NodeWorkerWorkspaceTransferInput } from "../../worker/node-workspace-transfer-protocol.js";
 import type { WorkerNodeLostError } from "../../worker/worker-node-loss.js";
-import type { WorkerSessionTurnClaim } from "./placement-record.js";
+import type { WorkerSessionPlacementRecord, WorkerSessionTurnClaim } from "./placement-record.js";
 import type {
   WorkerWorkspaceApplyResult,
   WorkerWorkspaceReconciliationJournalAdapter,
@@ -64,6 +64,10 @@ export class WorkerRunnerCapacityError extends Error {
 }
 
 export type WorkerTunnelRequest = {
+  /** Workspace capture only, under the canonical fenced pending-result owner. */
+  recoveryClaim?: WorkerSessionTurnClaim;
+  /** Restore only an exact retained repository during its verified initial syncing generation. */
+  initialPlacement?: Pick<WorkerSessionPlacementRecord, "generation" | "agentId" | "sessionKey">;
   environmentId: string;
   ownerEpoch: number;
   /** Initiating-operation authority; established tunnel custody is independent. */

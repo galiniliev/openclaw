@@ -32,6 +32,7 @@ import type * as placementSessionRuntime from "./worker-environments/placement-s
 import type { WorkerSessionPlacementStore } from "./worker-environments/placement-store.js";
 import { WorkerPlacementWorkspaceUnavailableError } from "./worker-environments/placement-workspace-unavailable.js";
 import type { WorkerSessionWorkspace } from "./worker-environments/session-workspace.js";
+import type { WorkerTunnelRequest } from "./worker-environments/tunnel-contract.js";
 import { prepareWorkerTurnTranscriptSource } from "./worker-environments/worker-turn-transcript-target.js";
 import { createWorkerWorkspaceConflictTranscriptHandlers } from "./worker-workspace-conflict-transcript.js";
 
@@ -535,14 +536,30 @@ export function createWorkerPlacementNodeWorkspaceBindingResolver(options: {
   placements: Pick<WorkerSessionPlacementStore, "get" | "getAsync">;
   resolveWorkspace: (identity: WorkerSessionPlacementIdentity) => Promise<WorkerSessionWorkspace>;
 }) {
-  type Binding = { environmentId: string; ownerEpoch: number; sessionId: string };
+  type Binding = {
+    environmentId: string;
+    ownerEpoch: number;
+    sessionId: string;
+    initialPlacement?: WorkerTunnelRequest["initialPlacement"];
+  };
   const readPlacement = async (binding: Binding) => {
     const placement = await options.placements.getAsync(binding.sessionId);
-    return placement &&
-      (placement.state === "active" ||
-        placement.state === "draining" ||
-        placement.state === "reconciling") &&
-      placement.environmentId === binding.environmentId &&
+    if (!placement || placement.environmentId !== binding.environmentId) {
+      return undefined;
+    }
+    if (placement.state === "syncing" && binding.initialPlacement) {
+      const initial = binding.initialPlacement;
+      return placement.generation === initial.generation &&
+        placement.agentId === initial.agentId &&
+        placement.sessionKey === initial.sessionKey &&
+        placement.activeOwnerEpoch === null &&
+        placement.turnClaim === null
+        ? placement
+        : undefined;
+    }
+    return (placement.state === "active" ||
+      placement.state === "draining" ||
+      placement.state === "reconciling") &&
       placement.activeOwnerEpoch === binding.ownerEpoch
       ? placement
       : undefined;
@@ -562,7 +579,7 @@ export function createWorkerPlacementNodeWorkspaceBindingResolver(options: {
       current?.state !== placement.state ||
       current.generation !== placement.generation ||
       current.environmentId !== binding.environmentId ||
-      current.activeOwnerEpoch !== binding.ownerEpoch ||
+      current.activeOwnerEpoch !== placement.activeOwnerEpoch ||
       current.sessionKey !== placement.sessionKey ||
       current.agentId !== placement.agentId ||
       current.remoteWorkspaceDir !== placement.remoteWorkspaceDir ||
@@ -575,6 +592,33 @@ export function createWorkerPlacementNodeWorkspaceBindingResolver(options: {
       (!workspace.repository.baseCommit || !workspace.repository.baseManifestHash)
     ) {
       throw new Error("Attached repository workspace has no pinned baseline");
+    }
+    if (placement.state === "syncing") {
+      // Initial placement has no active workspace projection. Only its exact accepted
+      // disk can restore custody; a key or prepared profile alone never makes files ready.
+      if (workspace.kind !== "repository") {
+        return undefined;
+      }
+      const { diskAuthority, baseCommit, baseManifestHash } = workspace.repository;
+      if (
+        !diskAuthority ||
+        diskAuthority.environmentId !== binding.environmentId ||
+        diskAuthority.sessionId !== binding.sessionId ||
+        diskAuthority.ownerEpoch !== binding.ownerEpoch
+      ) {
+        return undefined;
+      }
+      return {
+        source: {
+          kind: "repository" as const,
+          baseCommit: baseCommit!,
+          baseManifestRef: baseManifestHash!,
+        },
+        diskAuthority,
+        manifestRef: baseManifestHash!,
+        remoteWorkspaceDir: diskAuthority.workspaceDir,
+        sessionKey: placement.sessionKey,
+      };
     }
     if (
       (workspace.kind === "device-folder") !==

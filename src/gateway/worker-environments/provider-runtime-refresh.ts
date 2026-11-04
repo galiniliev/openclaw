@@ -1,12 +1,17 @@
-import type { WorkerProvider } from "../../plugins/types.js";
+import { compareOpenClawReleaseVersions } from "../../infra/npm-registry-spec.js";
+import type { WorkerProvider, WorkerNodeRuntimePreparation } from "../../plugins/types.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { notifyListeners, registerListener } from "../../shared/listeners.js";
+import { resolveRuntimeServiceBuildId, VERSION } from "../../version.js";
 import { sameWorkerBuild } from "../../worker/worker-build-identity.js";
 import { DEFAULT_BOOTSTRAP_TIMEOUT_MS, NODE_ENROLLMENT_TIMEOUT_MS } from "./bootstrap-timeouts.js";
 import type { WorkerInstallationArtifact } from "./bundle.js";
 import { workerEnvironmentServiceError as serviceError } from "./environment-errors.js";
 import { DEFAULT_NODE_TOOLCHAIN_SETUP_SH } from "./node-toolchain.js";
-import type { WorkerSessionPlacementGate } from "./placement-worker-gate.js";
+import type {
+  WorkerSessionPlacementGate,
+  WorkerInitialDispatchBinding,
+} from "./placement-worker-gate.js";
 import { readWorkerPreparation } from "./preparation-identity.schema.js";
 import type { WorkerProviderLifecycleOptions } from "./provider-lifecycle.types.js";
 import type { createWorkerProviderOwnerLifecycle } from "./provider-owner-lifecycle.js";
@@ -41,6 +46,9 @@ type WorkerRuntimeRefreshOptions = Pick<
   | "bootstrapWorker"
   | "credentialBroker"
   | "callProvider"
+  | "prepareInstallation"
+  | "prepareNodeRuntime"
+  | "closeNodeRuntime"
 > &
   Pick<
     ReturnType<typeof createWorkerProviderOwnerLifecycle>,
@@ -56,6 +64,7 @@ export function createWorkerRuntimeRefresher(options: WorkerRuntimeRefreshOption
     provider: WorkerProvider,
     installation: WorkerInstallationArtifact | undefined,
     signal?: AbortSignal,
+    initial?: { dispatch: WorkerInitialDispatchBinding; assertCurrent: () => void },
   ) => {
     if (
       !installation ||
@@ -91,10 +100,13 @@ export function createWorkerRuntimeRefresher(options: WorkerRuntimeRefreshOption
           sessionId,
           environmentId: record.environmentId,
           ownerEpoch: record.ownerEpoch,
+          ...(record.retention ? { idleOnly: true as const } : {}),
+          ...(initial ? { initialDispatch: initial.dispatch } : {}),
         });
       }
       const assertCurrent = () => {
         signal?.throwIfAborted();
+        initial?.assertCurrent();
         const current = requireCurrentOwner(record);
         if (options.isStopping() || current.destroyRequestedAtMs !== null) {
           throw serviceError("invalid_state", "Worker runtime refresh owner is stopping");
@@ -144,6 +156,7 @@ export function createWorkerRuntimeRefresher(options: WorkerRuntimeRefreshOption
             ? {
                 expectedState: record.state,
                 expectedPlacementGeneration: placementAuthority!.generation,
+                ...(initial ? { initialDispatch: initial.dispatch } : {}),
                 expectedReclaimResult: placementAuthority!.reclaimResult,
               }
             : { expectedState: record.state }),
@@ -165,18 +178,33 @@ export function createWorkerRuntimeRefresher(options: WorkerRuntimeRefreshOption
   const resumeNode = async (
     record: WorkerEnvironmentRecord,
     provider: WorkerProvider,
-    request: { signal: AbortSignal; assertCurrent: () => void },
-  ) => {
+    request: {
+      signal: AbortSignal;
+      assertCurrent: () => void;
+      initialDispatch?: WorkerInitialDispatchBinding;
+      nodeBuildId?: string;
+      placementState?: "active" | "draining";
+    },
+  ): Promise<{ retainedCleanupOnly: true } | void> => {
     const resume = provider.resumeNode;
     const { leaseId, nodeDeviceId } = record;
     if (!resume || record.sharedHost !== false || !nodeDeviceId) {
       return;
     }
     const preparation = readWorkerPreparation(record.profileSnapshot);
-    // Legacy/unprepared leases keep ordinary reconnect behavior; never guess a runtime.
-    if (!preparation) {
-      return;
-    }
+    // Capture provenance is immutable. Loaded host build metadata selects recovery,
+    // including same-version updates and reconnects, without granting execution.
+    const releaseOrder =
+      preparation && compareOpenClawReleaseVersions(preparation.artifacts.openclawVersion, VERSION);
+    const currentBuildId = resolveRuntimeServiceBuildId();
+    const currentRuntimeRequired =
+      !preparation ||
+      (releaseOrder ?? 0) < 0 ||
+      (releaseOrder === 0 &&
+        (request.initialDispatch !== undefined || request.placementState === "active") &&
+        preparation.target.platform === "linux" &&
+        currentBuildId !== null &&
+        request.nodeBuildId !== currentBuildId);
     if (!record.bootstrapReceipt || !leaseId) {
       throw serviceError(
         "invalid_state",
@@ -196,6 +224,11 @@ export function createWorkerRuntimeRefresher(options: WorkerRuntimeRefreshOption
       sessionId,
       environmentId: record.environmentId,
       ownerEpoch: record.ownerEpoch,
+      ...(currentRuntimeRequired ? { idleOnly: true as const } : {}),
+      ...(record.retention && !request.initialDispatch
+        ? { allowRetainedCleanup: true as const }
+        : {}),
+      ...(request.initialDispatch ? { initialDispatch: request.initialDispatch } : {}),
     });
     const assertCurrent = () => {
       request.signal.throwIfAborted();
@@ -211,8 +244,24 @@ export function createWorkerRuntimeRefresher(options: WorkerRuntimeRefreshOption
         throw serviceError("invalid_state", "Worker node recovery owner changed");
       }
     };
+    let runtime: WorkerNodeRuntimePreparation | undefined;
     try {
       assertCurrent();
+      if (currentRuntimeRequired && !authority.retainedCleanupOnly) {
+        if (!options.prepareNodeRuntime) {
+          throw serviceError(
+            "invalid_state",
+            "Current Node runtime preparation owner is unavailable",
+          );
+        }
+        const bundle = await options.prepareInstallation("bundle", request.signal);
+        assertCurrent();
+        if (bundle.install !== "bundle") {
+          throw new Error("Worker node recovery requires a bundle artifact");
+        }
+        runtime = await options.prepareNodeRuntime!(record, bundle, request.signal, assertCurrent);
+        assertCurrent();
+      }
       await options.callProvider(
         record.environmentId,
         "resume-node",
@@ -221,9 +270,17 @@ export function createWorkerRuntimeRefresher(options: WorkerRuntimeRefreshOption
             leaseId,
             profile: requireWorkerProfile(record.profileSnapshot.settings),
             deviceId: nodeDeviceId,
-            nodeBootstrapSha256: preparation.artifacts.nodeBootstrapSha256,
-            openclawVersion: preparation.artifacts.openclawVersion,
-            linuxToolchainSetup: DEFAULT_NODE_TOOLCHAIN_SETUP_SH,
+            ...(authority.retainedCleanupOnly
+              ? { retainedRuntimeOnly: true as const }
+              : {
+                  nodeBootstrapSha256:
+                    runtime?.nodeBootstrap.sha256 ?? preparation!.artifacts.nodeBootstrapSha256,
+                  openclawVersion:
+                    runtime?.nodeBootstrap.openclawVersion ??
+                    preparation!.artifacts.openclawVersion,
+                  ...(runtime ? { runtime } : {}),
+                  linuxToolchainSetup: DEFAULT_NODE_TOOLCHAIN_SETUP_SH,
+                }),
             signal: request.signal,
             assertCurrent,
           }),
@@ -231,18 +288,68 @@ export function createWorkerRuntimeRefresher(options: WorkerRuntimeRefreshOption
         DEFAULT_BOOTSTRAP_TIMEOUT_MS + NODE_ENROLLMENT_TIMEOUT_MS,
       );
       assertCurrent();
+      if (authority.retainedCleanupOnly) {
+        return { retainedCleanupOnly: true };
+      }
     } finally {
-      authority.release();
+      try {
+        if (runtime) {
+          options.closeNodeRuntime?.(runtime);
+        }
+      } finally {
+        authority.release();
+      }
     }
   };
   return {
     refresh,
+    refreshInitialRuntime: async (request: {
+      environmentId: string;
+      ownerEpoch: number;
+      initialDispatch: WorkerInitialDispatchBinding;
+      signal: AbortSignal;
+      assertCurrent: () => void;
+    }) =>
+      options.withLock(request.environmentId, async () => {
+        await store.ready();
+        request.assertCurrent();
+        const record = store.get(request.environmentId);
+        if (
+          !record ||
+          record.state !== "attached" ||
+          record.lastActivatedAtMs !== null ||
+          record.sharedHost !== false ||
+          record.ownerEpoch !== request.ownerEpoch ||
+          record.leaseId !== request.initialDispatch.leaseId ||
+          record.nodeDeviceId !== request.initialDispatch.nodeDeviceId
+        ) {
+          throw serviceError(
+            "invalid_state",
+            "Initial worker runtime refresh lost its retained owner",
+          );
+        }
+        const installation = await options.prepareInstallation("bundle", request.signal);
+        request.assertCurrent();
+        await refresh(
+          record,
+          options.providerFor(record.providerId),
+          installation,
+          request.signal,
+          {
+            dispatch: request.initialDispatch,
+            assertCurrent: request.assertCurrent,
+          },
+        );
+      }),
     resumeCurrentNode: async (request: {
       environmentId: string;
       ownerEpoch: number;
       leaseId: string;
       signal: AbortSignal;
       assertCurrent: () => void;
+      initialDispatch?: WorkerInitialDispatchBinding;
+      nodeBuildId?: string;
+      placementState?: "active" | "draining";
     }) =>
       options.withLock(request.environmentId, async () => {
         await store.ready();
@@ -255,7 +362,7 @@ export function createWorkerRuntimeRefresher(options: WorkerRuntimeRefreshOption
         ) {
           throw serviceError("invalid_state", "Worker node recovery lease changed");
         }
-        await resumeNode(record, options.providerFor(record.providerId), request);
+        return await resumeNode(record, options.providerFor(record.providerId), request);
       }),
     read: (environmentId: string) => inFlight.get(environmentId),
   };

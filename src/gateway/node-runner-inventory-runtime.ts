@@ -131,7 +131,7 @@ export async function waitForNodeRunnerAvailability(
     getIssue?: (nodeId: string) => NodeRunnerInventoryIssue | undefined;
   },
   nodeId: string,
-  options: { signal: AbortSignal; assertCurrent: () => void },
+  options: { signal: AbortSignal; assertCurrent: () => void; isReady?: () => boolean },
 ): Promise<void> {
   let changed = createDeferredCore();
   const unsubscribe = publisher.subscribe(nodeId, () => changed.resolve());
@@ -147,10 +147,11 @@ export async function waitForNodeRunnerAvailability(
         options.signal,
       );
       assertCurrent();
-      if (node && transport.isCurrent(node)) {
+      const current = node && transport.isCurrent(node);
+      if (current && (!options.isReady || options.isReady())) {
         return;
       }
-      const issue = transport.getIssue?.(nodeId);
+      const issue = !current && transport.getIssue?.(nodeId);
       if (issue) {
         throw createNodeRunnerInventoryIssueError(nodeId, issue);
       }

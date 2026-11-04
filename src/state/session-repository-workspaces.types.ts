@@ -53,6 +53,11 @@ export type RepositoryWorkspaceBase = RepositoryWorkspaceMutation & {
   baseCommit: string;
   baseManifestHash?: string;
 };
+export type RepositoryWorkspaceRetainedOwner = RepositoryWorkspaceMutation & {
+  expectedDiskAuthority: RetainedWorkspaceAuthority;
+  diskAuthority: RetainedWorkspaceAuthority;
+  placementGeneration: number;
+};
 export type RepositoryWorkspaceCheckpoint = RepositoryWorkspaceMutation & {
   checkpointRef: string;
   manifestHash: string;

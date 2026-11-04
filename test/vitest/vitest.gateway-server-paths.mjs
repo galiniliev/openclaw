@@ -11,8 +11,14 @@ export const gatewayPluginTestFiles = [
 
 // Native database consumers retain lifecycle cleanup within each forked process.
 export const gatewayDatabaseWorkerTestFiles = [
+  "src/gateway/server-methods/sessions.dispatch.retained-original.test.ts",
+  "src/gateway/worker-environments/retained-workspace-owner-repair.kernel.test.ts",
+  "src/gateway/worker-environments/retained-workspace-resume.test.ts",
+  "src/gateway/worker-environments/retained-workspace-cleanup.test.ts",
+  "src/gateway/worker-environments/retained-workspace-runtime.test.ts",
   "src/gateway/worker-environments/placement-disk-pause.test.ts",
   "src/gateway/worker-environments/placement-dispatch-retained.test.ts",
+  "src/gateway/worker-environments/placement-dispatch-initial-retained.test.ts",
   "src/gateway/worker-environments/placement-dispatch-retained-recovery.test.ts",
   "src/gateway/worker-environments/placement-dispatch-repository-ref-recovery.test.ts",
   "src/gateway/worker-environments/placement-dispatch-startup-containment.test.ts",
@@ -560,8 +566,19 @@ export const gatewayDatabaseWorkerTestFiles = [
   "test/plugins/codex-model-catalog.gateway.test.ts",
 ];
 
-export const gatewayClientTestInclude = [];
-export const gatewayClientTestExclude = [...gatewayDatabaseWorkerTestFiles];
+export const gatewayClientTestInclude = [
+  "packages/gateway-client/src/**/*.test.ts",
+  "packages/gateway-protocol/src/**/*.test.ts",
+  "src/gateway/**/*client*.test.ts",
+  "src/gateway/**/*reconnect*.test.ts",
+  "src/gateway/**/*android-node*.test.ts",
+  "src/gateway/**/*gateway-cli-backend*.test.ts",
+];
+export const gatewayClientTestExclude = [
+  ...gatewayDatabaseWorkerTestFiles,
+  "src/gateway/**/*server*.test.ts",
+  "src/gateway/server-methods/**/*.test.ts",
+];
 
 // Native Vitest subprocesses cold-import the real Gateway; keep their collection
 // outside concurrent files instead of expanding their process-lifecycle deadlines.
@@ -603,7 +620,10 @@ export const gatewayMethodsIsolatedTestFiles = [
   "src/gateway/server-methods/usage.sessions-usage.test.ts",
 ];
 
-export const gatewayMethodsTestInclude = [...gatewayPluginTestFiles];
+export const gatewayMethodsTestInclude = [
+  "src/gateway/server-methods/**/*.test.ts",
+  ...gatewayPluginTestFiles,
+];
 export const gatewayMethodsTestExclude = [
   ...gatewayDatabaseWorkerTestFiles,
   ...gatewayMethodsIsolatedTestFiles,
@@ -661,6 +681,13 @@ export const gatewayCoreTestExclude = [
   ...gatewayServerIsolatedTestFiles,
   ...databaseWorkerCoreTestFiles,
   ...gatewayDatabaseWorkerTestFiles,
+  "src/gateway/server-methods/**/*.test.ts",
+  "packages/gateway-protocol/src/**/*.test.ts",
+  "src/gateway/**/*client*.test.ts",
+  "src/gateway/**/*reconnect*.test.ts",
+  "src/gateway/**/*android-node*.test.ts",
+  "src/gateway/**/*gateway-cli-backend*.test.ts",
+  "src/gateway/**/*server*.test.ts",
   "src/gateway/gateway.test.ts",
   "src/gateway/embeddings-http.test.ts",
   "src/gateway/models-http.test.ts",

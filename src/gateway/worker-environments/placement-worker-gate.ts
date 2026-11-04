@@ -21,16 +21,28 @@ type WorkerPlacementBinding = Readonly<{
   environmentId: string;
   ownerEpoch: number;
 }>;
+export type WorkerInitialDispatchBinding = Pick<
+  WorkerSessionPlacementRecord,
+  "generation" | "agentId" | "sessionKey"
+> & { leaseId: string; nodeDeviceId: string };
 
 export type WorkerSessionPlacementGate = {
   fenceWorkerTurnForRecovery: (claim: WorkerSessionTurnClaim) => void;
   /** Refresh runtime bytes without changing the retained workspace's owner epoch. */
-  prepareWorkerRuntimeRefresh(binding: WorkerPlacementBinding): Promise<{
+  prepareWorkerRuntimeRefresh(
+    binding: WorkerPlacementBinding & {
+      idleOnly?: true;
+      allowRetainedCleanup?: true;
+      initialDispatch?: WorkerInitialDispatchBinding;
+    },
+  ): Promise<{
     generation: number;
     reclaimResult?: WorkerWorkspacePendingResult;
+    retainedCleanupOnly?: true;
     assertCurrent: () => void;
     release: () => void;
   }>;
+  validateWorkspaceRecovery: (claim: WorkerSessionTurnClaim) => boolean;
   /** Credential verification only; this does not grant operational worker authority. */
   readWorkerTurnClaim(binding: WorkerPlacementBinding): WorkerSessionTurnClaim | undefined;
   getExecutionIdentityCapability?(
@@ -91,12 +103,53 @@ export function createWorkerSessionPlacementGate(
 
   return {
     fenceWorkerTurnForRecovery,
+    validateWorkspaceRecovery: (claim) =>
+      recoveryOnlyClaims.has(serializeWorkerSessionTurnClaim(claim)) &&
+      store.validateWorkspaceResultClaim(claim),
     async prepareWorkerRuntimeRefresh(binding) {
       let prepared = await store.prepareRuntimeRefresh(binding.sessionId);
       const assertCurrent = () => prepared.assertCurrent();
       const release = () => prepared.release();
+      if (binding.initialDispatch) {
+        // This generation owns readiness for an already attached private disk,
+        // before activation has admitted a worker epoch to the placement.
+        const placement = prepared.placement;
+        const expected = binding.initialDispatch;
+        try {
+          if (
+            placement?.state !== "provisioning" ||
+            placement.environmentId !== binding.environmentId ||
+            placement.generation !== expected.generation ||
+            placement.agentId !== expected.agentId ||
+            placement.sessionKey !== expected.sessionKey ||
+            placement.activeOwnerEpoch !== null ||
+            placement.turnClaim ||
+            prepared.move ||
+            prepared.pendingResult ||
+            prepared.recoveryPending
+          ) {
+            throw new Error("Initial worker readiness lost its exact idle dispatch owner");
+          }
+          assertCurrent();
+          return { generation: placement.generation, assertCurrent, release };
+        } catch (error) {
+          release();
+          throw error;
+        }
+      }
       const readRefreshOwner = () => {
         const { placement, pendingResult } = prepared;
+        const recoveryClaim = placement && projectWorkerSessionTurnClaim(placement);
+        const retainedCleanupOnly = Boolean(
+          binding.allowRetainedCleanup &&
+          recoveryClaim &&
+          pendingResult &&
+          recoveryOnlyClaims.has(serializeWorkerSessionTurnClaim(recoveryClaim)) &&
+          isCurrentWorkerWorkspacePendingResultOwner(placement, pendingResult),
+        );
+        if (binding.idleOnly && (placement?.turnClaim || pendingResult) && !retainedCleanupOnly) {
+          throw new Error("Worker node upgrade is waiting for current work and workspace recovery");
+        }
         const reclaimResult =
           placement?.state === "draining" &&
           pendingResult &&
@@ -125,7 +178,7 @@ export function createWorkerSessionPlacementGate(
           throw new Error("Worker runtime refresh is waiting for the current turn to finish");
         }
         assertCurrent();
-        return { placement, pendingResult, reclaimResult, claim };
+        return { placement, pendingResult, reclaimResult, claim, retainedCleanupOnly };
       };
       try {
         let owner = readRefreshOwner();
@@ -152,6 +205,7 @@ export function createWorkerSessionPlacementGate(
         return {
           generation: owner.placement.generation,
           ...(owner.reclaimResult ? { reclaimResult: owner.reclaimResult } : {}),
+          ...(owner.retainedCleanupOnly ? { retainedCleanupOnly: true as const } : {}),
           assertCurrent,
           release,
         };

@@ -10,6 +10,7 @@ import { resolveConfiguredGitHubToolIdentity } from "../../agents/github-tool-id
 import { resolveGitRepositoryPaths } from "../../agents/worktrees/git.js";
 import { normalizeCapabilityProviderId } from "../../plugins/provider-registry-shared.js";
 import type { WorkerExecutionMode, WorkerProfile, WorkerProvider } from "../../plugins/types.js";
+import type { RetainedWorkspaceAuthority } from "../../state/retained-workspace-authority.js";
 import { workerEnvironmentServiceError as serviceError } from "./environment-errors.js";
 import { assertEnvironmentRecipeSecretsMapped } from "./environment-recipe.js";
 import {
@@ -29,13 +30,14 @@ import {
   workerProjectReplayIdentity,
 } from "./project-preparation.js";
 import type {
+  WorkerProviderIntentOptions,
   WorkerProviderLifecycleOptions,
-  WorkerProviderResumeProvision,
 } from "./provider-lifecycle.types.js";
 import type { WorkerProviderRepositorySource } from "./provider-project-preparation.js";
 import { prepareRepositoryWorkerProjectSource } from "./repository-project-admission.js";
 import type { RepositoryWorkerProjectSnapshot } from "./repository-project-source.schema.js";
 import { createWorkerSessionDiskRetention } from "./retained-lease-lifecycle.js";
+import { resumeOriginalRetainedWorkspaceOwner } from "./retained-workspace.js";
 import { deriveEnvironmentIntent, workerAllocationProfileSnapshot } from "./service-contract.js";
 import {
   configuredWorkerProfileSnapshot,
@@ -46,16 +48,9 @@ import type { WorkerEnvironmentRecord } from "./store.js";
 import { boundedWorkerError } from "./worker-error.js";
 import { prepareWorkerProjectSnapshot, workerLocalProjectKey } from "./workspace-git-base.js";
 
-type WorkerProviderIntentOptions = Pick<
-  WorkerProviderLifecycleOptions,
-  "store" | "getConfig" | "projectNamespace" | "prepareNodeArtifacts" | "isStopping" | "withLock"
-> & {
-  providerFor: (providerId: string) => WorkerProvider;
-  resumeProvision: WorkerProviderResumeProvision;
-};
-
 export type WorkerProviderIntentPreparationOptions = {
   retentionOwner?: { sessionId: string; sessionKey: string; agentId: string };
+  retainedWorkspaceAuthority?: RetainedWorkspaceAuthority;
   inherited?: { providerId: string; profileSnapshot: WorkerProfile };
   machineClass?: string;
   os?: string;
@@ -318,8 +313,7 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
         }
         const setupRecipe = recipe?.identity;
         signal?.throwIfAborted();
-        // An executable recipe does not authorize itself. Non-admin callers retain
-        // ordinary checkout preparation without executing it or filling a reserve.
+        // Recipe execution needs authorization; ordinary checkout alone cannot fill a reserve.
         if (
           target &&
           provider.requiresNodeEnrollment &&
@@ -535,15 +529,7 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
     admittedIntent?: WorkerProviderPreparedIntent,
   ) => {
     const { machineClass, os, executionMode, projectPath, signal } = createOptions;
-    const inherited = createOptions.inherited
-      ? {
-          providerId: createOptions.inherited.providerId,
-          profileSnapshot: workerAllocationProfileSnapshot(
-            createOptions.inherited.profileSnapshot,
-            createOptions,
-          ),
-        }
-      : undefined;
+    const inherited = createOptions.inherited;
     const normalizedProfileId = requireProfileId(profileId, signal);
     const beforeProvision = (intent?: WorkerProviderPreparedIntent) => () => {
       createOptions.beforeProvision?.();
@@ -551,14 +537,19 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
         assertPreparedIntentCurrent(profileId, intent);
       }
     };
-    const { environmentId, provisionOperationId } = deriveEnvironmentIntent(idempotencyKey);
+    const derived = deriveEnvironmentIntent(idempotencyKey);
+    const originalDisk = createOptions.retainedWorkspaceAuthority;
+    const environmentId = originalDisk?.environmentId ?? derived.environmentId;
     return withLock(environmentId, async () => {
       await store.ready();
       signal?.throwIfAborted();
       if (options.isStopping()) {
         throw serviceError("invalid_state", "Worker environment service is stopping");
       }
-      const existing = store.get(environmentId);
+      let existing = store.get(environmentId);
+      if (originalDisk && !existing) {
+        throw new Error("Original retained worker owner is unavailable; replacement is refused");
+      }
       if (existing) {
         const existingProject = readWorkerProjectSnapshot(existing.profileSnapshot.project);
         if (existingProject && projectPath) {
@@ -589,7 +580,7 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
             );
           }
         }
-        // Replay settles this stored allocation, rather than selecting a new image profile.
+        // Replay retains the captured allocation profile rather than retargeting it to current config.
         const imageReplay = workerPreparationSourceKey(existing.profileSnapshot) === "image";
         if (imageReplay && (projectPath || createOptions.emptyWorkspace)) {
           throw serviceError(
@@ -608,14 +599,15 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
           signal?.throwIfAborted();
           assertPreparedIntentCurrent(profileId, requested);
           if (
-            !isDeepStrictEqual(
+            !originalDisk &&
+            (!isDeepStrictEqual(
               workerProjectReplayIdentity(existing.profileSnapshot.project),
               workerProjectReplayIdentity(requested.profileSnapshot.project),
             ) ||
-            !isDeepStrictEqual(
-              existing.profileSnapshot.runtimePreparation,
-              requested.profileSnapshot.runtimePreparation,
-            )
+              !isDeepStrictEqual(
+                existing.profileSnapshot.runtimePreparation,
+                requested.profileSnapshot.runtimePreparation,
+              ))
           ) {
             throw serviceError(
               "invalid_profile",
@@ -635,11 +627,24 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
                   : {}),
               }))) ||
           (inherited === undefined &&
-            (existing.profileSnapshot.machineClass !== machineClass ||
-              existing.profileSnapshot.os !== os ||
+            (existing.profileSnapshot.machineClass !==
+              (machineClass ??
+                (originalDisk ? existing.profileSnapshot.machineClass : undefined)) ||
+              existing.profileSnapshot.os !==
+                (os ?? (originalDisk ? existing.profileSnapshot.os : undefined)) ||
               existing.profileSnapshot.executionMode !== executionMode))
         ) {
           throw serviceError("invalid_profile", "Idempotency key belongs to another profile");
+        }
+        if (originalDisk) {
+          existing = await resumeOriginalRetainedWorkspaceOwner(
+            existing,
+            originalDisk,
+            createOptions.retentionOwner,
+            store,
+            signal,
+            requested ? () => assertPreparedIntentCurrent(profileId, requested) : undefined,
+          );
         }
         if (existing.destroyRequestedAtMs !== null) {
           return existing;
@@ -651,7 +656,8 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
             signal,
             undefined,
             beforeProvision(requested),
-            requested ? preparedIntents.get(requested)?.repository : undefined,
+            !originalDisk && requested ? preparedIntents.get(requested)?.repository : undefined,
+            originalDisk,
           );
         }
         return existing;
@@ -681,11 +687,11 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
                     options.getConfig().cloudWorkers?.profiles?.[normalizedProfileId]?.retention,
                   owner: createOptions.retentionOwner,
                   environmentId,
-                  provisionOperationId,
+                  provisionOperationId: derived.provisionOperationId,
                 }),
               }
             : {}),
-          provisionOperationId,
+          provisionOperationId: derived.provisionOperationId,
         },
         () => {
           signal?.throwIfAborted();

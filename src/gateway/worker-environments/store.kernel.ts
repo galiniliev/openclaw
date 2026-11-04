@@ -3,6 +3,8 @@ import { isDeepStrictEqual } from "node:util";
 import { executeSqliteQueryTakeFirstSync } from "../../infra/kysely-sync.js";
 import type { OpenClawStateDatabase } from "../../state/openclaw-state-db-contract.js";
 import { ensureWorkerEnvironmentNodeEnrollmentSchema } from "../../state/openclaw-state-db-schema-additive.js";
+import { findSessionRepositoryWorkspaceInDatabase } from "../../state/session-repository-workspaces.kernel.js";
+import { hasForcedWorkerEnvironmentAbandonment } from "./environment-errors.js";
 import type {
   WorkerEnvironmentIntentInput,
   WorkerEnvironmentRecord,
@@ -11,6 +13,7 @@ import {
   createPreparedEnvironmentStoreOps,
   workerEnvironmentPreparationColumns,
 } from "./prepared-environment-store.js";
+import { resumeParkedRetainedWorkspaceOwnerInDatabase } from "./retained-workspace-owner-repair.kernel.js";
 import { createWorkerEnvironmentSessionAttachmentStore } from "./session-attachment-store.js";
 import type { WorkerEnvironmentAttachmentRecord } from "./session-attachment.js";
 import { isTerminalWorkerEnvironmentState } from "./state.js";
@@ -93,6 +96,9 @@ export function createWorkerEnvironmentStoreKernel(
     return getRequiredWorkerEnvironment(db, environmentId);
   };
   return {
+    resumeParkedRetainedWorkspaceOwner(input) {
+      return resumeParkedRetainedWorkspaceOwnerInDatabase(db, input, now());
+    },
     ...createPreparedEnvironmentStoreOps({ db, now, createIntent, get: findWorkerEnvironment }),
     ...createWorkerEnvironmentSessionAttachmentStore({
       db,
@@ -208,6 +214,23 @@ export function createWorkerEnvironmentStoreKernel(
       const current = getRequiredWorkerEnvironment(db, environmentId);
       if (current.state !== input.state) {
         throw new Error(`Worker environment ${environmentId} changed before destroy request`);
+      }
+      const retention = current.retention;
+      const disk = retention
+        ? findSessionRepositoryWorkspaceInDatabase(db, retention.owner)?.diskAuthority
+        : undefined;
+      if (
+        disk?.environmentId === environmentId &&
+        (!retention ||
+          (input.retainedOwnerBinding !== retention.ownerBinding &&
+            !hasForcedWorkerEnvironmentAbandonment(current)) ||
+          disk.ownerBinding !== retention.ownerBinding ||
+          disk.sessionId !== retention.owner.sessionId ||
+          (current.leaseId !== null && disk.identity.leaseId !== current.leaseId))
+      ) {
+        throw new Error(
+          "Original retained workspace disk is preserved; reconcile its existing owner before resuming. Only explicit session archive/delete may discard it.",
+        );
       }
       if (current.destroyRequestedAtMs !== null) {
         return current;

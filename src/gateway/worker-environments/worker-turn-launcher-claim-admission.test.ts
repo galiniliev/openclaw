@@ -9,6 +9,7 @@ import { closeStateDatabaseForTest } from "../../test-utils/database-cleanup.js"
 import { result as processResult } from "./bootstrap.test-support.js";
 import { placementTurnOwner } from "./placement-record.js";
 import { completeWorkerWorkspaceTeardown } from "./placement-teardown.js";
+import { waitersFor } from "./placement-turn-claim-events.js";
 import { createWorkerSessionPlacementGate } from "./placement-worker-gate.js";
 import type { WorkerTurnTunnelHandle } from "./tunnel-contract.js";
 import { createWorkerGatewayTools } from "./worker-session-tool-executor.js";
@@ -188,6 +189,7 @@ describe("worker turn launcher claim admission", () => {
       await vi.waitFor(() => expect(waitForRelease).toHaveBeenCalledOnce());
       expect(waitForRelease).toHaveBeenCalledWith(SESSION_ID, {
         signal: expect.any(AbortSignal),
+        timeoutMs: 120_000,
       });
       expect(placements.get(SESSION_ID)?.turnClaim?.runId).toBe(priorClaim.runId);
 
@@ -206,6 +208,65 @@ describe("worker turn launcher claim admission", () => {
       }
     },
   );
+
+  it("ends foreground admission after two minutes while preserving the previous result fence", async () => {
+    const { claim } = await claimActiveTurn("stuck-result");
+    await placements.markWorkspaceResultPending(claim);
+    const before = await placements.readProjection([SESSION_ID], { current: true });
+    const entered = createDeferred();
+    const wait = placements.waitForTurnClaimRelease.bind(placements);
+    let listeners: ReturnType<typeof waitersFor> | undefined;
+    let abortListenerRemoved = () => false;
+    vi.spyOn(placements, "waitForTurnClaimRelease").mockImplementation((id, options) => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const removeAbort = vi.spyOn(options!.signal!, "removeEventListener");
+      abortListenerRemoved = () => removeAbort.mock.calls.some(([event]) => event === "abort");
+      const waiting = wait(id, options);
+      listeners = waitersFor(database.path, id);
+      entered.resolve();
+      return waiting;
+    });
+    const runLocal = vi.fn(localResult);
+    const controller = new AbortController();
+    let outcome: unknown;
+    const execution = createLauncher()
+      .executeTurn(
+        { ...sessionTarget, runId: "next-run" },
+        { ...turn("next-run"), abortSignal: controller.signal },
+        runLocal,
+      )
+      .catch((error: unknown) => {
+        outcome = error;
+      });
+    try {
+      await entered.promise;
+      expect(listeners?.size).toBe(1);
+      await vi.advanceTimersByTimeAsync(119_999);
+      expect(listeners?.size).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(outcome).toBeInstanceOf(Error);
+      expect(outcome).toMatchObject({
+        message: expect.stringContaining("Previous worker result and workspace are retained"),
+      });
+      expect(listeners?.size).toBe(0);
+      expect(abortListenerRemoved()).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      controller.abort();
+      await execution;
+      vi.useRealTimers();
+    }
+    expect(await placements.readProjection([SESSION_ID], { current: true })).toEqual(before);
+    expect(placements.validateTurnClaim(claim)).toBe(true);
+    expect(runLocal).not.toHaveBeenCalled();
+    await expect(executeTurn(createLauncher(), claim.runId)).rejects.toThrow(
+      "already has an active turn claim",
+    );
+    await placements.updateWorkspaceBaseManifest({ claim, manifestRef: MANIFEST_REF });
+    await placements.acceptWorkspaceResult(claim);
+    await placements.completeWorkspaceResultAndReleaseTurn(claim);
+    expect(placements.get(SESSION_ID)?.turnClaim).toBeNull();
+  });
 
   it("returns a recovery outcome for restart-cleared claim retry", async () => {
     const runId = "restart-result-run";

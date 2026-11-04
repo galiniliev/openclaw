@@ -38,6 +38,7 @@ import type {
   RepositoryWorkspaceCreate,
   RepositoryWorkspaceMutationResult,
   RepositoryWorkspaceOwner,
+  RepositoryWorkspaceRetainedOwner,
   SessionRepositoryWorkspaceRecord,
 } from "./session-repository-workspaces.types.js";
 import type { RepositoryWorkspaceWorkerOperations } from "./session-repository-workspaces.worker-contract.js";
@@ -314,6 +315,14 @@ export function createSessionRepositoryWorkspaceStore(
           },
           input.assertCurrent,
         ),
+      );
+    },
+    async rebindRetainedOwner({
+      assertCurrent,
+      ...input
+    }: Guarded<RepositoryWorkspaceRetainedOwner>) {
+      return requireWorkspace(
+        await mutate({ type: "repositoryWorkspaces.rebindRetainedOwner", input }, assertCurrent),
       );
     },
     async resetToBranch(input: Guarded<RepositoryWorkspaceBranchReset>) {

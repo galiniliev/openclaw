@@ -124,6 +124,7 @@ export async function prepareCodexAttemptConnection({ params, options }: CodexRu
     },
   };
   // Each worker duplex owns a disposable native client, never a shared local process.
+  const preparedEnvironment = params.hostCapabilities.preparedEnvironment?.();
   const workerHostedCloud =
     pluginConfig.appServer?.workerHostedCloud === true &&
     isCodexRemoteExecPlacementSandbox(sandbox);
@@ -133,6 +134,7 @@ export async function prepareCodexAttemptConnection({ params, options }: CodexRu
       ? createCodexWorkerClientFactory({
           runtime: options.runtime,
           agentId: sessionAgentId,
+          expectedGitHubProfileId: preparedEnvironment?.appInstallationProfileId,
           confirmedLossPredecessor: () => lostWorkerBinding,
           permissionMode: params.permissionMode,
           sandbox,
@@ -154,7 +156,6 @@ export async function prepareCodexAttemptConnection({ params, options }: CodexRu
     agentId: policyAgentId,
   });
   const agentDir = params.agentDir ?? resolveAgentDir(params.config ?? {}, sessionAgentId);
-  const preparedEnvironment = params.hostCapabilities.preparedEnvironment?.();
   const remoteExec = isCodexRemoteExecPlacementSandbox(sandbox);
   const assertLocalTargetSupported = (unsupported: boolean) => {
     if (preparedEnvironment?.localProcessEnv && unsupported) {

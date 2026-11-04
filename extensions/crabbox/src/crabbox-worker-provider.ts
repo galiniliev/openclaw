@@ -255,6 +255,9 @@ export function createCrabboxWorkerProvider(
         : 0);
     const context = {
       ...warmImages.startContext(binary, parsed.provider, options, Boolean(project)),
+      // An admitted private disk predates this setup attempt; only explicit
+      // retained retirement owns its deletion, even if enrollment now fails.
+      preserveRetainedLease: Boolean(options?.retention?.receipt),
       providerEnv: resolveCrabboxProfileCommandEnv(parsed),
       azureSnapshot,
       timingIdentity: { operationId, environmentId: options?.environmentId },

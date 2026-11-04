@@ -1,0 +1,2 @@
+# Canonical initial runtime install/receipt before tunnel, selector replay and post-activation refusal.
+114

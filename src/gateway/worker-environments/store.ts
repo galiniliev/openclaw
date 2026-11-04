@@ -472,6 +472,16 @@ export async function createWorkerEnvironmentStore(
     requestDestroy({ assertCurrent, ...input }: Input<"requestDestroy">) {
       return mutate("workerEnvironments.requestDestroy", { input }, assertCurrent);
     },
+    resumeParkedRetainedWorkspaceOwner({
+      assertCurrent,
+      ...input
+    }: Input<"resumeParkedRetainedWorkspaceOwner">) {
+      return mutate(
+        "workerEnvironments.resumeParkedRetainedWorkspaceOwner",
+        { input },
+        assertCurrent,
+      );
+    },
     refreshBootstrapReceipt({ assertCurrent, ...input }: Input<"refreshBootstrapReceipt">) {
       return mutate("workerEnvironments.refreshBootstrapReceipt", { input }, assertCurrent);
     },

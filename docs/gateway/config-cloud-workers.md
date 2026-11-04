@@ -104,6 +104,13 @@ not authorize replacement. Disk persistence does not preserve RAM, processes,
 sockets, or an interrupted live model stream. `/tmp` persistence depends on its
 actual provider mount and must not be assumed from disk retention alone.
 
+A failed enrollment or stale cleanup request does not discard an original retained
+workspace disk. After its saved owner is reconciled, retrying dispatch validates
+the same resource and attaches it under a fresh execution epoch. Fresh node
+enrollment replaces only the proven old node process and uses its new bootstrap
+ticket; it preserves the disk, repository, and session identity. Missing or
+mismatched ownership still holds recovery instead of allocating a replacement.
+
 Codex remote-exec resumes its existing private native thread and refuses a new
 thread when retained state is missing or mismatched. OpenClaw worker-turn keeps
 its transcript-based turn semantics. Neither mode reruns checkout or setup on

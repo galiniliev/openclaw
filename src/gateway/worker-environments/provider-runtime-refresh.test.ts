@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { WorkerAdmissionHandshake } from "../../../packages/gateway-protocol/src/schema/worker-admission.js";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { NODE_WORKER_ENVIRONMENT_STOP_COMMAND } from "../../infra/node-commands.js";
+import type { WorkerSessionDiskRetention } from "../../plugins/worker-retention.types.js";
 import { sessionChanges } from "../../sessions/session-row-changes.js";
 import { installWorkerPlacementReconcileGuard } from "../server-worker-placement-reconcile-guard.js";
 import {
@@ -15,6 +16,7 @@ import { createHarness, createRecoveryService } from "./placement-dispatch-test-
 import { WORKER_PROTOCOL_FEATURES } from "./placement-lifecycle.test-support.js";
 import { projectWorkerSessionTurnClaim } from "./placement-record.js";
 import { createWorkerSessionPlacementStore } from "./placement-store.js";
+import { writePlacementEnvironmentFixture } from "./placement-test-fixtures.js";
 import { createWorkerSessionPlacementGate } from "./placement-worker-gate.js";
 import * as support from "./service.test-support.js";
 import { testState } from "./service.test-support.js";
@@ -43,6 +45,7 @@ describe("worker environment runtime upgrades", () => {
     state: "idle" | "attached" = "attached",
     bootstrapReceipt: WorkerAdmissionHandshake = support.BOOTSTRAP_RECEIPT,
     targetReceipt: WorkerAdmissionHandshake = currentReceipt,
+    retained = false,
   ) {
     const environmentId = "worker-runtime-upgrade";
     type Transition = Parameters<typeof testState.store.transition>[0];
@@ -112,9 +115,54 @@ describe("worker environment runtime upgrades", () => {
       expect(sshEndpoint).toEqual(environment.sshEndpoint);
       return install();
     });
+    const retention: WorkerSessionDiskRetention | undefined = retained
+      ? {
+          owner: REQUEST,
+          ownerBinding: "retained-owner",
+          policy: { mode: "session-disk", computeWindowSeconds: 14400 },
+          desiredState: "running",
+          operation: null,
+          receipt: {
+            schema: "crabbox.session-disk.v1",
+            mode: "session-disk",
+            identity: {
+              leaseId: environment.leaseId!,
+              attemptLeaseId: "attempt",
+              resourceId: "resource",
+              slug: "worker",
+            },
+            ownerBinding: "retained-owner",
+            claimRevision: "retained-claim",
+            computeWindowSeconds: 14400,
+            desiredState: "running",
+            observedState: "Running",
+            policyVerified: true,
+            stopPending: false,
+            computeWindow: {
+              id: "window",
+              authorizedAt: new Date(testState.nowMs - 1000).toISOString(),
+              expiresAt: new Date(testState.nowMs + 14400000).toISOString(),
+              state: "active",
+            },
+          },
+        }
+      : undefined;
+    if (retention) {
+      writePlacementEnvironmentFixture(testState.stateDb, { ...environment, retention });
+    }
     const provider = {
       provision: vi.fn(support.createProvider().provision),
       destroy: vi.fn(async () => {}),
+      ...(retention
+        ? {
+            retainedLease: {
+              inspect: async () => structuredClone(retention.receipt!),
+              pause: unsupported("Unexpected retained pause"),
+              resume: unsupported("Unexpected retained resume"),
+              destroy: unsupported("Unexpected retained destroy"),
+            },
+          }
+        : {}),
     };
     const ensureNodeWorkerBundle = vi.fn<InstallNodeBundle>(async (params) => {
       expect(params).toMatchObject({
@@ -209,6 +257,42 @@ describe("worker environment runtime upgrades", () => {
     });
     expect(h.readCredential()?.credentialHash).not.toBe(h.oldCredential.credentialHash);
     expect(h.ensureNodeWorkerBundle).toHaveBeenCalledOnce();
+  });
+
+  it("keeps retained pending results ahead of background runtime installation", async () => {
+    const h = await setupUpgrade(
+      "node",
+      "attached",
+      support.BOOTSTRAP_RECEIPT,
+      currentReceipt,
+      true,
+    );
+    const active = h.placement;
+    if (active?.state !== "active") {
+      throw new Error("Expected active fixture");
+    }
+    const claim = await h.placements.claimTurn({
+      ...REQUEST,
+      claimId: "retained-result",
+      runId: "retained-run",
+      owner: { kind: "worker", ...h.owner },
+    });
+    await h.placements.markWorkspaceResultPending(claim);
+    await h.placements.handoffWorkspaceResultRecovery(claim);
+    h.service.fenceWorkerTurnForRecovery(claim);
+    const pending = await h.placements.listPendingWorkspaceResultsAsync();
+    await h.service.reconcileOnce();
+    expect(h.install).not.toHaveBeenCalled();
+    expect(await h.placements.listPendingWorkspaceResultsAsync()).toEqual(pending);
+    await h.placements.updateWorkspaceBaseManifest({
+      claim,
+      manifestRef: active.workspaceBaseManifestRef,
+    });
+    await h.placements.acceptWorkspaceResult(claim);
+    await h.placements.completeWorkspaceResultAndReleaseTurn(claim);
+    await h.service.reconcileOnce();
+    expect(h.install).toHaveBeenCalledOnce();
+    expect(await h.placements.listPendingWorkspaceResultsAsync()).toEqual([]);
   });
 
   it("exposes an in-flight node refresh and isolates progress listeners until it settles", async () => {

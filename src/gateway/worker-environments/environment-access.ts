@@ -15,11 +15,13 @@ import { workerEnvironmentServiceError as serviceError } from "./environment-err
 import { workerInferenceMetadata } from "./inference-placement.js";
 import type { WorkerNodeDesktopCarrier } from "./node-desktop-carrier.js";
 import type { NodeWorkerTunnelManager } from "./node-worker-tunnel.js";
+import type { WorkerSessionPlacementGate } from "./placement-worker-gate.js";
 import { readWorkerProjectPreparation } from "./preparation-identity.schema.js";
 import { readWorkerProjectSnapshot } from "./project-preparation.js";
 import type { WorkerProviderLifecycleInputOptions } from "./provider-lifecycle.types.js";
 import { WorkerRuntimeRefreshPendingError } from "./provider-runtime-refresh.js";
 import { prepareRepositoryWorkerProjectSource } from "./repository-project-admission.js";
+import { createRetainedWorkspaceRecoveryAssertion } from "./retained-workspace.js";
 import type { WorkerDesktopLaunchResult, WorkerDesktopObserveResult } from "./service-contract.js";
 import { requireWorkerProfile } from "./service-validation.js";
 import type { WorkerEnvironmentRecord, WorkerEnvironmentStore } from "./store.js";
@@ -103,6 +105,7 @@ export function createWorkerEnvironmentTransportLifecycle(options: {
 type WorkerEnvironmentAccessOptions = {
   readStartStatus: (record: WorkerEnvironmentRecord) => WorkerEnvironmentStartStatus | undefined;
   store: WorkerEnvironmentStore;
+  placementStore?: Pick<WorkerSessionPlacementGate, "validateWorkspaceRecovery">;
   getCleanupError: (record: WorkerEnvironmentRecord) => string | undefined;
   getConfig: () => OpenClawConfig;
   projectNamespace?: string;
@@ -343,11 +346,10 @@ export function createWorkerEnvironmentAccess(options: WorkerEnvironmentAccessOp
     if (!tunnels && !nodeTunnels) {
       throw serviceError("invalid_state", "Worker tunnel runtime is unavailable");
     }
-    // Prepare process-stable metadata outside the lock, then validate the durable
-    // owner once. Credential revocation may happen while this await is pending.
-    let currentBundle: ExpectedWorkerBuild;
+    // Load build metadata before locking; owner and credential checks follow the await.
+    let currentBundle: ExpectedWorkerBuild | undefined;
     try {
-      currentBundle = await options.prepareCurrentBundle();
+      currentBundle = request.recoveryClaim ? undefined : await options.prepareCurrentBundle();
     } catch {
       throw serviceError("invalid_state", "Current worker build identity is unavailable");
     }
@@ -367,22 +369,33 @@ export function createWorkerEnvironmentAccess(options: WorkerEnvironmentAccessOp
           "Worker lease isolation is not reconciled; retry after provider inspection",
         );
       }
-      const currentBuild = sameWorkerBuild(record.bootstrapReceipt, currentBundle);
+      const recoveryClaim = request.recoveryClaim;
+      const assertRecoveryCurrent = recoveryClaim
+        ? createRetainedWorkspaceRecoveryAssertion({
+            claim: recoveryClaim,
+            ownerEpoch: request.ownerEpoch,
+            getEnvironment: () => requireCurrentRecord(request.environmentId),
+            isStopping: options.isStopping,
+            authorize: request.authorize,
+            validateClaim: options.placementStore?.validateWorkspaceRecovery,
+          })
+        : undefined;
+      const expectedBuild = currentBundle ?? record.bootstrapReceipt;
+      const currentBuild = sameWorkerBuild(record.bootstrapReceipt, expectedBuild);
       if (record.ownerEpoch === request.ownerEpoch && record.lastError && !currentBuild) {
         throw new WorkerRuntimeRefreshPendingError(boundedError(record.lastError));
       }
       const credential = store.getCredential(request.environmentId);
       if (
         record.ownerEpoch !== request.ownerEpoch ||
-        !credential ||
-        credential.ownerEpoch !== request.ownerEpoch
+        (!recoveryClaim && (!credential || credential.ownerEpoch !== request.ownerEpoch))
       ) {
         throw serviceError("invalid_state", "Worker tunnel owner credential is not current");
       }
       if (!currentBuild) {
         throw new StaleWorkerBuildError();
       }
-      request.authorize?.();
+      (assertRecoveryCurrent ?? request.authorize)?.();
       const nodeDeviceId = record.nodeDeviceId;
       const nodeBundle =
         typeof nodeDeviceId === "string" &&
@@ -394,14 +407,16 @@ export function createWorkerEnvironmentAccess(options: WorkerEnvironmentAccessOp
           !nodeTunnels ||
           !sessionId ||
           record.attachedSessionIds.length !== 1 ||
-          credential.sessionId !== sessionId
+          (!recoveryClaim && credential?.sessionId !== sessionId)
         ) {
           throw serviceError("invalid_state", "Node worker tunnel runtime is unavailable");
         }
         return {
           startup: nodeTunnels.start({
+            initialPlacement: request.initialPlacement,
+            workspaceAuthority: assertRecoveryCurrent,
             executionMode:
-              record.profileSnapshot.executionMode === "remote-exec"
+              recoveryClaim || record.profileSnapshot.executionMode === "remote-exec"
                 ? "remote-exec"
                 : "worker-turn",
             environmentId: record.environmentId,
@@ -409,11 +424,11 @@ export function createWorkerEnvironmentAccess(options: WorkerEnvironmentAccessOp
             deviceId: nodeDeviceId,
             sessionId,
             expectedBuild: {
-              bundleHash: currentBundle.bundleHash,
-              openclawVersion: currentBundle.openclawVersion,
-              protocolFeatures: [...currentBundle.protocolFeatures],
+              bundleHash: expectedBuild.bundleHash,
+              openclawVersion: expectedBuild.openclawVersion,
+              protocolFeatures: [...expectedBuild.protocolFeatures],
             },
-            authorize: request.authorize,
+            authorize: assertRecoveryCurrent ?? request.authorize,
           }),
           stopStartup: () => nodeTunnels.stop(record.environmentId, record.ownerEpoch),
         };
@@ -430,7 +445,7 @@ export function createWorkerEnvironmentAccess(options: WorkerEnvironmentAccessOp
       return {
         startup: tunnels.start({
           ...request,
-          bundleHash: currentBundle.bundleHash,
+          bundleHash: expectedBuild.bundleHash,
           ssh: record.sshEndpoint,
           sharedHost: record.sharedHost,
           resolveIdentity: identityResolverFor(record, provider, record.leaseId),

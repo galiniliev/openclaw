@@ -203,6 +203,7 @@ export function createWorkerSessionPlacementStore(
         placement,
         move: structuredClone(projection.moves.get(sessionId)),
         pendingResult: structuredClone(projection.pendingResults.get(sessionId)),
+        recoveryPending: projection.workspaceRecoveryPendingSessionIds.has(sessionId),
         ...observation,
       };
     },

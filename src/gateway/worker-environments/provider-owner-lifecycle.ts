@@ -181,6 +181,15 @@ export function createWorkerProviderOwnerLifecycle(
       record.environmentId,
       "destroy",
       async () => {
+        // Re-admit after the provider queue, including old teardown intent:
+        // restoring its journal cannot authorize deletion of an original disk.
+        await store.requestDestroy({
+          environmentId: record.environmentId,
+          state: record.state,
+          assertCurrent: () => {
+            requireCurrentOwner(record);
+          },
+        });
         // An earlier timed-out operation can keep this call queued across owner changes.
         if (requireCurrentOwner(record).state !== record.state) {
           throw serviceError("invalid_state", "Worker environment owner changed during teardown");
@@ -234,7 +243,9 @@ export function createWorkerProviderOwnerLifecycle(
 
   const beginDrain = async (record: WorkerEnvironmentRecord) => {
     const failurePatch =
-      record.teardownTerminalState === "failed" ? { lastError: record.lastError } : undefined;
+      record.teardownTerminalState === "failed" || hasForcedWorkerEnvironmentAbandonment(record)
+        ? { lastError: record.lastError }
+        : undefined;
     return ["bootstrapping", "ready", "attached", "idle"].includes(record.state)
       ? move(record, "draining", failurePatch)
       : record;
@@ -242,7 +253,9 @@ export function createWorkerProviderOwnerLifecycle(
 
   const beginDestroy = async (record: WorkerEnvironmentRecord) => {
     const failurePatch =
-      record.teardownTerminalState === "failed" ? { lastError: record.lastError } : undefined;
+      record.teardownTerminalState === "failed" || hasForcedWorkerEnvironmentAbandonment(record)
+        ? { lastError: record.lastError }
+        : undefined;
     const draining = await beginDrain(record);
     if (draining.state === "draining") {
       return move(draining, "destroying", failurePatch);
@@ -547,6 +560,7 @@ export function createWorkerProviderOwnerLifecycle(
       record = await store.requestDestroy({
         environmentId,
         state: record.state,
+        ...(retainedRetirement ? { retainedOwnerBinding: retainedRetirement } : {}),
         assertCurrent: assertDestroyOwner,
         ...(abandonment && !abandonment.retainedOwnerBinding ? { terminalState: "failed" } : {}),
         ...(abandonment || destroyOptions.forceAbandon

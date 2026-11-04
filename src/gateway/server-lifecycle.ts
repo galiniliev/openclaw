@@ -148,6 +148,11 @@ export async function prepareGatewayLifecycle(params: {
   workerPlacementRuntime?.bindNodeWorkerAvailability(
     (nodeId, options) => waitForNodeWorkerSupervisor(nodeRegistry, nodeId, options),
     async (nodeId) => Boolean(await nodeWorkerSupervisorTransport.getCurrentNode(nodeId)),
+    (nodeId) => {
+      const node = nodeRegistry.get(nodeId);
+      return node?.platform === "linux" ? node.version : undefined;
+    },
+    (nodeId) => nodeRegistry.get(nodeId)?.client.connect.client.buildId,
   );
   bindDeviceNodeControl?.(nodeWorkerSupervisorTransport);
   bindWorkerNodeDesktopControl?.(nodeWorkerSupervisorTransport);

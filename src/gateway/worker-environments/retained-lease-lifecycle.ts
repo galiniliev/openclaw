@@ -8,6 +8,7 @@ import type {
   WorkerDiskRetentionPolicy,
   WorkerSessionDiskRetention,
 } from "../../plugins/worker-retention.types.js";
+import type { RetainedWorkspaceAuthority } from "../../state/retained-workspace-authority.js";
 import { getSessionRepositoryWorkspaceStore } from "../../state/session-repository-workspaces.js";
 import {
   workerEnvironmentServiceError as serviceError,
@@ -29,7 +30,7 @@ class RetainedWorkerResourceMissingError extends Error {
 
 /** Uses the environment's existing lock and writer; no independent queue or timer. */
 export function createWorkerRetainedLeaseLifecycle(options: {
-  store: WorkerEnvironmentStore;
+  store: Pick<WorkerEnvironmentStore, "get" | "recordRetention">;
   providerFor: (id: string) => WorkerProvider;
   signal: AbortSignal;
   now: () => number;
@@ -76,12 +77,25 @@ export function createWorkerRetainedLeaseLifecycle(options: {
     record: WorkerEnvironmentRecord,
     signal: AbortSignal,
     assertCurrent: () => void,
+    originalDisk?: RetainedWorkspaceAuthority,
   ) => {
-    if (!record.leaseId || !record.retention) {
+    const leaseId = record.leaseId ?? originalDisk?.identity.leaseId;
+    if (!leaseId || !record.retention) {
       throw new Error("Retained worker lease is missing");
     }
+    if (
+      originalDisk &&
+      (!["requested", "provisioning"].includes(record.state) ||
+        record.leaseId !== null ||
+        record.environmentId !== originalDisk.environmentId ||
+        record.ownerEpoch <= originalDisk.ownerEpoch ||
+        record.retention.ownerBinding !== originalDisk.ownerBinding ||
+        record.retention.owner.sessionId !== originalDisk.sessionId)
+    ) {
+      throw new Error("Original retained lease is not owned by this fresh provisioning request");
+    }
     return {
-      leaseId: record.leaseId,
+      leaseId,
       profile: requireWorkerProfile(record.profileSnapshot.settings),
       retention: record.retention,
       signal: AbortSignal.any([signal, options.signal]),
@@ -95,6 +109,7 @@ export function createWorkerRetainedLeaseLifecycle(options: {
     record: WorkerEnvironmentRecord,
     receipt: WorkerRetainedLeaseReceipt,
     assertCurrent: () => void,
+    originalDisk?: RetainedWorkspaceAuthority,
   ) => {
     const live = current(record, assertCurrent);
     const retention = live.retention!;
@@ -104,6 +119,7 @@ export function createWorkerRetainedLeaseLifecycle(options: {
       (!receipt.policyVerified && !missing) ||
       receipt.computeWindowSeconds !== retention.policy.computeWindowSeconds ||
       !receipt.identity.resourceId ||
+      (originalDisk && !isDeepStrictEqual(receipt.identity, originalDisk.identity)) ||
       (retention.receipt && !isDeepStrictEqual(receipt.identity, retention.receipt.identity))
     ) {
       throw new Error(
@@ -130,12 +146,13 @@ export function createWorkerRetainedLeaseLifecycle(options: {
     record: WorkerEnvironmentRecord,
     signal: AbortSignal,
     assertCurrent: () => void,
+    originalDisk?: RetainedWorkspaceAuthority,
   ) => {
     const provider = options.providerFor(record.providerId).retainedLease;
     if (!provider) {
       throw new Error("Retained worker provider is unavailable; ownership is preserved");
     }
-    const request = leaseRequest(record, signal, assertCurrent);
+    const request = leaseRequest(record, signal, assertCurrent, originalDisk);
     let authorityFailure: { cause: unknown } | undefined;
     let receipt: WorkerRetainedLeaseReceipt;
     try {
@@ -165,13 +182,14 @@ export function createWorkerRetainedLeaseLifecycle(options: {
       throw authorityFailure.cause;
     }
     // Native validation/persistence failures must remain fatal, not provider outages.
-    return accept(record, receipt, assertCurrent);
+    return accept(record, receipt, assertCurrent, originalDisk);
   };
   const operate = async (
     record: WorkerEnvironmentRecord,
     action: "pause" | "resume",
     signal: AbortSignal,
     assertCurrent: () => void,
+    originalDisk?: RetainedWorkspaceAuthority,
   ) => {
     let live = current(record, assertCurrent);
     const retained = live.retention!;
@@ -203,7 +221,7 @@ export function createWorkerRetainedLeaseLifecycle(options: {
     let receipt: WorkerRetainedLeaseReceipt;
     try {
       receipt = await provider[action]({
-        ...leaseRequest(live, signal, assertCurrent),
+        ...leaseRequest(live, signal, assertCurrent, originalDisk),
         operationId,
       });
       outcome = receipt.operation?.phase === "observed" ? "observed" : "pending";
@@ -220,7 +238,7 @@ export function createWorkerRetainedLeaseLifecycle(options: {
         /* Observability cannot settle or replace lifecycle work. */
       }
     }
-    live = await accept(live, receipt, assertCurrent);
+    live = await accept(live, receipt, assertCurrent, originalDisk);
     if (live.retention?.operation) {
       throw new Error("Retained worker lifecycle remains pending; ownership is preserved");
     }
@@ -246,14 +264,15 @@ export function createWorkerRetainedLeaseLifecycle(options: {
     record: WorkerEnvironmentRecord,
     signal: AbortSignal,
     assertCurrent: () => void,
+    originalDisk?: RetainedWorkspaceAuthority,
   ) => {
     let live = current(record, assertCurrent);
     if (live.retention?.desiredState !== "suspended") {
       live = await publish(live, { ...live.retention!, desiredState: "suspended" }, assertCurrent);
     }
-    live = await observe(live, signal, assertCurrent);
+    live = await observe(live, signal, assertCurrent, originalDisk);
     if (live.retention?.operation?.action === "resume") {
-      live = await operate(live, "resume", signal, assertCurrent);
+      live = await operate(live, "resume", signal, assertCurrent, originalDisk);
     }
     const receipt = live.retention!.receipt!;
     return receipt.computeWindow.state === "closed" &&
@@ -262,9 +281,64 @@ export function createWorkerRetainedLeaseLifecycle(options: {
       ["stopped", "suspended"].includes(receipt.observedState.toLowerCase()) &&
       !live.retention?.operation
       ? live
-      : operate(live, "pause", signal, assertCurrent);
+      : operate(live, "pause", signal, assertCurrent, originalDisk);
+  };
+  const resume = async (
+    record: WorkerEnvironmentRecord,
+    signal: AbortSignal,
+    assertCurrent: () => void,
+    originalDisk?: RetainedWorkspaceAuthority,
+  ) => {
+    let live = await observe(record, signal, assertCurrent, originalDisk);
+    const receipt = live.retention!.receipt!;
+    if (
+      live.retention?.desiredState === "suspended" ||
+      live.retention?.operation?.action === "pause" ||
+      expired(live) ||
+      receipt.observedState.toLowerCase() !== "running"
+    ) {
+      live = await pause(live, signal, assertCurrent, originalDisk);
+    }
+    if (live.retention?.operation?.action === "resume") {
+      live = await operate(live, "resume", signal, assertCurrent, originalDisk);
+    }
+    if (expired(live)) {
+      live = await operate(live, "resume", signal, assertCurrent, originalDisk);
+    }
+    if (expired(live) || live.retention?.operation || live.retention?.receipt?.stopPending) {
+      throw new Error("Retained worker has no active authorized compute window");
+    }
+    return live;
   };
   return {
+    async resumeForProvision(
+      record: WorkerEnvironmentRecord,
+      originalDisk: RetainedWorkspaceAuthority,
+      signal: AbortSignal,
+      assertCurrent: () => void,
+    ) {
+      assertCurrent();
+      const owner = record.retention?.owner;
+      if (!owner) {
+        throw new Error("Original retained provisioning owner is unavailable");
+      }
+      const store = getSessionRepositoryWorkspaceStore();
+      const workspace = await store.find(owner);
+      assertCurrent();
+      if (!workspace) {
+        throw new Error("Original retained workspace is unavailable");
+      }
+      const source = await store.prepare(workspace.workspaceId);
+      const assertSource = () => {
+        assertCurrent();
+        source.assertSourceCurrent();
+        if (!isDeepStrictEqual(source.current()?.diskAuthority, originalDisk)) {
+          throw new Error("Original retained disk authority changed before provisioning");
+        }
+      };
+      assertSource();
+      return resume(record, signal, assertSource, originalDisk);
+    },
     async inspectForTurn(
       request: {
         environmentId: string;
@@ -390,26 +464,7 @@ export function createWorkerRetainedLeaseLifecycle(options: {
       signal: AbortSignal,
       assertCurrent: () => void,
     ) {
-      let live = await observe(record, signal, assertCurrent);
-      const receipt = live.retention!.receipt!;
-      if (
-        live.retention?.desiredState === "suspended" ||
-        live.retention?.operation?.action === "pause" ||
-        expired(live) ||
-        receipt.observedState.toLowerCase() !== "running"
-      ) {
-        live = await pause(live, signal, assertCurrent);
-      }
-      if (live.retention?.operation?.action === "resume") {
-        live = await operate(live, "resume", signal, assertCurrent);
-      }
-      if (expired(live)) {
-        live = await operate(live, "resume", signal, assertCurrent);
-      }
-      if (expired(live) || live.retention?.operation || live.retention?.receipt?.stopPending) {
-        throw new Error("Retained worker has no active authorized compute window");
-      }
-      return live;
+      return resume(record, signal, assertCurrent);
     },
   };
 }

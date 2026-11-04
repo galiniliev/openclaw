@@ -1,6 +1,13 @@
 import { required, type WorkerSessionPlacementRecord } from "./placement-record.js";
 import { removeTurnClaimReleaseWaiter, waitersFor } from "./placement-turn-claim-events.js";
 
+export class WorkerTurnClaimReleaseTimeoutError extends Error {
+  constructor(sessionId: string) {
+    super(`Timed out waiting for session ${sessionId} turn claim release`);
+    this.name = "WorkerTurnClaimReleaseTimeoutError";
+  }
+}
+
 /** Register before the worker read so a release cannot be lost while the read is pending. */
 export function waitForPlacementTurnClaimRelease(
   path: string,
@@ -43,7 +50,7 @@ export function waitForPlacementTurnClaimRelease(
     }
     if (options.timeoutMs !== undefined) {
       timer = setTimeout(
-        () => finish(new Error(`Timed out waiting for session ${sessionId} turn claim release`)),
+        () => finish(new WorkerTurnClaimReleaseTimeoutError(sessionId)),
         options.timeoutMs,
       );
     }

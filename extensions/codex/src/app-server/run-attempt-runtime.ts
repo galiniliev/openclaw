@@ -285,6 +285,7 @@ export async function prepareCodexAttemptRuntime(connection: CodexAttemptConnect
         agentId: policyAgentId,
         runtimeSessionKey: sandboxSessionKey,
         sandboxExecServerEnabled,
+        workerHostedCloud: connection.workerHostedCloud,
         nativeExecutionPolicy,
       },
     );

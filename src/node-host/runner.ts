@@ -24,7 +24,7 @@ import { getMachineDisplayName } from "../infra/machine-name.js";
 import { logInfo } from "../logger.js";
 import { getAsyncWorkSignal } from "../shared/async-work-scope.js";
 import { createDeferredCore } from "../shared/deferred.js";
-import { VERSION } from "../version.js";
+import { resolveRuntimeServiceBuildId, VERSION } from "../version.js";
 import { configureNodeHost, loadNodeHostConfig, type NodeHostGatewayConfig } from "./config.js";
 import { startNodeHostConnection } from "./connection.js";
 import { canReuseNodeHostDeviceToken } from "./gateway-auth.js";
@@ -321,6 +321,7 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
       clientName: GATEWAY_CLIENT_NAMES.NODE_HOST,
       clientDisplayName: displayName,
       clientVersion: VERSION,
+      clientBuildId: resolveRuntimeServiceBuildId() ?? undefined,
       ...resolveNodeHostGatewayPlatformIdentity(process.platform),
       mode: GATEWAY_CLIENT_MODES.NODE,
       role: "node",

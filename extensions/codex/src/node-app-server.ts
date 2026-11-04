@@ -124,6 +124,10 @@ export function createCodexNodeAppServerInvokePolicy(): OpenClawPluginNodeInvoke
               sessionId: workspace.sessionId,
               sessionKey: workspace.sessionKey,
               ownerEpoch: workspace.ownerEpoch,
+              ...(workspace.retainedSession ? { retainedSession: workspace.retainedSession } : {}),
+              ...(workspace.requireExistingNativeState
+                ? { requireExistingNativeState: workspace.requireExistingNativeState }
+                : {}),
             },
             ...(github ? { github } : {}),
             ...(resourcePreparationRequired ? { resourcePreparationRequired: true } : {}),

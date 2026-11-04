@@ -97,12 +97,21 @@ export async function syncSessionRepositoryWorkspace(params: {
   if (repository.diskAuthority) {
     params.assertCurrent();
     const current = params.retainedDisk?.(repository.diskAuthority.workspaceDir);
-    if (
-      !current ||
-      !isDeepStrictEqual(current, repository.diskAuthority) ||
-      !repository.baseCommit ||
-      !repository.baseManifestHash
-    ) {
+    if (!current) {
+      throw new Error("Retained workspace disk authority changed; mirror restore is refused");
+    }
+    if (!isDeepStrictEqual(current, repository.diskAuthority)) {
+      repository = await store.rebindRetainedOwner({
+        workspaceId: repository.workspaceId,
+        expectedRevision: repository.revision,
+        expectedDiskAuthority: repository.diskAuthority,
+        diskAuthority: current,
+        placementGeneration: params.generation,
+        assertCurrent: params.assertCurrent,
+      });
+      params.assertCurrent();
+    }
+    if (!repository.baseCommit || !repository.baseManifestHash) {
       throw new Error("Retained workspace disk authority changed; mirror restore is refused");
     }
     return {

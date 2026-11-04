@@ -218,6 +218,7 @@ export function createGatewayWorkerPlacementRuntime(params: GatewayWorkerPlaceme
       isShuttingDown: isStopping,
       hasCurrentRunner: (id) => nodeWorkerSupervisorTransport?.hasCurrentRunner(id) === true,
       waitForRecoveryNode: runtimeRefresh.waitForRecoveryNode,
+      waitForInitialNode: runtimeRefresh.waitForInitialNode,
       runnerAvailability,
       resolveDevicePlacementRequirement,
       isCurrentNodePlacement: createDevicePlacementAuthority(() => nodeWorkerSupervisorTransport),

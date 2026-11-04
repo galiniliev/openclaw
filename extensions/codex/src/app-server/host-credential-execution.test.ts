@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
@@ -100,6 +101,75 @@ async function fixture(
 }
 
 describe.skipIf(process.platform === "win32")("Codex host-owned credential execution", () => {
+  it("constructs worker-native tools for the configured App without enabling host-profile execution", async () => {
+    const params = createParams(path.join(root, "worker-app.jsonl"), root);
+    params.agentId = "main";
+    params.disableTools = false;
+    params.permissionMode = "full";
+    params.config = {
+      tools: {
+        github: {
+          kind: "app-installation",
+          profileId: "ghp_11111111111111111111111111111111",
+          app: {
+            appId: 101,
+            installationId: 202,
+            accountId: 303,
+            repositories: [{ id: 404, fullName: "example/project" }],
+            permissions: { contents: "read" },
+            privateKey: generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({
+              type: "pkcs8",
+              format: "pem",
+            }),
+            keyVersion: "synthetic-v1",
+          },
+        },
+      },
+    };
+    const { hostCapabilities: _unused, ...attempt } = params;
+    const host = await createAgentHarnessHostCapabilitiesForTest({ attempt, pluginId: "codex" });
+    closers.push(host.close);
+    params.hostCapabilities = host.capabilities;
+    const sandbox = {
+      enabled: true,
+      backendId: "node",
+      placementExecutionMode: "remote-exec",
+      placementNodeId: "original-worker",
+      tools: { allow: ["*"], deny: [] },
+    } as never;
+    const nativeExecutionPolicy = await prepareTestNativeExecutionPolicy(params);
+    expect(
+      shouldEnableCodexAppServerNativeToolSurface(params, undefined, { nativeExecutionPolicy }),
+    ).toBe(false);
+    expect(
+      shouldEnableCodexAppServerNativeToolSurface(params, sandbox, {
+        nativeExecutionPolicy,
+        sandboxExecServerEnabled: true,
+      }),
+    ).toBe(false);
+    const native = shouldEnableCodexAppServerNativeToolSurface(params, sandbox, {
+      nativeExecutionPolicy,
+      sandboxExecServerEnabled: true,
+      workerHostedCloud: true,
+    });
+    expect(native).toBe(true);
+    const tools = await buildDynamicToolsForTest(params, root, {
+      sandbox,
+      nativeToolSurfaceEnabled: native,
+      nativeExecutionPolicy,
+    });
+    expect(
+      tools.some((tool) => ["exec", "process", "read", "write", "edit"].includes(tool.name)),
+    ).toBe(false);
+    host.close();
+    expect(() =>
+      shouldEnableCodexAppServerNativeToolSurface(params, sandbox, {
+        nativeExecutionPolicy,
+        sandboxExecServerEnabled: true,
+        workerHostedCloud: true,
+      }),
+    ).toThrow("no longer active");
+  });
   it("executes with the selected identity and never falls back when its profile disappears", async () => {
     const f = await fixture({ mutateSelection: true });
     expect(f.native).toBe(false);

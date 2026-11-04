@@ -32,6 +32,7 @@ export type CrabboxWorkerNodeEnrollment = Awaited<
 
 export function createCrabboxNodeEnrollmentSetup(params: {
   enrollment: CrabboxWorkerNodeEnrollment;
+  workerBundle?: CrabboxWorkerNodeRuntimePreparation["workerBundle"];
   desktop?: boolean;
   desktopSetup?: string;
   leaseId: string;
@@ -460,16 +461,12 @@ setPhase("preparation");
       if (result.error || result.status !== 0) throw subprocessError("Cloud worker state directory permissions could not be secured", result);
     }
   }
-  ${leaseId === undefined ? "const desktopTarget = undefined;" : createCrabboxNodeProcessRuntime(desktopTarget, leaseId)}
+  ${leaseId === undefined ? "const desktopTarget = undefined;" : createCrabboxNodeProcessRuntime(desktopTarget, leaseId, enrollment?.mode === "resume" ? enrollment.deviceId : undefined)}
   // Lease-private settings are never part of runtime-only preparation or its captured image.
   if (mode) stageWorkerCodex();
   if (desktopTarget === "macos") finishDesktopSetup();
-  if (mode && reuseNodeProcess()) {
-    if (desktopTarget !== "macos") finishDesktopSetup();
-    setPhase("complete");
-    return;
-  }
   const downloadAbort = new AbortController();
+  const prepareRuntime = async () => {
   fs.mkdirSync(runtimeRoot, { recursive: true, ...directoryOptions });
   const existingRuntime = fs.existsSync(runtimeDir);
   if (existingRuntime) await timed("bootstrap.verification", () => verifyRuntime(runtimeDir));
@@ -635,10 +632,16 @@ setPhase("preparation");
   } finally { fs.rmSync(stage, { recursive: true, force: true }); }
   }
   installRuntimePrefetch();
-  // A project snapshot contains only verified runtime bytes, never enrollment state.
+  // Runtime-only capture receives the existing immutable-artifact verification receipt.
+  if (!mode && workerBundle && bootstrap.install !== "npm") reportRuntimeInstallation(reusedRuntime ? "existing-verified" : "installed");
+  };
+  if (mode && await reuseNodeProcess(prepareRuntime)) {
+    if (desktopTarget !== "macos") finishDesktopSetup();
+    setPhase("complete");
+    return;
+  }
   if (!mode) {
-    // npm installations do not carry the manifest/build identity this receipt certifies.
-    if (workerBundle && bootstrap.install !== "npm") reportRuntimeInstallation(reusedRuntime ? "existing-verified" : "installed");
+    await prepareRuntime();
     setPhase("complete");
     return;
   }

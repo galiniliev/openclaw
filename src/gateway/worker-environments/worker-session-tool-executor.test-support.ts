@@ -8,6 +8,7 @@ import {
   createOperationalRunInstanceRef,
   prepareAgentRunAdmission,
   type AdmittedRunContext,
+  type AdmittedRunOperatorAuthority,
 } from "../../agents/admitted-run-context.js";
 import { prepareCoreToolPolicy } from "../../agents/prepared-tool-surface.js";
 import { createToolSurfacePresentationForTest } from "../../agents/tool-surface-plan.test-support.js";
@@ -215,6 +216,7 @@ type WorkerSessionToolTestOptions = {
   collectExecutionIdentity?: boolean;
   operatorProfileId?: string;
   operatorScopes?: readonly string[];
+  repositoryCredentialSource?: AdmittedRunOperatorAuthority["repositoryCredentialSource"];
   inheritedToolPolicySource?: "sender";
   delegatedToolPolicyActive?: boolean;
 };
@@ -324,6 +326,7 @@ export async function createWorkerSessionToolTestFixture(
         ? createAdmittedRunOperatorAuthority({
             profileId: options.operatorProfileId,
             scopes: options.operatorScopes ?? ["operator.write"],
+            repositoryCredentialSource: options.repositoryCredentialSource,
             assertCurrent: () =>
               assert(operatorAuthorityActive, "source operator authority revoked"),
           })

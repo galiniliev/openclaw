@@ -152,6 +152,34 @@ describe("worker environment runtime refresh", () => {
     },
   );
 
+  it("refuses initial-dispatch authority after activation without changing either receipt", async () => {
+    const { environment, placements, placement, input, owner, unchanged } =
+      await seedRefresh("attached");
+    const initialDispatch = {
+      generation: placement!.generation,
+      agentId: REQUEST.agentId,
+      sessionKey: REQUEST.sessionKey,
+      leaseId: environment.leaseId!,
+      nodeDeviceId: environment.nodeDeviceId!,
+    };
+    await expect(
+      createWorkerSessionPlacementGate(placements).prepareWorkerRuntimeRefresh({
+        ...owner,
+        sessionId,
+        initialDispatch,
+      }),
+    ).rejects.toThrow("Initial worker readiness");
+    await expect(
+      store.refreshBootstrapReceipt({
+        ...input,
+        expectedState: "attached",
+        expectedPlacementGeneration: placement!.generation,
+        initialDispatch,
+      }),
+    ).rejects.toThrow("Worker placement changed");
+    unchanged();
+  });
+
   it("rejects stale refresh identity and renewed credentials without changing either receipt", async () => {
     const { environment, placement, input, unchanged } = await seedRefresh("attached");
     const staleInputs = [

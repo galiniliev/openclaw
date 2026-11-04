@@ -596,6 +596,7 @@ export async function bindPlacementHarness(
   attachWorkerTurnExecutionIdentityStore(executionStore, databasePath);
   const placementStore = {
     fenceWorkerTurnForRecovery: vi.fn(),
+    validateWorkspaceRecovery: vi.fn(() => false),
     prepareWorkerRuntimeRefresh: vi.fn(async () => {
       throw new Error("Cannot refresh a worker runtime while its turn is active");
     }),

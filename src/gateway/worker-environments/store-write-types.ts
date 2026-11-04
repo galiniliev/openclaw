@@ -7,6 +7,7 @@ import type {
   WorkerEnvironmentBootstrapReceipt,
   WorkerEnvironmentRecord,
 } from "./environment-record.js";
+import type { WorkerInitialDispatchBinding } from "./placement-worker-gate.js";
 import type { WorkerWorkspacePendingResult } from "./placement-workspace-result.types.js";
 import type { WorkerEnvironmentState } from "./state.js";
 
@@ -51,6 +52,7 @@ export type BootstrapRefreshInput = {
   | {
       expectedState: "attached";
       expectedPlacementGeneration: number;
+      initialDispatch?: WorkerInitialDispatchBinding;
       expectedReclaimResult?: WorkerWorkspacePendingResult;
     }
   | { expectedState: "ready" | "idle"; expectedPlacementGeneration?: never }

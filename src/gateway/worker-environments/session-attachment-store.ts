@@ -54,7 +54,7 @@ function fromRow(row: Selectable<AttachmentTable>): WorkerEnvironmentAttachmentR
   };
 }
 
-function get(db: EngineConnection, sessionId: string) {
+export function readWorkerEnvironmentSessionAttachment(db: EngineConnection, sessionId: string) {
   const row = executeSqliteQueryTakeFirstSync(
     db,
     query(db)
@@ -116,9 +116,10 @@ export function createWorkerEnvironmentSessionAttachmentStore(options: {
     }
   };
   return {
-    getSessionAttachmentRecord: (sessionId: string) => get(db, sessionId),
+    getSessionAttachmentRecord: (sessionId: string) =>
+      readWorkerEnvironmentSessionAttachment(db, sessionId),
     createSessionAttachmentIntent(this: void, input) {
-      const previous = get(db, input.sessionId);
+      const previous = readWorkerEnvironmentSessionAttachment(db, input.sessionId);
       if (previous) {
         assertIdentity(previous, input);
         const environment = options.getEnvironment(db, previous.environmentId);
@@ -162,7 +163,7 @@ export function createWorkerEnvironmentSessionAttachmentStore(options: {
       return { attachment: fromRow(row!), environment };
     },
     closeSessionAttachment(this: void, sessionId) {
-      const current = get(db, sessionId);
+      const current = readWorkerEnvironmentSessionAttachment(db, sessionId);
       if (!current || current.closedAtMs !== null) {
         return current;
       }
@@ -177,7 +178,7 @@ export function createWorkerEnvironmentSessionAttachmentStore(options: {
       return row ? fromRow(row) : undefined;
     },
     cancelSessionAttachmentReservation(this: void, record) {
-      const current = get(db, record.sessionId);
+      const current = readWorkerEnvironmentSessionAttachment(db, record.sessionId);
       const environment = options.getEnvironment(db, record.environmentId);
       if (
         !current ||

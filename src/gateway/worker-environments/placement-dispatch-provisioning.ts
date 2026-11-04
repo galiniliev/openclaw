@@ -1,5 +1,8 @@
+import { isDeepStrictEqual } from "node:util";
+import type { RetainedWorkspaceAuthority } from "../../state/retained-workspace-authority.js";
 import { supportsCurrentWorkerLaunch } from "../../worker/worker-build-identity.js";
 import type { WorkerDispatchEnvironmentService } from "./placement-dispatch-failure.js";
+import { retainedRepositoryDisk } from "./retained-workspace.js";
 import type { WorkerPlacementDispatchRequest } from "./service-contract.js";
 import type { WorkerEnvironmentService } from "./service.js";
 
@@ -8,9 +11,20 @@ export function requireProvisionedEnvironment(
   expectedEnvironmentId: string,
   executionMode: WorkerPlacementDispatchRequest["executionMode"],
   environments: Pick<WorkerDispatchEnvironmentService, "supportsProviderExecutionMode">,
+  owner?: WorkerPlacementDispatchRequest,
+  disk?: RetainedWorkspaceAuthority,
 ): { environmentId: string; ownerEpoch: number; bundleHash: string } {
+  const retainedInitial =
+    environment.state === "attached" &&
+    environment.lastActivatedAtMs === null &&
+    environment.sharedHost === false &&
+    environment.attachedSessionIds.length === 1 &&
+    environment.attachedSessionIds[0] === owner?.sessionId &&
+    owner &&
+    disk &&
+    isDeepStrictEqual(retainedRepositoryDisk(environment, owner, disk.workspaceDir), disk);
   if (
-    (environment.state !== "ready" && environment.state !== "idle") ||
+    (environment.state !== "ready" && environment.state !== "idle" && !retainedInitial) ||
     environment.environmentId !== expectedEnvironmentId ||
     environment.destroyRequestedAtMs !== null ||
     !environment.bootstrapReceipt ||

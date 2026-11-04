@@ -146,6 +146,7 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
       if (!isEnvironmentOwner(entry)) {
         throw new Error("node worker workspace authority closed");
       }
+      entry.workspaceAuthority?.();
       command.assertCurrent?.();
     };
     const commandTimeoutMs = command.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
@@ -167,7 +168,8 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
       environmentId: entry.environmentId,
       sessionId: entry.sessionId,
       ...(deviceFolder === undefined ? {} : { deviceFolder }),
-      ...(preparationKey === undefined ? {} : { preparationKey, sessionKey: command.sessionKey }),
+      ...(preparationKey === undefined ? {} : { preparationKey }),
+      ...(command.sessionKey === undefined ? {} : { sessionKey: command.sessionKey }),
       generation: entry.ownerEpoch,
       argv: [...command.argv],
       ...(command.input === undefined ? {} : { input: command.input }),
@@ -615,6 +617,7 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
         deviceId: request.deviceId,
         sessionId: request.sessionId,
         expectedBuild: request.expectedBuild,
+        workspaceAuthority: request.workspaceAuthority,
         abortController: new AbortController(),
         launchTasks: new Set(),
         workspaceTasks: new Set(),
@@ -647,6 +650,7 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
         const restoredWorkspace = resolveWorkspaceBinding
           ? await raceNodeWorkerOperation(
               resolveWorkspaceBinding({
+                initialPlacement: request.initialPlacement,
                 environmentId: request.environmentId,
                 ownerEpoch: request.ownerEpoch,
                 sessionId: request.sessionId,

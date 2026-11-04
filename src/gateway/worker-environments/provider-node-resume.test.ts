@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import type { WorkerProvider } from "../../plugins/types.js";
+import { VERSION } from "../../version.js";
 import { createWorkerRuntimeRefreshWaiter } from "../server-worker-placement-runtime-refresh.js";
 import { DEFAULT_NODE_TOOLCHAIN_SETUP_SH } from "./node-toolchain.js";
 import { REQUEST, seedActivePlacement } from "./placement-dispatch-test-fixtures.js";
@@ -15,9 +16,34 @@ import * as support from "./service.test-support.js";
 describe("foreground enrolled-node recovery", () => {
   support.setupWorkerEnvironmentServiceSuite();
 
-  it.each(["dead", "connected", "claimed", "authority-closed", "unprepared", "reclaim"] as const)(
+  it.each([
+    "dead",
+    "connected",
+    "claimed",
+    "authority-closed",
+    "unprepared",
+    "prepared-10.6",
+    "prepared-claimed",
+    "same-version",
+    "same-version-unreported",
+    "same-version-claimed",
+    "paired-legacy",
+    "legacy-claimed",
+    "reclaim",
+  ] as const)(
     "uses the retained node and lease only with current admission or reclaim authority: %s",
     async (scenario) => {
+      const sameVersion = scenario.startsWith("same-version");
+      if (sameVersion || scenario === "reclaim") {
+        const build = vi
+          .spyOn(await import("../../version.js"), "resolveRuntimeServiceBuildId")
+          .mockReturnValue("current-build");
+        onTestFinished(() => build.mockRestore());
+      }
+      const stalePrepared = scenario === "prepared-10.6" || scenario === "prepared-claimed";
+      const currentRuntime = scenario === "unprepared" || stalePrepared || sameVersion;
+      const legacy =
+        scenario === "unprepared" || scenario === "legacy-claimed" || scenario === "paired-legacy";
       const environmentId = "node-resume-environment";
       const settings = { region: "test" };
       const preparation = createWorkerPreparationIdentity({
@@ -32,19 +58,17 @@ describe("foreground enrolled-node recovery", () => {
           enabledPluginIds: [],
           workerBundleHash: support.BOOTSTRAP_RECEIPT.bundleHash,
           workerArchiveSha256: "b".repeat(64),
-          openclawVersion: support.BOOTSTRAP_RECEIPT.openclawVersion,
+          openclawVersion: stalePrepared ? "2026.10.6" : VERSION,
           protocolFeatures: support.BOOTSTRAP_RECEIPT.protocolFeatures,
         },
       });
       await support.testState.store.createIntent({
         environmentId,
-        providerId: "fake",
+        providerId: scenario === "paired-legacy" ? "device" : "fake",
         profileId: "development",
         profileSnapshot: {
           settings,
-          ...(scenario === "unprepared"
-            ? {}
-            : { runtimePreparation: { ...preparation, source: "image" } }),
+          ...(legacy ? {} : { runtimePreparation: { ...preparation, source: "image" } }),
         },
         provisionOperationId: "node-resume-fixture",
       });
@@ -58,7 +82,10 @@ describe("foreground enrolled-node recovery", () => {
         from: "provisioning",
         to: "ready",
         patch: {
-          ...support.readyPatch(environmentId),
+          ...support.readyPatch(environmentId, {
+            ...support.BOOTSTRAP_RECEIPT,
+            openclawVersion: VERSION,
+          }),
           leaseId: "retained-lease",
           nodeDeviceId: "retained-node",
           sharedHost: false,
@@ -79,24 +106,60 @@ describe("foreground enrolled-node recovery", () => {
       if (placement.state !== "active") {
         throw new Error("Expected an active fixture");
       }
-      let connected = scenario === "connected";
+      let connected = scenario === "connected" || legacy || stalePrepared || sameVersion;
+      let nodeVersion = sameVersion ? VERSION : legacy || stalePrepared ? "2026.10.6" : undefined;
+      let nodeBuildId: string | undefined =
+        sameVersion && scenario !== "same-version-unreported" ? "previous-build" : undefined;
       let current = true;
       const resumeNode = vi.fn<NonNullable<WorkerProvider["resumeNode"]>>(async (request) => {
         expect(request).toMatchObject({
           leaseId: "retained-lease",
           deviceId: "retained-node",
           profile: settings,
-          nodeBootstrapSha256: "a".repeat(64),
+          nodeBootstrapSha256: currentRuntime ? "c".repeat(64) : "a".repeat(64),
           linuxToolchainSetup: DEFAULT_NODE_TOOLCHAIN_SETUP_SH,
         });
         request.assertCurrent();
+        if (currentRuntime) {
+          expect(request.runtime?.nodeBootstrap.sha256).toBe("c".repeat(64));
+          nodeVersion = VERSION;
+          nodeBuildId = "current-build";
+        }
         connected = true;
       });
       const provision = vi.fn();
       const destroy = vi.fn();
       const service = support.createService(
         support.createProvider({ resumeNode, provision, destroy }),
-        { placementStore: createWorkerSessionPlacementGate(placements) },
+        {
+          placementStore: createWorkerSessionPlacementGate(placements),
+          prepareInstallation: async () => ({
+            ...support.BUNDLE_ARTIFACT,
+            openclawVersion: VERSION,
+          }),
+          prepareNodeRuntime: async (_record, _bundle, _signal, assertCurrent) => {
+            assertCurrent?.();
+            return {
+              nodeBootstrap: {
+                url: "https://example.test/node",
+                token: "synthetic",
+                sha256: "c".repeat(64),
+                bytes: 1,
+                openclawVersion: VERSION,
+                buildId: "current-build",
+                enabledPluginIds: [],
+              },
+              workerBundle: {
+                url: "https://example.test/worker",
+                token: "synthetic",
+                sha256: "b".repeat(64),
+                bytes: 1,
+                packageRelativePath: "worker-artifacts/fixture.tgz",
+              },
+            };
+          },
+          closeNodeRuntime: vi.fn(),
+        },
       );
       const waiter = createWorkerRuntimeRefreshWaiter({
         environments: service,
@@ -107,14 +170,27 @@ describe("foreground enrolled-node recovery", () => {
         if (!connected) {
           throw new Error("Node reconnect still pending");
         }
-      });
-      waiter.bind(admitted, async () => {
-        if (scenario === "authority-closed") {
-          current = false;
+        if (request.isReady && !request.isReady()) {
+          throw new Error("Original Node host has not activated the qualified runtime");
         }
-        return connected;
       });
-      if (scenario === "claimed") {
+      waiter.bind(
+        admitted,
+        async () => {
+          if (scenario === "authority-closed") {
+            current = false;
+          }
+          return connected;
+        },
+        () => nodeVersion,
+        () => (connected ? nodeBuildId : undefined),
+      );
+      if (
+        scenario === "claimed" ||
+        scenario === "legacy-claimed" ||
+        scenario === "prepared-claimed" ||
+        scenario === "same-version-claimed"
+      ) {
         await placements.claimTurn({
           sessionId: placement.sessionId,
           sessionKey: placement.sessionKey,
@@ -152,7 +228,7 @@ describe("foreground enrolled-node recovery", () => {
       const before = placements.get(placement.sessionId);
       const pendingBefore = await placements.listPendingWorkspaceResultsAsync();
       const beforeEnvironment = support.testState.store.get(environmentId);
-      const recovering = waiter.wait({
+      const readiness = {
         placement: recoveryPlacement,
         signal: new AbortController().signal,
         assertCurrent: () => {
@@ -160,14 +236,50 @@ describe("foreground enrolled-node recovery", () => {
             throw new Error("Foreground authority closed");
           }
         },
-      });
-      if (scenario === "unprepared") {
-        await expect(recovering).rejects.toThrow("Node reconnect still pending");
-        expect(resumeNode).not.toHaveBeenCalled();
+      };
+      const recovering = waiter.wait(readiness);
+      if (
+        scenario === "unprepared" ||
+        scenario === "prepared-10.6" ||
+        scenario === "same-version" ||
+        scenario === "same-version-unreported"
+      ) {
+        await recovering;
+        expect(resumeNode).toHaveBeenCalledOnce();
         expect(admitted).toHaveBeenCalledOnce();
-      } else if (scenario === "claimed" || scenario === "authority-closed") {
+        if (scenario === "same-version" || scenario === "same-version-unreported") {
+          await waiter.wait(readiness);
+          expect(resumeNode).toHaveBeenCalledOnce();
+          expect(admitted).toHaveBeenCalledTimes(2);
+        }
+        if (
+          scenario === "prepared-10.6" ||
+          scenario === "same-version" ||
+          scenario === "same-version-unreported"
+        ) {
+          // Captured image provenance remains unchanged after upgrade and reconnect.
+          expect(support.testState.store.get(environmentId)).toEqual(beforeEnvironment);
+          connected = false;
+          nodeVersion = undefined;
+          await waiter.wait(readiness);
+          expect(resumeNode).toHaveBeenCalledTimes(2);
+          expect(admitted).toHaveBeenCalledTimes(sameVersion ? 3 : 2);
+        }
+      } else if (
+        scenario === "claimed" ||
+        scenario === "legacy-claimed" ||
+        scenario === "prepared-claimed" ||
+        scenario === "authority-closed" ||
+        scenario === "same-version-claimed"
+      ) {
         await expect(recovering).rejects.toThrow(
-          scenario === "claimed" ? "current turn" : "Foreground authority closed",
+          scenario === "legacy-claimed" ||
+            scenario === "prepared-claimed" ||
+            scenario === "same-version-claimed"
+            ? "current work"
+            : scenario === "claimed"
+              ? "current turn"
+              : "Foreground authority closed",
         );
         expect(resumeNode).not.toHaveBeenCalled();
         expect(admitted).not.toHaveBeenCalled();

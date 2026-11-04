@@ -1,4 +1,5 @@
 import type { WorkerSessionDiskRetention } from "../../plugins/worker-retention.types.js";
+import type { RetainedWorkspaceAuthority } from "../../state/retained-workspace-authority.js";
 import type { WorkerCredentialRecord } from "./credential.js";
 import type {
   WorkerEnvironmentIntentInput,
@@ -36,6 +37,13 @@ export type WorkerEnvironmentCommitAdmission = Array<{
 
 /** Native mutation signatures own the host callbacks and the worker's serializable contract. */
 export type WorkerEnvironmentMutationMethods = {
+  resumeParkedRetainedWorkspaceOwner(input: {
+    environmentId: string;
+    expectedOwnerEpoch: number;
+    owner: { agentId: string; sessionKey: string; sessionId: string };
+    expectedDiskAuthority: RetainedWorkspaceAuthority;
+    assertCurrent?: () => void;
+  }): WorkerEnvironmentRecord;
   recordRetention(input: {
     environmentId: string;
     expectedOwnerEpoch: number;
@@ -63,6 +71,8 @@ export type WorkerEnvironmentMutationMethods = {
     terminalState?: WorkerEnvironmentTeardownTerminalState;
     assertCurrent?: () => void;
     lastError?: string;
+    /** Only the validated session archive/delete owner may discard an admitted disk. */
+    retainedOwnerBinding?: string;
   }): WorkerEnvironmentRecord;
   refreshBootstrapReceipt(input: BootstrapRefreshInput): WorkerEnvironmentRecord;
   transition(input: TransitionInput): WorkerEnvironmentRecord;

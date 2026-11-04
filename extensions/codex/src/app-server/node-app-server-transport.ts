@@ -29,6 +29,7 @@ const MAX_FRAME_BYTES = 64 * 1024 * 1024;
 export function createCodexWorkerClientFactory(params: {
   runtime?: Pick<PluginRuntime, "nodes">;
   agentId?: string;
+  expectedGitHubProfileId?: string;
   confirmedLossPredecessor?: () => boolean;
   permissionMode?: EmbeddedRunAttemptParamsV2["permissionMode"];
   sandbox: SandboxContext;
@@ -68,6 +69,7 @@ export function createCodexWorkerClientFactory(params: {
           sessionId: workspace.sessionId,
           sessionKey: workspace.sessionKey,
           agentId: params.agentId,
+          expectedProfileId: params.expectedGitHubProfileId,
           signal,
           assertCurrent: () => {
             assertCurrent();

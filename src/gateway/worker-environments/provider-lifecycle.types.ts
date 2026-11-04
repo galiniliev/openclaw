@@ -9,6 +9,7 @@ import type {
   WorkerSshEndpoint,
   WorkerSshIdentity,
 } from "../../plugins/types.js";
+import type { RetainedWorkspaceAuthority } from "../../state/retained-workspace-authority.js";
 import type { NodeWorkerPreparedWorkspaceResult } from "../../worker/node-workspace-prepared-protocol.js";
 import type { WorkerInstallationArtifact } from "./bundle.js";
 import type { WorkerCredentialBroker } from "./credential-broker.js";
@@ -33,7 +34,16 @@ export type WorkerProviderResumeProvision = (
   retainProviderSettlement?: (settled: Promise<void>) => void,
   beforeProvision?: () => void,
   repositorySource?: WorkerProviderRepositorySource,
+  originalDisk?: RetainedWorkspaceAuthority,
 ) => Promise<WorkerEnvironmentRecord>;
+
+export type WorkerProviderIntentOptions = Pick<
+  WorkerProviderLifecycleOptions,
+  "store" | "getConfig" | "projectNamespace" | "prepareNodeArtifacts" | "isStopping" | "withLock"
+> & {
+  providerFor: (providerId: string) => WorkerProvider;
+  resumeProvision: WorkerProviderResumeProvision;
+};
 
 export type WorkerEnvironmentAbandonment = {
   /** Dedicated retained-resource retirement; omitted for paired-device abandonment. */
@@ -71,6 +81,7 @@ export type WorkerProviderLifecycleInputOptions = {
     record: WorkerEnvironmentRecord,
     bundle: Extract<WorkerInstallationArtifact, { install: "bundle" }>,
     signal?: AbortSignal,
+    assertRecoveryCurrent?: () => void,
   ) => Promise<WorkerNodeRuntimePreparation>;
   closeNodeRuntime?: (preparation: WorkerNodeRuntimePreparation) => void;
   prepareNodeArtifacts?: (

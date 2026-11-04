@@ -27,7 +27,10 @@ type RowUpdate = Updateable<WorkerEnvironments>;
 type SshFallbackPortInsert = Insertable<WorkerEnvironmentSshFallbackPorts>;
 type CredentialInsert = Insertable<WorkerEnvironmentCredentials>;
 
-export function nextGlobalOwnerEpoch(db: EngineConnection): number {
+export function nextGlobalOwnerEpoch(db: EngineConnection, minimumPreviousEpoch = 0): number {
+  if (!Number.isSafeInteger(minimumPreviousEpoch) || minimumPreviousEpoch < 0) {
+    throw new Error("Worker environment previous owner epoch is invalid");
+  }
   // Transcript commit identity is (session, epoch, seq), so an ownership
   // generation may never be reused when a session moves between environments.
   const latestEnvironment = executeSqliteQueryTakeFirstSync(
@@ -43,7 +46,11 @@ export function nextGlobalOwnerEpoch(db: EngineConnection): number {
       .select(({ fn }) => fn.max<number>("run_epoch").as("run_epoch")),
   );
   const next =
-    Math.max(latestEnvironment?.owner_epoch ?? 0, latestTranscriptCommit?.run_epoch ?? 0) + 1;
+    Math.max(
+      minimumPreviousEpoch,
+      latestEnvironment?.owner_epoch ?? 0,
+      latestTranscriptCommit?.run_epoch ?? 0,
+    ) + 1;
   if (!Number.isSafeInteger(next)) {
     throw new Error("Worker environment owner epoch is exhausted");
   }

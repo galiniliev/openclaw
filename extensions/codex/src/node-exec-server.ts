@@ -17,7 +17,20 @@ const CODEX_NODE_EXEC_SERVER_CAPABILITY = "codex.exec-server";
 export function parseCodexNodePlacementWorkspace(value: unknown) {
   if (
     !isRecord(value) ||
-    Object.keys(value).length !== 5 ||
+    Object.keys(value).some(
+      (key) =>
+        ![
+          "cwd",
+          "environmentId",
+          "sessionId",
+          "sessionKey",
+          "ownerEpoch",
+          "retainedSession",
+          "requireExistingNativeState",
+        ].includes(key),
+    ) ||
+    (value.retainedSession !== undefined && value.retainedSession !== true) ||
+    (value.requireExistingNativeState !== undefined && value.requireExistingNativeState !== true) ||
     typeof value.cwd !== "string" ||
     !value.cwd.trim() ||
     value.cwd.includes("\0") ||
@@ -151,6 +164,10 @@ export function createCodexNodeExecServerInvokePolicy(): OpenClawPluginNodeInvok
         sessionId: workspace.sessionId,
         ownerEpoch: workspace.ownerEpoch,
         sessionKey: workspace.sessionKey,
+        ...(workspace.retainedSession ? { retainedSession: workspace.retainedSession } : {}),
+        ...(workspace.requireExistingNativeState
+          ? { requireExistingNativeState: workspace.requireExistingNativeState }
+          : {}),
       };
       const fullLaunch = await context.invokeNodeWithSessionFull?.({
         workspace,

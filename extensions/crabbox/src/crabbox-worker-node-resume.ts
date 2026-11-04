@@ -1,5 +1,6 @@
 import type { WorkerProvider } from "openclaw/plugin-sdk/plugin-entry";
 import { crabboxCommandError, leaseRunArgs, runCrabboxCommand } from "./crabbox-worker-command.js";
+import { createCrabboxNodeEnrollmentSetup } from "./crabbox-worker-node-enrollment.js";
 import { createCrabboxNodeProcessRuntime } from "./crabbox-worker-node-process.js";
 import {
   assertCrabboxLeaseId,
@@ -13,14 +14,25 @@ import {
 } from "./crabbox-worker-timeouts.js";
 
 /** Resume the enrolled runtime without reinstalling OpenClaw, pairing, or touching the repository. */
-export function createCrabboxNodeResumeScript(request: {
-  leaseId: string;
-  deviceId: string;
-  nodeBootstrapSha256: string;
-  openclawVersion: string;
-  linuxToolchainSetup?: string;
-}): string {
+export function createCrabboxNodeResumeScript(
+  request: Pick<Parameters<NonNullable<WorkerProvider["resumeNode"]>>[0], "leaseId" | "deviceId"> &
+    (
+      | {
+          retainedRuntimeOnly: true;
+          nodeBootstrapSha256?: never;
+          openclawVersion?: never;
+          linuxToolchainSetup?: never;
+        }
+      | {
+          retainedRuntimeOnly?: never;
+          nodeBootstrapSha256: string;
+          openclawVersion: string;
+          linuxToolchainSetup?: string;
+        }
+    ),
+): string {
   const nodeSetup =
+    !request.retainedRuntimeOnly &&
     request.linuxToolchainSetup &&
     request.linuxToolchainSetup +
       "\n" +
@@ -44,15 +56,17 @@ const { once } = require("node:events");
   const setPhase = () => {};
   const home = fs.realpathSync(os.homedir());
   const stateDir = path.join(home, ".openclaw", "cloud-workers", leaseId);
-  const runtimeDir = path.join(home, ".openclaw-worker", "node-runtimes", ${JSON.stringify(request.nodeBootstrapSha256)});
+  const runtimeRoot = path.join(home, ".openclaw-worker", "node-runtimes");
   const runtimeLink = path.join(stateDir, "runtime");
+  const runtimeDir = ${request.retainedRuntimeOnly ? "fs.realpathSync(runtimeLink)" : "path.join(runtimeRoot, " + JSON.stringify(request.nodeBootstrapSha256) + ")"};
+  if (fs.realpathSync(runtimeRoot) !== runtimeRoot || path.dirname(runtimeDir) !== runtimeRoot || !/^[a-f0-9]{64}$/.test(path.basename(runtimeDir))) throw new Error("Cloud worker retained runtime escapes its canonical owner");
   const cli = path.join(runtimeDir, "node_modules", "openclaw", "openclaw.mjs");
   const pidFile = path.join(stateDir, "node.pid");
   const launchFile = path.join(stateDir, "node-launch.json");
   const setupFile = path.join(stateDir, "setup-code");
   if (!fs.lstatSync(stateDir).isDirectory() || fs.realpathSync(stateDir) !== stateDir || !fs.lstatSync(runtimeDir).isDirectory() || fs.realpathSync(runtimeDir) !== runtimeDir || !fs.lstatSync(runtimeLink).isSymbolicLink() || fs.realpathSync(runtimeLink) !== runtimeDir) throw new Error("Cloud worker retained node runtime is unavailable or mismatched");
   const manifest = JSON.parse(fs.readFileSync(path.join(runtimeDir, "node_modules", "openclaw", "package.json"), "utf8"));
-  if (manifest.name !== "openclaw" || manifest.version !== ${JSON.stringify(request.openclawVersion)}) throw new Error("Cloud worker retained node package identity changed");
+  if (manifest.name !== "openclaw" || ${request.retainedRuntimeOnly ? 'typeof manifest.version !== "string" || !manifest.version' : "manifest.version !== " + JSON.stringify(request.openclawVersion)}) throw new Error("Cloud worker retained node package identity changed");
   const nodeEnv = { ...process.env, OPENCLAW_STATE_DIR: stateDir };
   nodeEnv.PATH = path.dirname(process.execPath) + path.delimiter + path.join(runtimeDir, "node_modules", "openclaw", "dist", "worker-tools", "bin") + path.delimiter + (nodeEnv.PATH || "");
   // This supported read-only command never creates a missing identity.
@@ -60,7 +74,7 @@ const { once } = require("node:events");
   if (identity.status !== 0 || JSON.parse(identity.stdout).deviceId !== ${JSON.stringify(request.deviceId)}) throw new Error("Cloud worker retained node identity is missing or changed; resume refused");
   ${createCrabboxNodeProcessRuntime(undefined, request.leaseId)}
   // A live process owns reconnect; never kill or duplicate it to repair transport.
-  if (!reuseNodeProcess(() => {
+  if (!await reuseNodeProcess(() => {
     const setup = ${JSON.stringify(nodeSetup)};
     if (!setup) return;
     const selected = spawnSync("sh", ["-s"], { input: setup, env: nodeEnv, encoding: "utf8", timeout: ${CRABBOX_SETUP_TIMEOUT_MS}, maxBuffer: 65536 });
@@ -84,13 +98,34 @@ export function createCrabboxNodeResumer(options: {
     assertCrabboxLeaseId(request.leaseId);
     const { binary } = await options.resolveBinary(profile.binary, request.signal);
     request.assertCurrent();
+    const setup = request.runtime
+      ? createCrabboxNodeEnrollmentSetup({
+          leaseId: request.leaseId,
+          workerBundle: request.runtime.workerBundle,
+          enrollment: {
+            mode: "resume",
+            deviceId: request.deviceId,
+            nodeBootstrap: request.runtime.nodeBootstrap,
+            bootstrapTimeoutMs: request.runtime.bootstrapTimeoutMs,
+            openclawVersion: request.openclawVersion,
+            displayName: "Cloud worker",
+            waitForDeviceId: async () => request.deviceId,
+          },
+        })
+      : { command: createCrabboxNodeResumeScript(request), forwardedEnv: {} };
     const result = await runCrabboxCommand({
       action: "node resume",
       binary,
       providerEnv: resolveCrabboxProfileCommandEnv(profile),
-      args: leaseRunArgs({ binary, provider: profile.provider, id: request.leaseId }),
-      input: createCrabboxNodeResumeScript(request),
-      signal: request.signal,
+      args: leaseRunArgs(
+        { binary, provider: profile.provider, id: request.leaseId },
+        Object.keys(setup.forwardedEnv),
+      ),
+      input: setup.command,
+      env: { ...process.env, ...setup.forwardedEnv },
+      signal: request.runtime?.signal
+        ? AbortSignal.any([request.signal, request.runtime.signal])
+        : request.signal,
       timeoutMs: request.linuxToolchainSetup
         ? CRABBOX_SETUP_TIMEOUT_MS + CRABBOX_LIFECYCLE_TIMEOUT_MS
         : 60_000,

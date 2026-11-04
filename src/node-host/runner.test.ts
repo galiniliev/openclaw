@@ -120,6 +120,9 @@ describe("runNodeHost", () => {
   });
 
   it("retains managed state admission while an external signal closes the runtime", async () => {
+    vi.spyOn(await import("../version.js"), "resolveRuntimeServiceBuildId").mockReturnValue(
+      "loaded-node-build",
+    );
     mocks.useFakeRuntime = true;
     const statePath = resolveOpenClawStateSqlitePath();
     let cleanupStatePath: string | undefined;
@@ -129,6 +132,7 @@ describe("runNodeHost", () => {
     await withReadyNodeHost(
       async ({ running, stop }) => {
         expect(getExistingOpenClawStateSchemaPath()).toBeUndefined();
+        expect(lastCapturedOptions()?.clientBuildId).toBe("loaded-node-build");
         stop();
         await running;
         expect(cleanupStatePath).toBe(statePath);

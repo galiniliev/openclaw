@@ -23,6 +23,7 @@ import {
   type WorkerPlacementExecutionMode,
   type WorkerSessionPlacementRecord,
   type WorkerSessionPlacementDispatchIdentity,
+  type WorkerSessionPlacementIdentity,
 } from "./placement-record.js";
 import {
   retireWorkerSessionPlacement,
@@ -43,11 +44,13 @@ import {
   isCompletedInitialRetainedWorkerCleanup,
   isFailedWorkerPlacementEnvironmentGone,
   matchesWorkerPlacementTarget,
+  type WorkerPlacementCancellationTarget,
 } from "./placement-target.js";
 import { clearLocalTurnClaimsInDatabase } from "./placement-turn-claims.js";
 import { assertSessionWorkspaceUnreserved } from "./placement-workspace-reservation.kernel.js";
 import { hasWorkerWorkspacePendingResult } from "./placement-workspace-result.js";
 import { consumePreparedEnvironment } from "./prepared-environment-store.js";
+import { canResumeRetainedWorkspaceOwnerInDatabase } from "./retained-workspace-owner-repair.kernel.js";
 import { findWorkerEnvironment } from "./store-row-codec.js";
 
 type Moves = ReturnType<typeof createPlacementMoveOps>;
@@ -95,6 +98,16 @@ export const placementReadOperations = {
     _input: Record<string, never>,
     { open }: WorkerOperationContext,
   ) => readWorkerPlacementIdentitiesInDatabase(open().db),
+  "workerPlacements.canResumeRetainedOriginal": (
+    input: WorkerSessionPlacementIdentity & { expected: WorkerPlacementCancellationTarget },
+    { open }: WorkerOperationContext,
+  ) =>
+    canResumeRetainedWorkspaceOwnerInDatabase(
+      open().db,
+      normalizeIdentity(input),
+      input.expected,
+      Date.now(),
+    ),
   "workerPlacements.read": (
     input: { sessionIds?: readonly string[] },
     { open }: WorkerOperationContext,
@@ -174,7 +187,10 @@ function startWorkerPlacementDispatch(
         `Worker placement ${identity.sessionId} still has pending workspace recovery`,
       );
     }
-    if (current.state === "failed") {
+    if (
+      current.state === "failed" &&
+      !canResumeRetainedWorkspaceOwnerInDatabase(db, identity, expected, nowMs)
+    ) {
       const environment = current.environmentId
         ? findWorkerEnvironment(db, current.environmentId)
         : undefined;

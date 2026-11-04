@@ -683,6 +683,7 @@ export function createWorkerEnvironmentService(options: WorkerEnvironmentService
       ),
     pauseRetained: providerLifecycle.pauseRetained,
     resumeNode: providerLifecycle.resumeNode,
+    refreshInitialRuntime: providerLifecycle.refreshInitialRuntime,
     reconcileEnvironment,
     reconcileOnce,
     ready: async () =>

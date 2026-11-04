@@ -245,24 +245,37 @@ afterEach(async () => {
 });
 
 describe("Codex node exec-server", () => {
-  it("uses admitted Full launch authority without asking for a human decision", async () => {
-    const { placement } = createManagedWorkspaceInvocation(process.cwd());
-    const request = vi.fn(async () => ({ decision: "deny" as const }));
-    const invokeNode = vi.fn();
-    const invokeNodeWithSessionFull = vi.fn(async () => ({ ok: true as const }));
-    await expect(
-      createCodexNodeExecServerInvokePolicy().handle(
-        policyContext(placement, {
-          approvals: { request },
-          invokeNode,
-          invokeNodeWithSessionFull,
-        }),
-      ),
-    ).resolves.toEqual({ ok: true });
-    expect(request).not.toHaveBeenCalled();
-    expect(invokeNode).not.toHaveBeenCalled();
-    expect(invokeNodeWithSessionFull).toHaveBeenCalledOnce();
-  });
+  it.each([
+    {},
+    { retainedSession: true },
+    { retainedSession: true, requireExistingNativeState: true },
+  ])(
+    "uses admitted Full launch authority without asking for a human decision (%j)",
+    async (flags) => {
+      const workspace = createManagedWorkspaceInvocation(process.cwd());
+      const placement = { ...workspace.placement, ...flags };
+      const request = vi.fn(async () => ({ decision: "deny" as const }));
+      const invokeNode = vi.fn();
+      const invokeNodeWithSessionFull = vi.fn<
+        NonNullable<OpenClawPluginNodeInvokePolicyContext["invokeNodeWithSessionFull"]>
+      >(async ({ createParams }) => {
+        expect(createParams()).toEqual({ placement, authorization: "session-full" });
+        return { ok: true };
+      });
+      await expect(
+        createCodexNodeExecServerInvokePolicy().handle(
+          policyContext(placement, {
+            approvals: { request },
+            invokeNode,
+            invokeNodeWithSessionFull,
+          }),
+        ),
+      ).resolves.toEqual({ ok: true });
+      expect(request).not.toHaveBeenCalled();
+      expect(invokeNode).not.toHaveBeenCalled();
+      expect(invokeNodeWithSessionFull).toHaveBeenCalledOnce();
+    },
+  );
 
   it("checks node-local authorization before starting the pinned process", async () => {
     const frames = createNodeFrames();

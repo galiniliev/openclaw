@@ -25,9 +25,11 @@ import {
   joinWorkerTunnelStops,
   WorkerTunnelOwnerDisconnectedError,
   type WorkerTunnelStopReason,
+  type WorkerTunnelRequest,
 } from "./tunnel-contract.js";
 
 type NodeWorkerWorkspaceBindingIdentity = {
+  initialPlacement?: WorkerTunnelRequest["initialPlacement"];
   environmentId: string;
   ownerEpoch: number;
   sessionId: string;

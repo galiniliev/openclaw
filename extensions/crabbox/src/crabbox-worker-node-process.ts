@@ -10,8 +10,21 @@ import type { CrabboxOperatingSystem } from "./crabbox-worker-profile.js";
 export function createCrabboxNodeProcessRuntime(
   desktopTarget: CrabboxOperatingSystem | undefined,
   leaseId: string,
+  retainedDeviceId?: string,
 ): string {
   return `let nodeExecutable = process.execPath;
+let upgradingRuntime = false;
+const assertRetainedIdentity = (identityCli) => {
+  const identity = spawnSync(process.execPath, [identityCli, "node", "identity", "--json"], { cwd: path.dirname(path.dirname(path.dirname(identityCli))), env: nodeEnv, encoding: "utf8", timeout: 30000, maxBuffer: 65536 });
+  if (identity.status !== 0 || JSON.parse(identity.stdout).deviceId !== ${JSON.stringify(retainedDeviceId)}) throw new Error("Cloud worker retained node identity changed; upgrade refused");
+};
+const previousRuntime = () => {
+  const root = path.join(home, ".openclaw-worker", "node-runtimes");
+  if (!fs.lstatSync(runtimeLink).isSymbolicLink() || fs.realpathSync(root) !== root || fs.realpathSync(stateDir) !== stateDir) throw new Error("Cloud worker predecessor runtime ownership is unavailable");
+  const previous = fs.realpathSync(runtimeLink);
+  if (path.dirname(previous) !== root || !/^[a-f0-9]{64}$/.test(path.basename(previous))) throw new Error("Cloud worker predecessor runtime escapes its canonical root");
+  return previous;
+};
 const desktopTarget = ${JSON.stringify(desktopTarget)};
 ${desktopTarget === "windows/normal" ? createCrabboxWindowsDesktopNodeLauncher() : ""}
   // The watchdog only stops a hung tool; enrollment owns total time. CPU-starved macOS
@@ -85,7 +98,7 @@ ${desktopTarget === "windows/normal" ? createCrabboxWindowsDesktopNodeLauncher()
     const invocation = entry.commandLine.match(/^(?:"([^"]+)"|([^\\s"]+))\\s+(?:"([^"]+)"|([^\\s"]+))(?:\\s|$)/);
     return invocation !== null && (invocation[3] ?? invocation[4]) === cli && fs.realpathSync(invocation[1] ?? invocation[2]) === fs.realpathSync(nodeExecutable) && fs.realpathSync(entry.executablePath) === fs.realpathSync(nodeExecutable);
   };
-  const reuseNodeProcess = (prepareLaunch) => {
+  const reuseNodeProcess = async (prepareLaunch) => {
   const hasPid = mode && fs.existsSync(pidFile);
   if (mode && !hasPid) {
     // The runtime pointer precedes detached launch; a lost PID cannot prove no process survived.
@@ -103,6 +116,33 @@ ${desktopTarget === "windows/normal" ? createCrabboxWindowsDesktopNodeLauncher()
     const pid = Number(pidText);
     let alive = true;
     try { process.kill(pid, 0); } catch (error) { if (error.code !== "ESRCH") throw error; alive = false; }
+    // A verified current live host does not need its runtime pointer repaired.
+    upgradingRuntime = process.platform === "linux" && mode === "resume" && ${Boolean(retainedDeviceId)} && (alive ? fs.realpathSync(path.join("/proc", pidText, "cwd")) !== runtimeDir : fs.realpathSync(runtimeLink) !== runtimeDir);
+    if (upgradingRuntime && !alive) assertRetainedIdentity(path.join(previousRuntime(), "node_modules", "openclaw", "openclaw.mjs"));
+    if (alive && process.platform === "linux" && (mode === "connect" || upgradingRuntime)) {
+      // Fresh setup and idle upgrades must settle the predecessor before activation.
+      // Retire only this lease's proven process group, preserving its private state/workspace.
+      const previous = previousRuntime();
+      const stat = () => {
+        const text = fs.readFileSync(path.join("/proc", pidText, "stat"), "utf8");
+        return text.slice(text.lastIndexOf(")") + 2).trim().split(/\\s+/);
+      };
+      const identity = stat();
+      const args = fs.readFileSync(path.join("/proc", pidText, "cmdline"), "utf8").split("\\0");
+      const env = fs.readFileSync(path.join("/proc", pidText, "environ"), "utf8").split("\\0");
+      const previousCli = path.join(previous, "node_modules", "openclaw", "openclaw.mjs");
+      if (mode === "resume") { assertRetainedIdentity(previousCli); upgradingRuntime = true; }
+      if (Number(identity[2]) !== pid || !identity[19] || fs.statSync(path.join("/proc", pidText)).uid !== process.getuid() || fs.realpathSync(path.join("/proc", pidText, "cwd")) !== previous || !env.includes("OPENCLAW_STATE_DIR=" + stateDir) || !(args[1] === previousCli || ["openclaw", "openclaw-connect", "openclaw-node"].includes(args[0]))) throw new Error("Cloud worker predecessor process identity is unverified");
+      if (stat()[19] !== identity[19]) throw new Error("Cloud worker predecessor process changed before retirement");
+      process.kill(-pid, "SIGTERM");
+      const deadline = Date.now() + 15000;
+      for (;;) {
+        try { process.kill(-pid, 0); }
+        catch (error) { if (error.code !== "ESRCH") throw error; alive = false; break; }
+        if (Date.now() >= deadline) throw new Error("Cloud worker predecessor process group did not exit; enrollment held");
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
     if (alive) {
       let verified = false;
       if (process.platform === "linux") {
@@ -145,12 +185,13 @@ ${desktopTarget === "windows/normal" ? createCrabboxWindowsDesktopNodeLauncher()
   }
   // Keep the positively dead launch receipt if prerequisite preparation fails.
   // A retry must not mistake that known outcome for an unknown missing PID.
-  prepareLaunch?.();
+  await prepareLaunch?.();
+  if (upgradingRuntime) assertRetainedIdentity(cli);
   if (hasPid) fs.unlinkSync(pidFile);
   return false;
   };
   const launchNodeProcess = async () => {
-  const args = mode === "connect" ? ["connect", "--target-file", setupFile] : ["node", "run"];
+  const args = mode === "connect" ? ["connect", "--target-file", setupFile, "--fresh-bootstrap"] : ["node", "run"];
   setPhase("node launch");
   const logPath = path.join(stateDir, "node.log");
   const log = process.platform === "win32" ? undefined : fs.openSync(logPath, "a", 0o600);

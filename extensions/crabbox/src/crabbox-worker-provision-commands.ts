@@ -429,9 +429,15 @@ export async function prepareProvisionDesktop(
 }
 
 export async function failProvisionAfterCleanup(
-  params: LeaseCommandContext & { stopLease: (context: LeaseCommandContext) => Promise<void> },
+  params: LeaseCommandContext & {
+    stopLease: (context: LeaseCommandContext) => Promise<void>;
+    preserveRetainedLease?: boolean;
+  },
   provisionError: unknown,
 ): Promise<never> {
+  if (params.preserveRetainedLease) {
+    throw provisionError;
+  }
   try {
     await params.stopLease(params);
   } catch (cleanupError) {

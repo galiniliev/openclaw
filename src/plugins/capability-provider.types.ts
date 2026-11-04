@@ -550,18 +550,33 @@ export type WorkerProvider = {
       request: WorkerRetainedLeaseRequest & { operationId: string },
     ): Promise<WorkerRetainedLeaseReceipt>;
   };
-  /** Resume only a confirmed-dead enrolled node on this existing lease; never pair or provision. */
-  resumeNode?: (request: {
-    leaseId: string;
-    profile: WorkerProfile;
-    deviceId: string;
-    nodeBootstrapSha256: string;
-    openclawVersion: string;
-    /** Current core-owned Linux prerequisite, used only before a confirmed-dead node launches. */
-    linuxToolchainSetup?: string;
-    signal: AbortSignal;
-    assertCurrent: () => void;
-  }) => Promise<void>;
+  /** Resume the enrolled node or upgrade its idle runtime on this lease; never pair or provision. */
+  resumeNode?: (
+    request: {
+      leaseId: string;
+      profile: WorkerProfile;
+      deviceId: string;
+      signal: AbortSignal;
+      assertCurrent: () => void;
+    } & (
+      | {
+          /** Rebuild cleanup transport from the enrolled runtime; no installer or old input. */
+          retainedRuntimeOnly: true;
+          nodeBootstrapSha256?: never;
+          openclawVersion?: never;
+          linuxToolchainSetup?: never;
+          runtime?: never;
+        }
+      | {
+          retainedRuntimeOnly?: never;
+          nodeBootstrapSha256: string;
+          openclawVersion: string;
+          /** Used only before a confirmed-dead node launches. */
+          linuxToolchainSetup?: string;
+          runtime?: WorkerNodeRuntimePreparation;
+        }
+    ),
+  ) => Promise<void>;
   /**
    * Resolves provider-owned dynamic identities. When absent, the gateway uses its generic
    * SecretRef resolver; when present, failures are authoritative and never fall back.

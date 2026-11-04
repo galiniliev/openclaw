@@ -1,5 +1,7 @@
+import { isDeepStrictEqual } from "node:util";
 import type { DevicePlacementRequirement } from "../../agents/harness/types.js";
 import { getRuntimeConfig } from "../../config/config.js";
+import { getSessionRepositoryWorkspaceStore } from "../../state/session-repository-workspaces.js";
 import { DEVICE_FOLDER_MANIFEST_REF } from "../../worker/device-folder.js";
 import {
   sameWorkerBuild,
@@ -43,6 +45,14 @@ type WorkerNodePlacementAdmission = {
   node: NodeWorkerSupervisorNodeProof;
   requirement: DevicePlacementRequirement;
 };
+export type WorkerInitialNodeReadiness = (input: {
+  placement: Extract<WorkerDispatchPlacement, { state: "provisioning" }>;
+  ownerEpoch: number;
+  leaseId: string;
+  nodeDeviceId: string;
+  signal?: AbortSignal;
+  assertCurrent: WorkerPlacementAuthorization;
+}) => Promise<void>;
 
 export function createWorkerPlacementDispatchStartup(options: {
   placements: WorkerDispatchPlacementStore;
@@ -55,6 +65,7 @@ export function createWorkerPlacementDispatchStartup(options: {
   resolveGitAuthor?: (agentId: string) => { name?: string; email?: string } | undefined;
   resolveDevicePlacementRequirement?: WorkerDevicePlacementRequirementResolver;
   isCurrentNodePlacement?: WorkerNodePlacementAuthority;
+  waitForInitialNode?: WorkerInitialNodeReadiness;
 }) {
   const { environments, placements } = options;
 
@@ -104,8 +115,7 @@ export function createWorkerPlacementDispatchStartup(options: {
     if (!eligibility.ok) {
       throw new DevicePlacementUnavailableError(deviceId, eligibility.error);
     }
-    // Workspace preparation consumes no worker slot. Keep identity and commands live;
-    // the node's launch owner admits the eventual turn against physical capacity.
+    // Workspace preparation consumes no slot; launch admits turns against live node capacity.
     return {
       node: eligibility.node,
       requirement: { ...requirement, consumesWorkerSlot: false },
@@ -217,21 +227,78 @@ export function createWorkerPlacementDispatchStartup(options: {
       throw new Error("Device folders require an OpenClaw worker on their original paired device");
     }
     params.signal?.throwIfAborted();
-    const provisioned = requireProvisionedEnvironment(
+    let provisioned = requireProvisionedEnvironment(
       params.environment,
       params.expectedEnvironmentId,
       request.executionMode,
       environments,
+      request,
+      params.workspace.kind === "repository"
+        ? params.workspace.repository.diskAuthority
+        : undefined,
     );
-    const admittedNode =
-      params.admittedNode ?? (await requireNodePlacementEligibility(request, params.environment));
-    // Provisioning and transport setup yield; revoked callers must not attach or upload.
-    params.signal?.throwIfAborted();
-    params.authorize?.();
     const assertRequestCurrent = () => {
       params.signal?.throwIfAborted();
       params.authorize?.();
     };
+    if (
+      params.environment.state === "attached" &&
+      params.environment.nodeDeviceId &&
+      params.workspace.kind === "repository" &&
+      params.workspace.repository.diskAuthority
+    ) {
+      if (!options.waitForInitialNode) {
+        throw new Error("Retained initial node readiness owner is unavailable");
+      }
+      const initial = params.placement;
+      const disk = params.workspace.repository.diskAuthority;
+      const source = await getSessionRepositoryWorkspaceStore().prepare(
+        params.workspace.repository.workspaceId,
+      );
+      const assertInitialCurrent = () => {
+        assertRequestCurrent();
+        source.assertSourceCurrent();
+        const live = placements.get(request.sessionId);
+        if (
+          live?.state !== "provisioning" ||
+          live.generation !== initial.generation ||
+          live.environmentId !== provisioned.environmentId ||
+          live.agentId !== request.agentId ||
+          live.sessionKey !== request.sessionKey ||
+          live.turnClaim ||
+          !isDeepStrictEqual(source.current()?.diskAuthority, disk)
+        ) {
+          throw new Error("Retained initial node readiness lost its dispatch or disk owner");
+        }
+      };
+      assertInitialCurrent();
+      await options.waitForInitialNode({
+        placement: initial,
+        ownerEpoch: provisioned.ownerEpoch,
+        leaseId: disk.identity.leaseId,
+        nodeDeviceId: params.environment.nodeDeviceId,
+        signal: params.signal,
+        assertCurrent: assertInitialCurrent,
+      });
+      assertInitialCurrent();
+      const refreshed = environments.get(provisioned.environmentId);
+      if (!refreshed) {
+        throw new Error("Retained initial runtime lost its environment after readiness");
+      }
+      params.environment = refreshed;
+      provisioned = requireProvisionedEnvironment(
+        refreshed,
+        params.expectedEnvironmentId,
+        request.executionMode,
+        environments,
+        request,
+        disk,
+      );
+    }
+    const admittedNode =
+      params.admittedNode ?? (await requireNodePlacementEligibility(request, params.environment));
+    // Provisioning and transport setup yield; revoked callers must not attach or upload.
+    assertRequestCurrent();
     let placement = await placements.transition(
       {
         sessionId: request.sessionId,
@@ -272,28 +339,31 @@ export function createWorkerPlacementDispatchStartup(options: {
       }
     };
     assertAttachmentCurrent();
-    const credential = await environments.attachSession({
-      environmentId: provisioned.environmentId,
-      ownerEpoch: provisioned.ownerEpoch,
-      sessionId: request.sessionId,
-      assertCurrent: assertAttachmentCurrent,
-      ...(params.environment.preparation
-        ? {
-            placementBinding: {
-              sessionId: request.sessionId,
-              sessionKey: request.sessionKey,
-              agentId: request.agentId,
-              executionMode: request.executionMode,
-              generation: placement.generation,
-              preparationKey: params.environment.preparation.key,
-              assertCurrent: assertAttachmentCurrent,
-            },
-          }
-        : {}),
-    });
+    // A verified failed initial setup still owns its attachment and credential.
+    const { ownerEpoch } =
+      params.environment.state === "attached"
+        ? params.environment
+        : await environments.attachSession({
+            environmentId: provisioned.environmentId,
+            ownerEpoch: provisioned.ownerEpoch,
+            sessionId: request.sessionId,
+            assertCurrent: assertAttachmentCurrent,
+            ...(params.environment.preparation
+              ? {
+                  placementBinding: {
+                    sessionId: request.sessionId,
+                    sessionKey: request.sessionKey,
+                    agentId: request.agentId,
+                    executionMode: request.executionMode,
+                    generation: placement.generation,
+                    preparationKey: params.environment.preparation.key,
+                    assertCurrent: assertAttachmentCurrent,
+                  },
+                }
+              : {}),
+          });
     params.signal?.throwIfAborted();
     params.authorize?.();
-    const ownerEpoch = credential.ownerEpoch;
     let activated = false;
     let activationIndeterminate = false;
     let stoppingTunnel: Promise<void> | undefined;
@@ -305,6 +375,15 @@ export function createWorkerPlacementDispatchStartup(options: {
     try {
       params.markPhase?.("tunnel");
       const tunnel = await environments.startTunnel({
+        ...(params.workspace.kind === "repository" && params.workspace.repository.diskAuthority
+          ? {
+              initialPlacement: {
+                generation: syncingPlacement.generation,
+                agentId: request.agentId,
+                sessionKey: request.sessionKey,
+              },
+            }
+          : {}),
         environmentId: provisioned.environmentId,
         ownerEpoch,
         authorize: assertAttachmentCurrent,
@@ -333,7 +412,12 @@ export function createWorkerPlacementDispatchStartup(options: {
         assertAttachmentCurrent();
         requireAttachedEnvironment();
       };
-      const preparation = readWorkerProjectPreparation(params.environment.profileSnapshot.project);
+      const preparation =
+        params.workspace.kind === "repository" &&
+        params.workspace.repository.diskAuthority &&
+        params.environment.state !== "attached"
+          ? undefined
+          : readWorkerProjectPreparation(params.environment.profileSnapshot.project);
       let lifecycleHomeDir: string | undefined;
       let assertPreparedBindingCurrent: (() => void) | undefined;
       let preparedRepository: Parameters<
@@ -439,8 +523,7 @@ export function createWorkerPlacementDispatchStartup(options: {
             ? (command) =>
                 runProjectLifecycleCommand(provisioned.environmentId, ownerEpoch, command)
             : undefined,
-          // A completed activation is the existing durable witness. An interrupted
-          // first binding retries declared setup; commands should be idempotent.
+          // Retry setup only before first activation; declared commands must be idempotent.
           postCreate: params.environment.lastActivatedAtMs === null,
           assertCurrent: assertWorkspaceCurrent,
           signal: params.signal,

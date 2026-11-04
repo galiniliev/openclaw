@@ -10,6 +10,7 @@ import { selectDelegatedToolPolicy } from "../../agents/delegated-tool-policy.js
 import { resolveSenderRestrictedSpawnError } from "../../agents/spawn-requester-policy.js";
 import { buildSubagentExecutionSessionSpawnContext } from "../../agents/subagents/spawn/subagent-spawn-execution-identity.js";
 import { jsonResult, type AnyAgentTool } from "../../agents/tools/common.js";
+import { getGatewayToolCallerIdentity } from "../../agents/tools/gateway-caller-context.js";
 import {
   callAgentToolGatewayRequest,
   callInProcessGatewayToolWithCreation,
@@ -25,8 +26,9 @@ import { createSessionsSendTool } from "../../agents/tools/sessions-send-tool.js
 import { createSessionsSpawnTool } from "../../agents/tools/sessions-spawn-tool.js";
 import { DEFAULT_SUBAGENT_MAX_SPAWN_DEPTH } from "../../config/agent-limits.js";
 import { getRuntimeConfig } from "../../config/config.js";
-import { sha256Base64Url, sha256HexPrefixCore } from "../../infra/crypto-digest.js";
+import { sha256Base64Url, sha256Hex, sha256HexPrefixCore } from "../../infra/crypto-digest.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
+import { repositoryDispatchCredentialReader } from "../repository-dispatch.js";
 import type { GatewayContextResolver } from "../server-methods/types.js";
 import type { WorkerConnectionIdentity } from "./connection-identity.js";
 import { resolveWorkerPlacementDestination } from "./placement-destination.js";
@@ -340,17 +342,23 @@ export function createWorkerSessionToolExecutor(
                   // Session creation may already own setup. Wait for it, then verify inheritance.
                   await params.waitForInitialPlacement(childPlacement, operation.signal);
                 } else {
-                  await params.dispatchChild(
-                    {
-                      sessionId: childSessionId,
-                      sessionKey: operation.childSessionKey,
-                      agentId: targetAgentId,
-                      ...destination.value,
-                      executionMode: "worker-turn",
-                    },
-                    undefined,
-                    assertSource,
-                  );
+                  const request: Parameters<WorkerPlacementDispatchContract["dispatch"]>[0] = {
+                    sessionId: childSessionId,
+                    sessionKey: operation.childSessionKey,
+                    agentId: targetAgentId,
+                    ...destination.value,
+                    executionMode: "worker-turn",
+                  };
+                  if (loaded.entry?.repositoryWorkspaceId) {
+                    request.readNativeCredential = repositoryDispatchCredentialReader({
+                      ...request,
+                      client: undefined,
+                      operatorAuthority: getGatewayToolCallerIdentity()?.operatorAuthority,
+                      requestDigest: sha256Hex(JSON.stringify(request)),
+                      assertCurrent: assertSource,
+                    });
+                  }
+                  await params.dispatchChild(request, undefined, assertSource);
                 }
               } catch (error) {
                 try {

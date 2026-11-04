@@ -22,6 +22,7 @@ import { createPlacementRecoveryActions } from "./placement-dispatch-recovery.js
 import {
   createWorkerPlacementDispatchStartup,
   type WorkerDevicePlacementRequirementResolver,
+  type WorkerInitialNodeReadiness,
 } from "./placement-dispatch-startup.js";
 import { createWorkerPlacementMoveAbandonment } from "./placement-move-abandon.js";
 import {
@@ -103,6 +104,7 @@ type WorkerPlacementDispatchOptions = WorkerPlacementReclaimBarriers &
     resolveGitAuthor?: (agentId: string) => { name?: string; email?: string } | undefined;
     resolveDevicePlacementRequirement?: WorkerDevicePlacementRequirementResolver;
     isCurrentNodePlacement?: WorkerNodePlacementAuthority;
+    waitForInitialNode?: WorkerInitialNodeReadiness;
   };
 
 export function createWorkerPlacementDispatchService(options: WorkerPlacementDispatchOptions) {
@@ -359,6 +361,9 @@ export function createWorkerPlacementDispatchService(options: WorkerPlacementDis
         request.idempotencyKey ?? `session-dispatch:${request.sessionId}:${placement.generation}`;
       // Select the reserve before assigning a cold environment identity.
       const expectedEnvironmentId =
+        (workspace.kind === "repository"
+          ? workspace.repository.diskAuthority?.environmentId
+          : undefined) ??
         prepared?.environment.environmentId ??
         deriveEnvironmentIntent(idempotencyKey).environmentId;
       placement =
@@ -387,6 +392,9 @@ export function createWorkerPlacementDispatchService(options: WorkerPlacementDis
               sessionKey: request.sessionKey,
               agentId: request.agentId,
             },
+            ...(workspace.kind === "repository" && workspace.repository.diskAuthority
+              ? { retainedWorkspaceAuthority: workspace.repository.diskAuthority }
+              : {}),
             idempotencyKey,
             machineClass: request.machineClass,
             executionMode: request.executionMode,

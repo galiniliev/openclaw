@@ -1,0 +1,2 @@
+# Same-version receiver activation before both real claim modes, current-turn no-op, missing metadata/reconnect preservation and current Node handshake advertisement.
+76

@@ -1,5 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { sha256Hex } from "@openclaw/normalization-core/node-crypto";
+import {
+  assertAdmittedRunOperatorAuthority,
+  type AdmittedRunOperatorAuthority,
+} from "../agents/admitted-run-context.js";
 import type { GitHubCredentialReader } from "../agents/github-credential-reader.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { getRepositoryIntegration } from "../plugins/repository-integration-runtime.js";
@@ -213,6 +217,7 @@ export function assertRepositoryDispatchAdmission(
 /** A dispatch reader retains its original actor and exact request identity. */
 export function repositoryDispatchCredentialReader(params: {
   client: GatewayClient | null | undefined;
+  operatorAuthority?: AdmittedRunOperatorAuthority;
   agentId: string;
   sessionId: string;
   sessionKey: string;
@@ -255,6 +260,7 @@ export function repositoryProjectCredentialReader(params: {
 
 function repositoryCredentialReader(params: {
   client: GatewayClient | null | undefined;
+  operatorAuthority?: AdmittedRunOperatorAuthority;
   claim: RepositoryOperation;
   assertCurrent: () => void;
   hasCurrentClientAuthority?: () => boolean;
@@ -262,7 +268,26 @@ function repositoryCredentialReader(params: {
   if (!getRepositoryIntegration()) {
     return undefined;
   }
-  const actor = captureRepositoryClientActor(params);
+  const operator = params.operatorAuthority;
+  if (operator) {
+    assertAdmittedRunOperatorAuthority(operator);
+  }
+  // Worker children inherit the admitted source, never a synthetic human connection.
+  const actor: RepositoryActor = operator
+    ? Object.freeze({
+        profileId: operator.profileId,
+        credentialSource: operator.repositoryCredentialSource,
+        authorization: Object.freeze({ kind: "admitted-operation" as const }),
+        sessionKey:
+          params.claim.binding.kind === "connection"
+            ? params.claim.binding.connectionId
+            : params.claim.binding.sessionKey,
+        assertCurrent: () => {
+          params.assertCurrent();
+          operator.assertCurrent();
+        },
+      })
+    : captureRepositoryClientActor(params);
   let assertPolicyCurrent: (() => void) | undefined;
   const assertReaderCurrent = () => {
     actor.assertCurrent();

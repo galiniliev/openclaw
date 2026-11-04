@@ -19,12 +19,21 @@ import {
   resetGlobalHookRunner,
 } from "../../plugins/hook-runner-global.js";
 import { createMockPluginRegistry } from "../../plugins/hooks.test-helpers.js";
+import type { RepositoryIntegration } from "../../plugins/repository-integration.types.js";
 import { readAgentRuntimeExecutionLineage } from "../agent-runtime-execution-lineage.js";
 import type { WorkerConnectionIdentity } from "./connection-identity.js";
 import { bindWorkerTurnOwner } from "./placement-turn-claim-events.js";
 import { registerWorkerDelegationPolicyTests } from "./worker-session-tool-executor.delegation.suite.js";
 import { registerWorkerGatewayToolExecutionTests } from "./worker-session-tool-executor.gateway-tools.suite.js";
+import { registerWorkerRepositorySpawnTests } from "./worker-session-tool-executor.repository.suite.js";
 import { registerWorkerSpawnStartupTests } from "./worker-session-tool-executor.startup.suite.js";
+const repositoryPolicy = vi.hoisted(() => ({
+  current: undefined as RepositoryIntegration | undefined,
+}));
+vi.mock("../../plugins/repository-integration-runtime.js", async (original) => ({
+  ...(await original<typeof import("../../plugins/repository-integration-runtime.js")>()),
+  getRepositoryIntegration: () => repositoryPolicy.current,
+}));
 const {
   workerSessionToolTestMocks,
   SOURCE,
@@ -857,6 +866,8 @@ describe.each([
     }
   });
 });
+
+registerWorkerRepositorySpawnTests(fixtureMocks, repositoryPolicy);
 
 registerWorkerSpawnStartupTests(fixtureMocks);
 

@@ -19,13 +19,13 @@ export type WorkerOwnedPendingPlacement = Extract<
   { state: "active" | "draining" }
 >;
 
-/** Retained compute and the saved node must be available before native result cleanup. */
+/** Reconnect and join native cleanup before capturing or accepting a retained result. */
 export async function prepareRetainedResultNode(
   deps: Pick<PlacementRecoveryDeps, "environments" | "hasCurrentRunner" | "waitForRecoveryNode">,
   placement: WorkerOwnedPendingPlacement,
   turnClaim: WorkerSessionTurnClaim,
   assertCurrent: () => void,
-): Promise<boolean> {
+): Promise<void> {
   const environment = deps.environments.get(placement.environmentId);
   if (
     (isWorkerReclaimWorkspaceResult(turnClaim) || environment?.retention) &&
@@ -33,7 +33,7 @@ export async function prepareRetainedResultNode(
     deps.hasCurrentRunner?.(environment.nodeDeviceId) === false
   ) {
     if (!environment.retention || !deps.waitForRecoveryNode) {
-      return false;
+      throw new Error("Retained node recovery is unavailable; native cleanup is held");
     }
     assertCurrent();
     // Reconnect only for the handed-off result, never revive its input authority.
@@ -41,7 +41,12 @@ export async function prepareRetainedResultNode(
     await deps.waitForRecoveryNode(placement, assertCurrent);
     assertCurrent();
   }
-  return true;
+  if (environment?.retention) {
+    assertCurrent();
+    deps.environments.fenceWorkerTurnForRecovery(turnClaim);
+    await deps.environments.stopTunnel(placement.environmentId, placement.activeOwnerEpoch);
+  }
+  assertCurrent();
 }
 
 /** A persisted disk result is distinct from every legacy mirror result, even after restart. */

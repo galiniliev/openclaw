@@ -1,0 +1,2 @@
+# Exact repo child admission from host-issued live parent source; preserve once-only task, absence/revocation refusal and nonrepo startup. Counted test/support growth only; suite fixture retained in owning registered test.
+14

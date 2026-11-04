@@ -370,6 +370,58 @@ describe("worker node enrollment", () => {
     expect(transfer.authorize(request)).toBeUndefined();
   });
 
+  it("grants the current runtime to an attached recovery owner and revokes it with that owner", async () => {
+    let record = await createProvisioning("original-device");
+    record = await store.transition({
+      environmentId: record.environmentId,
+      from: "provisioning",
+      to: "ready",
+      patch: {
+        leaseId: "original-lease",
+        sharedHost: false,
+        bootstrapReceipt: {
+          bundleHash: "b".repeat(64),
+          openclawVersion: "2026.10.6",
+          protocolFeatures: [],
+        },
+        credential: {
+          credentialHash: createHash("sha256").update("ready").digest("base64url"),
+          sessionId: null,
+          rpcSetVersion: 1,
+          expiresAtMs: 10000,
+        },
+      },
+    });
+    record = await store.transition({
+      environmentId: record.environmentId,
+      from: "ready",
+      to: "attached",
+      patch: {
+        attachedSessionIds: ["original-session"],
+        credential: {
+          credentialHash: createHash("sha256").update("attached").digest("base64url"),
+          sessionId: "original-session",
+          rpcSetVersion: 1,
+          expiresAtMs: 10000,
+        },
+      },
+    });
+    const manager = createManager();
+    let current = true;
+    const runtime = await manager.prepareRuntime(record, bundle(), undefined, () => {
+      if (!current) {
+        throw new Error("Recovery owner closed");
+      }
+    });
+    const request = downloadRequest(runtime.nodeBootstrap);
+    expect(transfer.authorize(request)).toBeDefined();
+    expect(store.get(record.environmentId)).toEqual(record);
+    current = false;
+    expect(transfer.authorize(request)).toBeUndefined();
+    manager.closeRuntime(runtime);
+    expect(store.get(record.environmentId)).toEqual(record);
+  });
+
   it("sizes grants and download authority for the actual artifacts", async () => {
     const record = await createProvisioning();
     let transferNow = 0;

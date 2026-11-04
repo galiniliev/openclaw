@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Selectable, Updateable } from "kysely";
 import { REPOSITORY_BRANCH_PREFIX_PATTERN } from "../config/repository-branch-prefix.js";
+import { getRequired as getRequiredWorkerPlacement } from "../gateway/worker-environments/placement-row-codec.js";
+import { getRequiredWorkerEnvironment } from "../gateway/worker-environments/store-row-codec.js";
 import {
   createSqliteQueryCache,
   executeSqliteQueryTakeFirstSync,
@@ -23,6 +25,7 @@ import type {
   RepositoryWorkspaceMutation,
   RepositoryWorkspaceMutationResult,
   RepositoryWorkspaceOwner,
+  RepositoryWorkspaceRetainedOwner,
   SessionRepositoryWorkspaceRecord,
 } from "./session-repository-workspaces.types.js";
 
@@ -236,6 +239,66 @@ export function bindSessionRepositoryWorkspaceBaseInDatabase(
       base_commit: input.baseCommit,
       ...(input.baseManifestHash ? { base_manifest_hash: input.baseManifestHash } : {}),
     };
+  });
+}
+
+/** Fresh node admission may transfer only the execution epoch of the same private disk. */
+export function rebindSessionRepositoryWorkspaceOwnerInDatabase(
+  db: EngineConnection,
+  input: RepositoryWorkspaceRetainedOwner,
+  nowMs: number,
+): RepositoryWorkspaceMutationResult {
+  const previous = input.expectedDiskAuthority;
+  const next = input.diskAuthority;
+  if (
+    next.ownerEpoch <= previous.ownerEpoch ||
+    !isDeepStrictEqual({ ...previous, ownerEpoch: next.ownerEpoch }, next)
+  ) {
+    throw new Error("Retained workspace reattachment may change only its fresh owner epoch");
+  }
+  return mutate(db, input, nowMs, (workspace) => {
+    const environment = getRequiredWorkerEnvironment(db, previous.environmentId);
+    const placement = getRequiredWorkerPlacement(db, previous.sessionId);
+    const retention = environment.retention;
+    const receipt = retention?.receipt;
+    const expiresAt = receipt ? Date.parse(receipt.computeWindow.expiresAt) : Number.NaN;
+    if (
+      !isDeepStrictEqual(workspace.diskAuthority, previous) ||
+      environment.state !== "attached" ||
+      environment.ownerEpoch !== next.ownerEpoch ||
+      environment.leaseId !== next.identity.leaseId ||
+      environment.destroyRequestedAtMs !== null ||
+      environment.sharedHost !== false ||
+      !environment.nodeDeviceId ||
+      environment.attachedSessionIds.length !== 1 ||
+      environment.attachedSessionIds[0] !== previous.sessionId ||
+      !environment.bootstrapReceipt ||
+      retention?.ownerBinding !== next.ownerBinding ||
+      retention.owner.agentId !== workspace.agentId ||
+      retention.owner.sessionKey !== workspace.sessionKey ||
+      retention.owner.sessionId !== previous.sessionId ||
+      retention.operation !== null ||
+      retention.desiredState !== "running" ||
+      !receipt?.policyVerified ||
+      receipt.ownerBinding !== next.ownerBinding ||
+      !isDeepStrictEqual(receipt.identity, next.identity) ||
+      receipt.observedState.toLowerCase() !== "running" ||
+      receipt.desiredState !== "running" ||
+      receipt.operation?.phase === "pending" ||
+      receipt.stopPending ||
+      receipt.computeWindow.state !== "active" ||
+      !Number.isFinite(expiresAt) ||
+      expiresAt <= nowMs ||
+      placement.state !== "syncing" ||
+      placement.generation !== input.placementGeneration ||
+      placement.environmentId !== next.environmentId ||
+      placement.sessionKey !== workspace.sessionKey ||
+      placement.agentId !== workspace.agentId ||
+      placement.turnClaim !== null
+    ) {
+      throw new Error("Original retained disk has not established its fresh exact node owner");
+    }
+    return { disk_authority_json: JSON.stringify(next) };
   });
 }
 

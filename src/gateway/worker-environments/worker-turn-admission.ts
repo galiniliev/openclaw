@@ -39,6 +39,7 @@ import {
   matchesWorkerPlacementTarget,
 } from "./placement-target.js";
 import { ActiveTurnClaimError } from "./placement-turn-claims.js";
+import { WorkerTurnClaimReleaseTimeoutError } from "./placement-turn-wait.js";
 import { isCurrentWorkerWorkspacePendingResultOwner } from "./placement-workspace-result.js";
 import type { WorkerRuntimeRefreshInFlight } from "./provider-runtime-refresh.js";
 import type { WorkerPlacementRedispatch } from "./service-contract.js";
@@ -214,13 +215,9 @@ export function createRequiredWorkerTurnAdmission(options: WorkerTurnAdmissionOp
         signal.throwIfAborted();
         assertCurrent();
         environment = options.environments.get(placement.environmentId);
-        if (
-          placement.executionMode === "remote-exec" &&
-          environment?.state === "attached" &&
-          environment.nodeDeviceId
-        ) {
-          // A running lease does not attest its supervisor connection. Wait before
-          // local inference takes custody, so reconnect never replays the failed input.
+        if (environment?.state === "attached" && environment.nodeDeviceId) {
+          // Qualify the node before either execution mode claims the fresh input.
+          // Legacy host upgrades require this idle placement authority.
           try {
             await options.waitForAdmissionNode({ placement, signal, assertCurrent });
           } catch (error) {
@@ -362,12 +359,23 @@ export async function waitForPendingWorkerResult(params: {
   sessionId: string;
   signal?: AbortSignal;
 }): Promise<void> {
-  // Healthy result reconciliation owns the turn until its durable claim closes; timing out would
-  // surface a false resend instruction. Caller cancellation remains abortable.
-  await params.placements.waitForTurnClaimRelease(
-    params.sessionId,
-    params.signal ? { signal: params.signal } : {},
-  );
+  // Bound only the foreground wait. Recovery retains the claim, result and old-input fence.
+  try {
+    await params.placements.waitForTurnClaimRelease(params.sessionId, {
+      timeoutMs: WORKER_ADMISSION_DEADLINE_MS,
+      ...(params.signal ? { signal: params.signal } : {}),
+    });
+  } catch (error) {
+    if (!(error instanceof WorkerTurnClaimReleaseTimeoutError)) {
+      throw error;
+    }
+    throw new Error(
+      "Workspace recovery did not finish within 120 seconds. " +
+        "Previous worker result and workspace are retained; recovery continues. " +
+        "Inspect the cloud worker recovery error before retrying. This request was not sent to the worker.",
+      { cause: error },
+    );
+  }
   // Restart clears local claims without discarding durable results. A claimless result cannot
   // make progress through this wait; keep its fence and let recovery retain control of the files.
   const facts = await params.placements.readProjection([params.sessionId], { current: true });

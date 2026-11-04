@@ -7,6 +7,7 @@ import {
   type WorkerProvider,
 } from "../../plugins/types.js";
 import { sessionChanges } from "../../sessions/session-row-changes.js";
+import type { RetainedWorkspaceAuthority } from "../../state/retained-workspace-authority.js";
 import { sameWorkerBuild } from "../../worker/worker-build-identity.js";
 import { SessionMutationAuthorizationChangedError } from "../session-mutation-authorization-error.js";
 import { MAX_NODE_BOOTSTRAP_TIMEOUT_MS } from "./bootstrap-timeouts.js";
@@ -104,8 +105,6 @@ export function createWorkerProviderLifecycle(
     finishProvenDestroy,
     finishDestroy,
   });
-
-  const machineCatalog = createWorkerMachineCatalog(options);
 
   const expirePrepared = async (record: WorkerEnvironmentRecord) =>
     record.preparation?.consumedAtMs === null && record.preparation.expiresAtMs <= now()
@@ -330,8 +329,9 @@ export function createWorkerProviderLifecycle(
         (error instanceof WorkerEnvironmentServiceError && error.code === "invalid_profile");
       // A current refusal cannot disprove allocation by an earlier attempt.
       const terminalFailure =
-        record.state === "requested" ||
-        (provisioningTransition !== undefined && preparationComplete && permanent);
+        !record.retention?.receipt &&
+        (record.state === "requested" ||
+          (provisioningTransition !== undefined && preparationComplete && permanent));
       await (terminalFailure
         ? move(record, "failed", { lastError: detail })
         : saveError(record, error));
@@ -426,11 +426,12 @@ export function createWorkerProviderLifecycle(
     retainProviderSettlement?: (settled: Promise<void>) => void,
     beforeProvision?: () => void,
     repositorySource?: WorkerProviderRepositorySource,
+    originalDisk?: RetainedWorkspaceAuthority,
   ) => {
     const workSignal = signal
       ? AbortSignal.any([options.ownerSignal, signal])
       : options.ownerSignal;
-    const pending = await expirePrepared(record);
+    let pending = await expirePrepared(record);
     if (pending.destroyRequestedAtMs !== null) {
       return finishDestroy(pending, provider);
     }
@@ -443,8 +444,15 @@ export function createWorkerProviderLifecycle(
     }
     try {
       beforeProvision?.();
+      if (originalDisk) {
+        pending = await retained.resumeForProvision(pending, originalDisk, workSignal, () => {
+          cancellation?.assertActive();
+          beforeProvision?.();
+          requireCurrentOwner(pending);
+        });
+      }
       const preparedNode = await nodeProvisioning.prepare(
-        record,
+        pending,
         provider,
         workSignal,
         beforeProvision,
@@ -718,7 +726,7 @@ export function createWorkerProviderLifecycle(
     destroy,
     reclaim,
     identityResolverFor,
-    ...machineCatalog,
+    ...createWorkerMachineCatalog(options),
     providerFor,
     reconcileRecord,
     inspectTurnLease: (request: Parameters<typeof inspectTurnLease>[0]) =>
@@ -726,6 +734,7 @@ export function createWorkerProviderLifecycle(
     pauseRetained: (request: Parameters<typeof retained.pauseCurrent>[0]) =>
       options.withLock(request.environmentId, () => retained.pauseCurrent(request)),
     resumeNode: runtimeRefresher.resumeCurrentNode,
+    refreshInitialRuntime: runtimeRefresher.refreshInitialRuntime,
     readRuntimeRefresh: runtimeRefresher.read,
   };
 }

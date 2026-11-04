@@ -1,0 +1,2 @@
+# Declared retained flags through real worker transport, policy and receiver; preserve required-state refusal and unknown/type/identity/Full controls.
+201
