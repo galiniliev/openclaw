@@ -153,7 +153,7 @@ it.each([
     },
     ...createRepositoryPublicationPreparation({
       placements,
-      environments: recovery.environments,
+      environments: { ...recovery.environments, inspectTurnLease: vi.fn() },
       ensurePlacement: (request) => coordinated.ensurePlacement(request),
       resolveDevicePlacementRequirement: async () => ({
         requiredNodeCommands: [],

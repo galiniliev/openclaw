@@ -108,6 +108,7 @@ async function prepareRepositoryPublicationWorker(params: {
 async function refreshRepositoryPublicationRuntime(params: {
   placement: Extract<WorkerSessionPlacementRecord, { state: "active" }>;
   placements: Pick<WorkerSessionPlacementStore, "get" | "prepareRuntimeRefresh">;
+  environments: Pick<WorkerEnvironmentService, "get" | "inspectTurnLease">;
   assertCurrent: () => void;
   waitForNode: (input: {
     placement: Extract<WorkerSessionPlacementRecord, { state: "active" }>;
@@ -135,12 +136,30 @@ async function refreshRepositoryPublicationRuntime(params: {
   };
   try {
     assertCurrent();
+    const signal = AbortSignal.any([
+      getGatewayRestartDrainSignal(),
+      AbortSignal.timeout(WORKER_ADMISSION_DEADLINE_MS),
+    ]);
+    const environment = params.environments.get(params.placement.environmentId);
+    if (environment?.retention) {
+      if (!environment.leaseId) {
+        throw new GitHubPublicationRecoveryPendingError(
+          "Publication is waiting for its retained worker lease; retry the same request after worker recovery.",
+        );
+      }
+      // Node bootstrap needs the same finite compute admission as a fresh turn.
+      await params.environments.inspectTurnLease({
+        environmentId: params.placement.environmentId,
+        ownerEpoch: params.placement.activeOwnerEpoch,
+        leaseId: environment.leaseId,
+        signal,
+        assertCurrent,
+      });
+      assertCurrent();
+    }
     await params.waitForNode({
       placement: params.placement,
-      signal: AbortSignal.any([
-        getGatewayRestartDrainSignal(),
-        AbortSignal.timeout(WORKER_ADMISSION_DEADLINE_MS),
-      ]),
+      signal,
       assertCurrent,
     });
     assertCurrent();

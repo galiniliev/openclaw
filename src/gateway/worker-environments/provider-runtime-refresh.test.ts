@@ -2,9 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import type { WorkerAdmissionHandshake } from "../../../packages/gateway-protocol/src/schema/worker-admission.js";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { NODE_WORKER_ENVIRONMENT_STOP_COMMAND } from "../../infra/node-commands.js";
-import type { WorkerSessionDiskRetention } from "../../plugins/worker-retention.types.js";
+import type {
+  WorkerRetainedLeaseReceipt,
+  WorkerSessionDiskRetention,
+} from "../../plugins/worker-retention.types.js";
 import { sessionChanges } from "../../sessions/session-row-changes.js";
+import { VERSION } from "../../version.js";
 import { installWorkerPlacementReconcileGuard } from "../server-worker-placement-reconcile-guard.js";
+import { createWorkerRuntimeRefreshWaiter } from "../server-worker-placement-runtime-refresh.js";
 import {
   createManager as createNodeTunnelManager,
   transport as createNodeTransport,
@@ -18,6 +23,7 @@ import { projectWorkerSessionTurnClaim } from "./placement-record.js";
 import { createWorkerSessionPlacementStore } from "./placement-store.js";
 import { writePlacementEnvironmentFixture } from "./placement-test-fixtures.js";
 import { createWorkerSessionPlacementGate } from "./placement-worker-gate.js";
+import { createRepositoryPublicationPreparation } from "./repository-publication-worker-preparation.js";
 import * as support from "./service.test-support.js";
 import { testState } from "./service.test-support.js";
 import { createWorkerTunnelManager } from "./tunnel.js";
@@ -257,6 +263,137 @@ describe("worker environment runtime upgrades", () => {
     });
     expect(h.readCredential()?.credentialHash).not.toBe(h.oldCredential.credentialHash);
     expect(h.ensureNodeWorkerBundle).toHaveBeenCalledOnce();
+  });
+
+  it("admits retained publication compute before reconnecting and refreshing the original node", async () => {
+    const target = { ...currentReceipt, openclawVersion: VERSION };
+    const h = await setupUpgrade("node", "attached", support.BOOTSTRAP_RECEIPT, target, true);
+    const active = h.placement;
+    const receipt = h.readEnvironment()?.retention?.receipt;
+    if (active?.state !== "active" || !receipt) {
+      throw new Error("Expected an attached retained publication fixture");
+    }
+    await testState.store.reconcileSharedHost({
+      environmentId: active.environmentId,
+      state: "attached",
+      leaseId: h.environment.leaseId!,
+      sharedHost: false,
+    });
+    await h.service.stop();
+    let observed: WorkerRetainedLeaseReceipt = {
+      ...receipt,
+      desiredState: "suspended",
+      observedState: "Stopped",
+      computeWindow: {
+        ...receipt.computeWindow,
+        expiresAt: new Date(testState.nowMs - 1).toISOString(),
+        state: "closed",
+      },
+    };
+    let connected = false;
+    const inference = vi.fn<support.WorkerEnvironmentServiceOptions["executeInference"]>();
+    const provider = support.createProvider({
+      provision: h.provision,
+      destroy: h.destroy,
+      retainedLease: {
+        inspect: async () => observed,
+        pause: unsupported("The retained compute is already stopped"),
+        resume: async (request) => {
+          request.assertCurrent();
+          return (observed = {
+            ...receipt,
+            claimRevision: "publication-resumed",
+            desiredState: "running",
+            observedState: "Running",
+            computeWindow: {
+              id: request.operationId,
+              authorizedAt: new Date(testState.nowMs).toISOString(),
+              expiresAt: new Date(testState.nowMs + 60000).toISOString(),
+              state: "active",
+            },
+            operation: {
+              id: request.operationId,
+              action: "resume",
+              phase: "observed",
+              expectedClaimRevision: request.retention.operation!.expectedClaimRevision,
+            },
+          });
+        },
+        destroy: unsupported("Publication must retain its original disk"),
+      },
+      resumeNode: async (request) => {
+        request.assertCurrent();
+        if (observed.computeWindow.state !== "active") {
+          throw new Error("Retained compute must be admitted before Node resume");
+        }
+        expect(request.leaseId).toBe(h.environment.leaseId);
+        expect(request.deviceId).toBe(h.environment.nodeDeviceId);
+        connected = true;
+      },
+    });
+    const tunnels = createWorkerTunnelManager();
+    vi.spyOn(tunnels, "stop").mockImplementation(async () => {
+      expect(h.readCredential()).toBeUndefined();
+      h.events.push("stopped");
+    });
+    const service = support.createService(provider, {
+      tunnelManager: tunnels,
+      nodeTunnelManager: h.nodeTunnelManager,
+      placementStore: createWorkerSessionPlacementGate(h.placements),
+      ensureNodeWorkerBundle: h.ensureNodeWorkerBundle,
+      executeInference: inference,
+      prepareNodeRuntime: async (_record, _bundle, _signal, assertCurrent) => {
+        assertCurrent?.();
+        return {
+          nodeBootstrap: { ...support.NODE_BOOTSTRAP, openclawVersion: VERSION },
+          workerBundle: {
+            ...support.NODE_BOOTSTRAP,
+            packageRelativePath: "worker-artifacts/current.tgz",
+          },
+        };
+      },
+    });
+    const waiter = createWorkerRuntimeRefreshWaiter({
+      environments: service,
+      isStopping: () => false,
+    });
+    waiter.bind(
+      async (_nodeId, request) => {
+        request.assertCurrent();
+        if (!connected) {
+          throw new Error("The retained Node has not reconnected");
+        }
+      },
+      async () => connected,
+    );
+    const preparation = createRepositoryPublicationPreparation({
+      placements: h.placements,
+      environments: service,
+      ensurePlacement: unsupported("Publication must not create another placement"),
+      resolveDevicePlacementRequirement: unsupported(
+        "Publication retains its original destination",
+      ),
+      getConfig: () => testState.config,
+      waitForNode: waiter.wait,
+      reconcileActive: (environmentId) => service.reconcileOnce(environmentId),
+    });
+    await preparation.refreshPublicationRuntime(active, () => {});
+    expect(h.readEnvironment()).toMatchObject({
+      leaseId: h.environment.leaseId,
+      nodeDeviceId: h.environment.nodeDeviceId,
+      ownerEpoch: active.activeOwnerEpoch,
+      bootstrapReceipt: { ...target, installKind: "bundle" },
+      retention: { receipt: { computeWindow: { state: "active" } } },
+    });
+    expect(h.placements.get(active.sessionId)).toMatchObject({
+      ...active,
+      workerBundleHash: target.bundleHash,
+      turnClaim: null,
+    });
+    expect(h.provision).not.toHaveBeenCalled();
+    expect(h.destroy).not.toHaveBeenCalled();
+    expect(h.nodeTunnelManager.start).not.toHaveBeenCalled();
+    expect(inference).not.toHaveBeenCalled();
   });
 
   it("keeps retained pending results ahead of background runtime installation", async () => {
