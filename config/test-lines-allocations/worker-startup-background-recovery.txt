@@ -1,0 +1,2 @@
+39
+# Pending remote recovery readiness and physical close custody in the startup owner harness.

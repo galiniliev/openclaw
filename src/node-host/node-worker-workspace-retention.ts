@@ -3,7 +3,11 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { ignoreMissingPath } from "../infra/errno.js";
 import { hasNodeErrorCode } from "../infra/path-guards.js";
-import type { NodeWorkerWorkspaceSession } from "./node-worker-workspace-identity.js";
+import {
+  nodeWorkerWorkspaceLaunchGenerationKey,
+  type NodeWorkerWorkspaceLaunchReference,
+  type NodeWorkerWorkspaceSession,
+} from "./node-worker-workspace-identity.js";
 
 const ENVIRONMENT_HASH_PATTERN = /^[a-f0-9]{16}$/u;
 const SESSION_HASH_PATTERN = /^[a-f0-9]{32}$/u;
@@ -66,4 +70,57 @@ export async function listNodeWorkerWorkspaceSessions(
     }
   }
   return sessions;
+}
+
+/** Refcount active workspace use and carry protection through an in-flight retention pass. */
+export class NodeWorkerWorkspaceRetainProtection {
+  private readonly operations = new Map<string, number>();
+  private readonly passes = new Map<string, Set<string>>();
+
+  beginOperation(gatewayNamespace: string, generationKey: string): () => void {
+    this.operations.set(generationKey, (this.operations.get(generationKey) ?? 0) + 1);
+    this.passes.get(gatewayNamespace)?.add(generationKey);
+    let released = false;
+    return () => {
+      if (released) {
+        return;
+      }
+      released = true;
+      const count = this.operations.get(generationKey) ?? 0;
+      if (count <= 1) {
+        this.operations.delete(generationKey);
+      } else {
+        this.operations.set(generationKey, count - 1);
+      }
+    };
+  }
+
+  beginPass(gatewayNamespace: string): Set<string> {
+    const protection = this.currentProtection(gatewayNamespace);
+    this.passes.set(gatewayNamespace, protection);
+    return protection;
+  }
+
+  endPass(gatewayNamespace: string): void {
+    this.passes.delete(gatewayNamespace);
+  }
+
+  currentProtection(
+    gatewayNamespace: string,
+    retainedDuringPass?: ReadonlySet<string>,
+    launches: readonly NodeWorkerWorkspaceLaunchReference[] = [],
+  ): Set<string> {
+    const protectedGenerations = new Set(retainedDuringPass);
+    for (const generationKey of this.operations.keys()) {
+      if (generationKey.startsWith(`${gatewayNamespace}/`)) {
+        protectedGenerations.add(generationKey);
+      }
+    }
+    for (const launch of launches) {
+      if (launch.gatewayNamespace === gatewayNamespace) {
+        protectedGenerations.add(nodeWorkerWorkspaceLaunchGenerationKey(launch));
+      }
+    }
+    return protectedGenerations;
+  }
 }

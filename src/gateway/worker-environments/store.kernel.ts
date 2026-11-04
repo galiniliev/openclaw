@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { executeSqliteQueryTakeFirstSync } from "../../infra/kysely-sync.js";
 import type { OpenClawStateDatabase } from "../../state/openclaw-state-db-contract.js";
 import { ensureWorkerEnvironmentNodeEnrollmentSchema } from "../../state/openclaw-state-db-schema-additive.js";
@@ -57,6 +58,7 @@ export function createWorkerEnvironmentStoreKernel(
           provider_id: requireWorkerEnvironmentString(input.providerId, "provider id"),
           profile_id: requireWorkerEnvironmentString(input.profileId, "profile id"),
           profile_snapshot_json: json(input.profileSnapshot),
+          session_retention_json: input.retention ? json(input.retention) : null,
           ...workerEnvironmentPreparationColumns(input.preparation),
           last_activated_at_ms: null,
           provision_operation_id: requireWorkerEnvironmentString(
@@ -100,6 +102,23 @@ export function createWorkerEnvironmentStoreKernel(
     }),
     ...createWorkerEnvironmentTransitionOps(db, now),
     createIntent,
+    recordRetention(input) {
+      const current = getRequiredWorkerEnvironment(db, input.environmentId);
+      if (
+        current.ownerEpoch !== input.expectedOwnerEpoch ||
+        !current.retention ||
+        !isDeepStrictEqual(current.retention, input.expectedRetention) ||
+        !isDeepStrictEqual(current.retention.owner, input.retention.owner) ||
+        current.retention.ownerBinding !== input.retention.ownerBinding ||
+        !isDeepStrictEqual(current.retention.policy, input.retention.policy)
+      ) {
+        throw new Error("Retained worker ownership changed before settlement");
+      }
+      return updateWorkerEnvironmentRecord(db, input.environmentId, current.state, {
+        session_retention_json: json(input.retention),
+        updated_at_ms: now(),
+      });
+    },
     ensureNodeEnrollment(environmentIdInput: string): WorkerEnvironmentRecord {
       const environmentId = requireWorkerEnvironmentString(environmentIdInput, "id");
       ensureWorkerEnvironmentNodeEnrollmentSchema(db);

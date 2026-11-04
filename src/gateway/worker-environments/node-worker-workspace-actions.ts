@@ -19,11 +19,11 @@ import {
 import { createNodeWorkspaceTransferCommand } from "./node-workspace-transfer-command.js";
 import type { NodeWorkspaceTransferService } from "./node-workspace-transfer-service.js";
 import { removeNodeWorkspaceUpload } from "./node-workspace-upload-reader.js";
+import { assertRetainedWorkspaceBinding } from "./retained-workspace.js";
 import type {
   WorkerLocalWorkspaceReconcileRequest,
   WorkerLocalWorkspaceSyncRequest,
   WorkerWorkspaceReconcileRequest,
-  WorkerWorkspaceReconcileResult,
   WorkerWorkspaceCommand,
   WorkerWorkspaceSyncResult,
   WorkerWorkspaceSyncRequest,
@@ -35,7 +35,9 @@ import type { WorkspaceHashMemo } from "./workspace-hash-memo.js";
 import { prepareLocalWorkspaceReconciliation } from "./workspace-local-reconciliation.js";
 import { serializeWorkspaceManifest } from "./workspace-manifest-worker.js";
 import { createWorkerWorkspaceQuiescence } from "./workspace-quiescence.js";
+import { measureReconcileStep } from "./workspace-reconcile-timing.js";
 import { captureRemoteWorkspaceManifest } from "./workspace-sync-helpers.js";
+import { REMOTE_WORKSPACE_SETUP_JS } from "./workspace-sync-scripts.js";
 
 const workspaceLog = createSubsystemLogger("gateway/worker-workspace");
 // Leave room for the manifest reference and bounded numeric metrics in the result envelope.
@@ -143,6 +145,11 @@ export function createNodeWorkerWorkspaceActions(params: {
       );
       return;
     }
+    if (restoredWorkspace.diskAuthority) {
+      authorize?.();
+      assertRetainedWorkspaceBinding(restoredWorkspace.diskAuthority, params, restoredWorkspace);
+      return;
+    }
     if (restoredWorkspace.source.kind === "repository") {
       await params.workspaceTransfer.prepareRepository({
         ...transferOwner,
@@ -164,10 +171,8 @@ export function createNodeWorkerWorkspaceActions(params: {
   // Same placement-lifetime memo contract as the SSH tunnel owner: stat-identity
   // keys self-invalidate on change, and without this owner every turn re-hashes
   // the full managed worktree during prepare/apply/verify.
-  const placementHashMemo: WorkspaceHashMemo = new Map();
-  const reconcileWorkspace = (
-    request: WorkerWorkspaceReconcileRequest,
-  ): Promise<WorkerWorkspaceReconcileResult> => {
+  const hashMemo: WorkspaceHashMemo = new Map();
+  const reconcileWorkspace = (request: WorkerWorkspaceReconcileRequest) => {
     if (deviceFolder !== undefined) {
       return Promise.reject(new Error("Device folders cannot be synchronized or reconciled"));
     }
@@ -183,11 +188,20 @@ export function createNodeWorkerWorkspaceActions(params: {
         });
   };
   const reconcileRepository = async (request: WorkerWorkspaceReconcileRequest) => {
-    if (request.source.kind !== "repository") {
+    const { source, remoteWorkspaceDir } = request;
+    if (source.kind !== "repository") {
       throw new Error("Repository checkpoint source is required");
     }
-    const { authorize, markPhase } = request.source;
-    const transferBaseRef = request.source.acceptedManifestRef ?? request.baseManifestRef;
+    const { authorize, markPhase } = source;
+    if (restoredWorkspace?.diskAuthority && restoredWorkspace.source.kind === "repository") {
+      await params.workspaceTransfer.prepareRepository({
+        ...transferOwner,
+        authorize,
+        baseCommit: restoredWorkspace.source.baseCommit,
+        baseManifestRef: restoredWorkspace.source.baseManifestRef,
+      });
+    }
+    const transferBaseRef = source.acceptedManifestRef ?? request.baseManifestRef;
     const resultVersion = (await params.supportsGitResults?.()) ? 2 : undefined;
     authorize?.();
     const token = params.workspaceTransfer.prepareUpload(
@@ -203,9 +217,9 @@ export function createNodeWorkerWorkspaceActions(params: {
         {
           direction: "upload",
           token,
-          ...(resultVersion ? { resultVersion } : {}),
           baseManifestRef: transferBaseRef,
-          referenceManifestRef: request.source.referenceManifestRef,
+          referenceManifestRef: source.referenceManifestRef,
+          ...(resultVersion ? { resultVersion } : {}),
         },
         "Node repository checkpoint upload failed",
         { assertCurrent: authorize },
@@ -217,13 +231,13 @@ export function createNodeWorkerWorkspaceActions(params: {
           authorize?.();
           const observed = await captureRemoteWorkspaceManifest({
             runWorkspaceCommand: (command) => exec({ ...command, assertCurrent: authorize }),
-            remoteWorkspaceDir: request.remoteWorkspaceDir,
+            remoteWorkspaceDir,
             baseCommit: uploaded.base.baseCommit,
             priorManifestDigests: [
               uploaded.currentManifestRef.slice(7),
               uploaded.baseManifestRef.slice(7),
             ],
-            hashMemo: placementHashMemo,
+            hashMemo,
             maxHashMemoBytes: NODE_WORKSPACE_HASH_MEMO_BYTES,
           });
           authorize?.();
@@ -241,8 +255,9 @@ export function createNodeWorkerWorkspaceActions(params: {
             }
           }
         };
-        await verifyStable();
-        if (!uploaded.base.baseCommit) {
+        const unchanged = uploaded.currentManifestRef === source.referenceManifestRef;
+        const baseCommit = uploaded.base.baseCommit;
+        if (!baseCommit) {
           throw new Error("Repository checkpoint has no pinned Git base");
         }
         let publicationToken: string | undefined;
@@ -250,34 +265,36 @@ export function createNodeWorkerWorkspaceActions(params: {
         let publicationDigest: string | undefined;
         try {
           try {
-            publicationToken = params.workspaceTransfer.prepareUpload(
-              params.environmentId,
-              NODE_WORKSPACE_EMPTY_MANIFEST_REF,
-              authorize,
-            );
-            markPhase?.("repositoryPublicationUpload");
-            await transfer(
-              {
-                direction: "upload",
-                token: publicationToken,
-                baseManifestRef: NODE_WORKSPACE_EMPTY_MANIFEST_REF,
-                referenceManifestRef: NODE_WORKSPACE_EMPTY_MANIFEST_REF,
-                publicationBaseCommit: uploaded.base.baseCommit,
-              },
-              "Repository publication capture failed",
-              { assertCurrent: authorize },
-            );
-            publication = params.workspaceTransfer.takeUpload(
-              params.environmentId,
-              NODE_WORKSPACE_EMPTY_MANIFEST_REF,
-            );
-            const snapshot = publication.current.entries.find(
-              (entry) => entry.path === "snapshot.json",
-            );
-            if (snapshot?.type !== "file") {
-              throw new Error("Repository publication snapshot is missing");
-            }
-            publicationDigest = `sha256:${snapshot.sha256}`;
+            await measureReconcileStep("publication-capture", async () => {
+              publicationToken = params.workspaceTransfer.prepareUpload(
+                params.environmentId,
+                NODE_WORKSPACE_EMPTY_MANIFEST_REF,
+                authorize,
+              );
+              markPhase?.("repositoryPublicationUpload");
+              await transfer(
+                {
+                  direction: "upload",
+                  token: publicationToken,
+                  baseManifestRef: NODE_WORKSPACE_EMPTY_MANIFEST_REF,
+                  referenceManifestRef: NODE_WORKSPACE_EMPTY_MANIFEST_REF,
+                  publicationBaseCommit: baseCommit,
+                },
+                "Repository publication capture failed",
+                { assertCurrent: authorize },
+              );
+              publication = params.workspaceTransfer.takeUpload(
+                params.environmentId,
+                NODE_WORKSPACE_EMPTY_MANIFEST_REF,
+              );
+              const snapshot = publication.current.entries.find(
+                (entry) => entry.path === "snapshot.json",
+              );
+              if (snapshot?.type !== "file") {
+                throw new Error("Repository publication snapshot is missing");
+              }
+              publicationDigest = `sha256:${snapshot.sha256}`;
+            });
           } catch (error) {
             params.ownerSignal.throwIfAborted();
             authorize?.();
@@ -292,12 +309,13 @@ export function createNodeWorkerWorkspaceActions(params: {
               await params.workspaceTransfer.discardUpload(params.environmentId, publicationToken);
             }
           }
-          // Publication restrictions never own recovery acceptance. Its remote
-          // stability, live owner and final quiescence fences still run below.
-          await verifyStable();
+          // Recovery acceptance retains remote stability, owner, and final quiescence fences.
+          if (!unchanged) {
+            await verifyStable();
+          }
           authorize?.();
           markPhase?.("repositoryCheckpointStage");
-          const prepared = await request.source.prepareCheckpoint({
+          const prepared = await source.prepareCheckpoint({
             stagingRoot: uploaded.stagingRoot,
             ...(publication && publicationDigest
               ? { publicationStagingRoot: publication.stagingRoot, publicationDigest }
@@ -310,14 +328,17 @@ export function createNodeWorkerWorkspaceActions(params: {
             gitPackPath: uploaded.gitPackPath,
           });
           preparedCheckpoint = prepared;
+          const verifyLocalStable = () => {
+            authorize?.();
+            return prepared.verify();
+          };
           return {
             manifestRef: uploaded.currentManifestRef,
-            changed: uploaded.currentManifestRef !== uploaded.baseManifestRef,
+            // Cumulative snapshots are unchanged relative to the last accepted checkpoint.
+            changed: !unchanged,
+            ...(unchanged ? { acceptUnchangedStagedResult: verifyLocalStable } : {}),
             verifyStable,
-            verifyLocalStable: () => {
-              authorize?.();
-              return prepared.verify();
-            },
+            verifyLocalStable,
             publishStagedResult: async () => {
               authorize?.();
               await prepared.publish();
@@ -362,7 +383,7 @@ export function createNodeWorkerWorkspaceActions(params: {
     try {
       // Local recovery and remote upload must settle before releasing custody.
       const [local, upload] = await Promise.allSettled([
-        prepareLocalWorkspaceReconciliation({ request, hashMemo: placementHashMemo }),
+        prepareLocalWorkspaceReconciliation({ request, hashMemo }),
         transfer(
           {
             direction: "upload",
@@ -394,7 +415,7 @@ export function createNodeWorkerWorkspaceActions(params: {
           remoteWorkspaceDir: request.remoteWorkspaceDir,
           baseCommit: uploaded.base.baseCommit,
           priorManifestDigests: [expectedRemoteRef.slice(7), uploaded.baseManifestRef.slice(7)],
-          hashMemo: placementHashMemo,
+          hashMemo,
           maxHashMemoBytes: NODE_WORKSPACE_HASH_MEMO_BYTES,
         });
         if (observed !== expectedRemoteRef) {
@@ -505,24 +526,7 @@ export function createNodeWorkerWorkspaceActions(params: {
       });
     } else if (source.runSetupScript) {
       const setup = await exec({
-        argv: [
-          "node",
-          "-e",
-          String.raw`const fs = require("node:fs");
-const path = require("node:path");
-const { spawnSync } = require("node:child_process");
-const root = process.cwd();
-const script = path.join(root, ".openclaw", "worktree-setup.sh");
-const stat = fs.statSync(script, { throwIfNoEntry: false });
-if (stat?.isFile() && (stat.mode & 0o111)) {
-  const run = spawnSync(script, [], {
-    cwd: root,
-    env: { ...process.env, OPENCLAW_SOURCE_TREE_PATH: root, OPENCLAW_WORKTREE_PATH: root },
-    stdio: "inherit",
-  });
-  process.exitCode = run.status ?? 1;
-}`,
-        ],
+        argv: ["node", "-e", REMOTE_WORKSPACE_SETUP_JS],
         timeoutMs: 120_000,
         transportRetry: "never",
         assertCurrent: request.authorize,
@@ -557,7 +561,7 @@ if (stat?.isFile() && (stat.mode & 0o111)) {
       }
       const prepared = await params.workspaceTransfer.prepareAttachments({
         ...request,
-        environmentId: params.environmentId,
+        owner: transferOwner,
       });
       try {
         await transfer(

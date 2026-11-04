@@ -1,9 +1,10 @@
 import { expect, it } from "vitest";
+import type { WorkerLease } from "../../plugins/types.js";
 import { requireWorkerLease } from "./service-validation.js";
 
 const nodeLease = { leaseId: "lease-1", node: { deviceId: "node-1" } };
 
-it.each([
+it.each<WorkerLease>([
   { ...nodeLease, sharedHost: true },
   {
     leaseId: "lease-1",
@@ -25,7 +26,8 @@ it("does not infer omitted host classification", () => {
 });
 
 it.each([null, "false"])("rejects non-boolean host classification %j", (sharedHost) => {
-  expect(() => requireWorkerLease({ ...nodeLease, sharedHost })).toThrow(
-    "Worker provider returned an invalid provision result",
-  );
+  // Deliberately exercise invalid plugin data outside the typed provider contract.
+  expect(() =>
+    Reflect.apply(requireWorkerLease, undefined, [{ ...nodeLease, sharedHost }]),
+  ).toThrow("Worker provider returned an invalid provision result");
 });

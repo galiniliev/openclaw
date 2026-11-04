@@ -1,6 +1,20 @@
-import { describe, expect, it, vi } from "vitest";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createDeferred } from "../../../test/helpers/promise.js";
+import {
+  onInternalDiagnosticEvent,
+  type DiagnosticEventPayload,
+} from "../../infra/diagnostic-events.js";
+import { resetLogger, setLoggerOverride } from "../../logging/logger.js";
 import type { WorkerWorkspaceReconcileResult } from "./tunnel-contract.js";
 import { verifyReconciledWorkspaceFinal } from "./workspace-finalize.js";
+import { withWorkspaceReconcileTiming } from "./workspace-reconcile-timing.js";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  setLoggerOverride(null);
+  resetLogger();
+});
 
 function fixture() {
   const log: string[] = [];
@@ -22,6 +36,112 @@ function fixture() {
 }
 
 describe("final worker workspace fences", () => {
+  it.each([false, true])(
+    "fences unchanged local state during acceptance after renewal (local failure: %s)",
+    async (localFailure) => {
+      const log: string[] = [];
+      let clock = 0;
+      vi.spyOn(performance, "now").mockImplementation(() => clock);
+      setLoggerOverride({ level: "info", consoleLevel: "silent" });
+      const events: Array<Extract<DiagnosticEventPayload, { type: "log.record" }>> = [];
+      const unsubscribe = onInternalDiagnosticEvent((event) => {
+        if (
+          event.type === "log.record" &&
+          event.message === "Worker workspace reconciliation step"
+        ) {
+          events.push(event);
+        }
+      });
+      const entered = createDeferred();
+      const release = createDeferred();
+      const finalize = withWorkspaceReconcileTiming(
+        { runId: "run-reconcile", sessionId: "session-reconcile" },
+        () =>
+          verifyReconciledWorkspaceFinal(
+            {
+              manifestRef: "sha256:" + "a".repeat(64),
+              changed: false,
+              verifyStable: async () => {
+                log.push("remote");
+                clock += 7;
+              },
+              verifyLocalStable: async () => {},
+              acceptUnchangedStagedResult: async () => {
+                log.push("local");
+                entered.resolve();
+                await release.promise;
+                if (localFailure) {
+                  throw new Error("local workspace changed");
+                }
+                log.push("accept");
+              },
+              publishStagedResult: async () => {
+                log.push("publish");
+              },
+              discardPreparedStagedResult: async () => {
+                log.push("discard");
+              },
+            },
+            {
+              assertActive: async () => {
+                log.push("renew");
+              },
+              resume: async () => {},
+            },
+          ),
+      );
+      try {
+        await entered.promise;
+        await yieldToEventLoop();
+        expect(events.map((event) => event.attributes?.phase)).toEqual([
+          "quiescence-renew",
+          "remote-stability-check",
+        ]);
+        clock += 30;
+        release.resolve();
+        if (localFailure) {
+          await expect(finalize).rejects.toMatchObject({
+            message: "local workspace changed",
+            reclaimDisposition: "retry",
+          });
+          expect(log).toEqual(["renew", "remote", "local", "discard"]);
+        } else {
+          await finalize;
+          expect(log).toEqual(["renew", "remote", "local", "accept", "publish"]);
+        }
+        await yieldToEventLoop();
+        expect(
+          events.map((event) => [
+            event.attributes?.phase,
+            event.attributes?.durationMs,
+            event.attributes?.outcome,
+          ]),
+        ).toEqual([
+          ["quiescence-renew", 0, "success"],
+          ["remote-stability-check", 7, "success"],
+          ["unchanged-result-accept", 30, localFailure ? "failed" : "success"],
+          [localFailure ? "candidate-discard" : "staged-result-publish", 0, "success"],
+        ]);
+        for (const event of events) {
+          expect(event.attributes).toEqual({
+            subsystem: "gateway/worker-workspace",
+            runId: "run-reconcile",
+            sessionId: "session-reconcile",
+            phase: expect.any(String),
+            parentPhase: "workspace-reconciliation",
+            nonAdditive: true,
+            durationMs: expect.any(Number),
+            outcome: expect.any(String),
+          });
+        }
+      } finally {
+        release.resolve();
+        await finalize.catch(() => undefined);
+        unsubscribe();
+      }
+    },
+  );
+
   it("rejects quiescence lost while the staged result is finalized", async () => {
     const { log, finalize } = fixture();
     let quiescenceChecks = 0;

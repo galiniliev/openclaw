@@ -21,6 +21,7 @@ import type { WorkerProviderLifecycleInputOptions } from "./provider-lifecycle.t
 import { WorkerRuntimeRefreshPendingError } from "./provider-runtime-refresh.js";
 import { prepareRepositoryWorkerProjectSource } from "./repository-project-admission.js";
 import type { WorkerDesktopLaunchResult, WorkerDesktopObserveResult } from "./service-contract.js";
+import { requireWorkerProfile } from "./service-validation.js";
 import type { WorkerEnvironmentRecord, WorkerEnvironmentStore } from "./store.js";
 import {
   joinWorkerTunnelStops,
@@ -630,7 +631,42 @@ export function createWorkerEnvironmentAccess(options: WorkerEnvironmentAccessOp
     }
   };
 
+  const runProjectLifecycleCommand = async (
+    environmentId: string,
+    ownerEpoch: number,
+    command: Parameters<NonNullable<WorkerProvider["runSetupCommand"]>>[1],
+    ownerSignal: AbortSignal,
+  ) => {
+    const signal = command.signal ? AbortSignal.any([ownerSignal, command.signal]) : ownerSignal;
+    const assertCurrent = () => {
+      signal.throwIfAborted();
+      command.assertCurrent();
+      const record = store.get(environmentId);
+      if (
+        !record ||
+        record.ownerEpoch !== ownerEpoch ||
+        record.state !== "attached" ||
+        record.destroyRequestedAtMs !== null ||
+        !record.leaseId
+      ) {
+        throw new Error("Cloud lifecycle command lost its attached lease owner");
+      }
+      return { record, leaseId: record.leaseId };
+    };
+    const { record, leaseId } = assertCurrent();
+    const provider = options.resolveProvider(record.providerId);
+    if (!provider?.runSetupCommand) {
+      return undefined;
+    }
+    const result = await provider.runSetupCommand(
+      { leaseId, profile: requireWorkerProfile(record.profileSnapshot.settings) },
+      { ...command, signal, assertCurrent },
+    );
+    assertCurrent();
+    return result;
+  };
   return {
+    runProjectLifecycleCommand,
     bindPreparedWorkspace,
     get: (environmentId: string) => {
       const record = store.get(environmentId);

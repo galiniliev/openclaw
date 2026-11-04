@@ -8,6 +8,7 @@ import type {
   WorkerLocalWorkspaceReconcileRequest,
   WorkerWorkspaceReconcileRequest,
 } from "./tunnel-contract.js";
+import { measureReconcileStep } from "./workspace-reconcile-timing.js";
 
 /** Durable session workspace ownership is independent of its current worker placement. */
 export type WorkerSessionWorkspace =
@@ -53,7 +54,7 @@ export function createWorkerWorkspaceReconcileRequest(params: {
       baseManifestRef,
     };
   }
-  if (!workspace.repository.baseManifestHash || !workspace.repository.manifestHash) {
+  if (!workspace.repository.baseManifestHash) {
     throw new Error("Repository workspace has no accepted source manifest");
   }
   return {
@@ -64,16 +65,20 @@ export function createWorkerWorkspaceReconcileRequest(params: {
     source: {
       kind: "repository",
       authorize: params.assertCurrent,
-      referenceManifestRef: workspace.repository.manifestHash,
-      acceptedManifestRef: workspace.repository.manifestHash,
+      referenceManifestRef:
+        workspace.repository.manifestHash ?? workspace.repository.baseManifestHash,
+      acceptedManifestRef:
+        workspace.repository.manifestHash ?? workspace.repository.baseManifestHash,
       prepareCheckpoint: async (payload) => {
-        const prepared = await stageSessionRepositoryCheckpoint({
-          ...payload,
-          workspaceId: workspace.repository.workspaceId,
-          expectedRevision: workspace.repository.revision,
-          checkpointRef: stagedResult.ref,
-          assertCurrent: params.assertCurrent,
-        });
+        const prepared = await measureReconcileStep("repository-checkpoint-prepare", () =>
+          stageSessionRepositoryCheckpoint({
+            ...payload,
+            workspaceId: workspace.repository.workspaceId,
+            expectedRevision: workspace.repository.revision,
+            checkpointRef: stagedResult.ref,
+            assertCurrent: params.assertCurrent,
+          }),
+        );
         return {
           verify: prepared.verify,
           discard: prepared.discard,

@@ -16,6 +16,7 @@ import { runInDetachedAsyncContext } from "../shared/detached-async-context.js";
 import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
 import { createGitHubPublicationRuntime } from "./github-publication-runtime.js";
 import type { NodeWorkerSupervisorTransport } from "./node-registry-private.js";
+import type { PrepareRepositoryPublicationCheckpoint } from "./repository-publication-checkpoint.js";
 import { measureGatewayCloseStep, measureGatewayRestartTrace } from "./restart-trace.js";
 import { emitSessionsChanged } from "./server-methods/session-change-event.js";
 import { measureStartup, type GatewayStartupTrace } from "./server-startup-trace.js";
@@ -74,6 +75,18 @@ const WORKER_PLACEMENT_RECONCILE_INTERVAL_MS = 60_000;
 
 type WorkerPlacementSidecar = { stop: () => Promise<void> };
 
+export function createGatewayGitHubPublicationRuntime(params: {
+  prepareRepositoryCheckpoint?: PrepareRepositoryPublicationCheckpoint;
+  placements: WorkerSessionPlacementStore;
+  getCommittedRuntimeConfig: () => OpenClawConfig;
+  warn: (message: string) => void;
+}) {
+  return createGitHubPublicationRuntime({
+    ...params,
+    loadSessionRuntime: loadWorkerPlacementSessionRuntimeModule,
+  });
+}
+
 export type GatewayWorkerPlacementRuntimeParams = {
   githubPublicationRuntime?: ReturnType<typeof createGitHubPublicationRuntime>;
   scheduler: GatewayScheduler;
@@ -90,17 +103,6 @@ export type GatewayWorkerPlacementRuntimeParams = {
   info?: (message: string) => void;
   warn: (message: string) => void;
 };
-
-export function createGatewayGitHubPublicationRuntime(params: {
-  placements: WorkerSessionPlacementStore;
-  getCommittedRuntimeConfig: () => OpenClawConfig;
-  warn: (message: string) => void;
-}) {
-  return createGitHubPublicationRuntime({
-    ...params,
-    loadSessionRuntime: loadWorkerPlacementSessionRuntimeModule,
-  });
-}
 
 export type GatewayWorkerPlacementRuntime = ReturnType<typeof createGatewayWorkerPlacementRuntime>;
 
@@ -122,6 +124,7 @@ export function createGatewayWorkerPlacementRuntime(params: GatewayWorkerPlaceme
     ready: githubPublicationReady,
     close: closeGitHubPublication,
     coordinator: githubPublication,
+    needsAcceptedWorkspacePublication,
     prepareAcceptedWorkspacePublication,
     publishAcceptedWorkspace,
     reconcilePublications,
@@ -213,6 +216,8 @@ export function createGatewayWorkerPlacementRuntime(params: GatewayWorkerPlaceme
       environments: params.environments,
       // Stop closes provider work before the ordinary dispatch failure path releases its resources.
       isShuttingDown: isStopping,
+      hasCurrentRunner: (id) => nodeWorkerSupervisorTransport?.hasCurrentRunner(id) === true,
+      waitForRecoveryNode: runtimeRefresh.waitForRecoveryNode,
       runnerAvailability,
       resolveDevicePlacementRequirement,
       isCurrentNodePlacement: createDevicePlacementAuthority(() => nodeWorkerSupervisorTransport),
@@ -265,6 +270,7 @@ export function createGatewayWorkerPlacementRuntime(params: GatewayWorkerPlaceme
             }),
         ),
       workspaceOperations,
+      needsAcceptedWorkspacePublication,
       prepareAcceptedWorkspacePublication,
       publishAcceptedWorkspace,
       resolveGitAuthor: (agentId) =>
@@ -353,6 +359,7 @@ export function createGatewayWorkerPlacementRuntime(params: GatewayWorkerPlaceme
     waitForInitialPlacement: dispatchService.waitForInitialPlacement,
     redispatchPlacement,
     workspaceOperations,
+    needsAcceptedWorkspacePublication,
     prepareAcceptedWorkspacePublication,
     publishAcceptedWorkspace,
     persistAbandonedPartial: params.persistAbandonedPartial,
@@ -600,23 +607,20 @@ export function createGatewayWorkerPlacementRuntime(params: GatewayWorkerPlaceme
         "sidecars.worker-environments.github-ready",
         () => githubPublicationReady,
       );
-      // Track startup reconciliation in the placement slot so a concurrent
-      // close prelude drains it before uninstalling guards and stopping environments.
-      for (const reconcile of [
-        () =>
-          reconcilePhase("startup.workspaces", () =>
-            recoverGatewayWorkerPlacementWorkspaces({
-              placements: params.placements,
-              resolveWorkspace,
-              isStopping,
-            }),
-          ),
-        () => reconcilePhase("startup.active", () => dispatchService.reconcile("startup")),
-      ]) {
-        await trackOperation("reconcile", reconcile());
-        if (isStopping() || hooks.isClosePreludeStarted()) {
-          return await stopBeforeReady();
-        }
+      // Local workspace repair must finish before remote recovery can reclaim its owner.
+      // Keep it tracked so close drains it before removing guards or stopping environments.
+      await trackOperation(
+        "reconcile",
+        reconcilePhase("startup.workspaces", () =>
+          recoverGatewayWorkerPlacementWorkspaces({
+            placements: params.placements,
+            resolveWorkspace,
+            isStopping,
+          }),
+        ),
+      );
+      if (isStopping() || hooks.isClosePreludeStarted()) {
+        return await stopBeforeReady();
       }
       void nodeWorkspaceRetention.start();
       if (hooks.isClosePreludeStarted()) {
@@ -628,13 +632,22 @@ export function createGatewayWorkerPlacementRuntime(params: GatewayWorkerPlaceme
       }
       void trackOperation(
         "reconcile",
-        reconcilePhase("reconcile.session-retirement", () =>
-          sessionRetirement.reconcile(optionalWorkSignal),
-        ).then(() =>
-          // Git/network recovery must drain on close, but cannot hold Gateway readiness.
-          reconcilePhase("startup.publications", () =>
-            reconcilePublications(isReconciliationPaused),
-          ),
+        // A retained node reconnects through the public Gateway, so remote recovery
+        // must not hold readiness. The same operation slot aborts/joins it on close.
+        reconcilePhase("startup.active", () => dispatchService.reconcile("startup")).then(
+          async () => {
+            if (isReconciliationPaused()) {
+              return;
+            }
+            await reconcilePhase("reconcile.session-retirement", () =>
+              sessionRetirement.reconcile(optionalWorkSignal),
+            );
+            if (!isReconciliationPaused()) {
+              await reconcilePhase("startup.publications", () =>
+                reconcilePublications(isReconciliationPaused),
+              );
+            }
+          },
         ),
         "Worker placement reconcile sweep failed",
       );

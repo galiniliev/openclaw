@@ -3,11 +3,13 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { awaitGateBeforeSettlement } from "../../../test/helpers/promise.js";
 import { observeHostDataSql } from "../../../test/helpers/sqlite-statement-execution-counter.js";
 import { loadSessionEntry, patchSessionEntryCore } from "../../config/sessions/session-accessor.js";
+import { onInternalDiagnosticEvent } from "../../infra/diagnostic-events.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../../infra/kysely-sync.js";
+import { setLoggerOverride } from "../../logging/logger.js";
 import type { KeyedAsyncQueue } from "../../plugin-sdk/keyed-async-queue.js";
 import * as processExec from "../../process/exec.js";
 import { createDeferredCore } from "../../shared/deferred.js";
@@ -500,14 +502,53 @@ describe("repository workspace result ownership", () => {
 
   it("retains setup and cumulative changes through turns, editor saves, and Stop", async () => {
     const f = await fixture("worker-turn", true);
+    const uploads: Array<{ files: number; bytes: number }> = [];
+    const publicationUploads: Array<{ files: number; bytes: number }> = [];
+    setLoggerOverride({ level: "debug", consoleLevel: "silent" });
+    const unsubscribe = onInternalDiagnosticEvent((event) => {
+      if (
+        event.type === "log.record" &&
+        event.message === "node worker workspace transfer completed" &&
+        event.attributes?.direction === "upload"
+      ) {
+        (event.attributes.hasPinnedBase === false ? publicationUploads : uploads).push({
+          files: Number(event.attributes.payloadFiles),
+          bytes: Number(event.attributes.payloadBytes),
+        });
+      }
+    });
+    onTestFinished(() => {
+      unsubscribe();
+      setLoggerOverride(null);
+    });
     const pinned = (await f.store.get(f.repository.workspaceId))!;
     expect(pinned.manifestHash).not.toBe(pinned.baseManifestHash);
-    await f.write("first.txt", "first turn\n");
+    await fs.writeFile(path.join(f.remote, "first.txt"), "first turn\n");
+    await requireWorkspaceResultGit(f.remote, ["add", "first.txt"]);
+    const indexPath = path.resolve(
+      f.remote,
+      await requireWorkspaceResultGit(f.remote, ["rev-parse", "--git-path", "index"]),
+    );
+    const indexBefore = await fs.readFile(indexPath);
+    const headBefore = await requireWorkspaceResultGit(f.remote, ["rev-parse", "HEAD"]);
     const first = await f.beginTurn("first");
     await f.finishTurn(first);
     await f.write("second.txt", "second turn\n");
     await f.finishTurn(await f.beginTurn("second"));
+    const beforeUnchanged = (await f.store.get(f.repository.workspaceId))!;
     await f.finishTurn(await f.beginTurn("read-only"));
+    const afterUnchanged = (await f.store.get(f.repository.workspaceId))!;
+    expect(afterUnchanged.checkpointRef).toBe(beforeUnchanged.checkpointRef);
+    expect(afterUnchanged.revision).toBe(beforeUnchanged.revision);
+    expect(uploads).toEqual([
+      { files: 1, bytes: Buffer.byteLength("first turn\n") },
+      { files: 1, bytes: Buffer.byteLength("second turn\n") },
+      { files: 0, bytes: 0 },
+    ]);
+    expect(publicationUploads.map(({ files }) => files)).toEqual([3, 4, 4]);
+    expect(publicationUploads.every(({ bytes }) => bytes > 0)).toBe(true);
+    expect(await fs.readFile(indexPath)).toEqual(indexBefore);
+    expect(await requireWorkspaceResultGit(f.remote, ["rev-parse", "HEAD"])).toBe(headBefore);
     await f.save("editor.txt", "editor save\n");
     await f.stop(sessionTarget);
     expect(placements.get(SESSION_ID)?.state).toBe("reclaimed");
@@ -541,7 +582,39 @@ describe("repository workspace result ownership", () => {
         stagedResultRef: workerWorkspaceResultRef(first.turnClaim.claimId),
       }),
     ).toBe(true);
-    await f.expectSettled();
+    expect(await placements.listPendingWorkspaceResultsAsync()).toEqual([]);
+    expect(placements.get(SESSION_ID)?.turnClaim).toBeNull();
+    console.info("Incremental native workspace fixture payload", uploads.slice(0, 3));
+  });
+
+  it("rejects a late write after an unchanged capture before durable acceptance", async () => {
+    const f = await fixture("worker-turn");
+    const before = (await f.store.get(f.repository.workspaceId))!;
+    const reconcile = f.tunnel.reconcileWorkspace.bind(f.tunnel);
+    let checked = false;
+    vi.spyOn(f.tunnel, "reconcileWorkspace").mockImplementation(async (...args) => {
+      const prepared = await reconcile(...args);
+      expect(prepared.changed).toBe(false);
+      return {
+        ...prepared,
+        verifyStable: async () => {
+          checked = true;
+          await fs.writeFile(path.join(f.remote, "late.txt"), "background writer\n");
+          await prepared.verifyStable();
+        },
+      };
+    });
+    const turn = await f.beginTurn("late-writer");
+    await expect(f.finishTurn(turn)).rejects.toThrow("changed during checkpoint capture");
+    expect(checked).toBe(true);
+    const after = (await f.store.get(f.repository.workspaceId))!;
+    expect(after.checkpointRef).toBe(before.checkpointRef);
+    expect(after.manifestHash).toBe(before.manifestHash);
+    expect(after.revision).toBe(before.revision);
+    expect(await fs.readFile(path.join(f.remote, "late.txt"), "utf8")).toBe("background writer\n");
+    const pending = await placements.listPendingWorkspaceResultsAsync();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.workspaceAcceptedAtMs).toBeNull();
   });
 
   it("binds a staged repository result to its exact immutable session owner", async () => {
@@ -584,11 +657,35 @@ describe("repository workspace result ownership", () => {
     ]);
   });
 
-  it.each([false, true])(
-    "recovers an accepted checkpoint after restart (materialized=%s)",
-    async (materialized) => {
-      const f = await fixture("worker-turn");
-      await f.write("survives.txt", "durable before restart\n");
+  it.each([
+    {
+      executionMode: "worker-turn",
+      phase: "pending-pointer",
+      materialized: false,
+      unchanged: false,
+    },
+    {
+      executionMode: "worker-turn",
+      phase: "pending-pointer",
+      materialized: false,
+      unchanged: true,
+    },
+    {
+      executionMode: "worker-turn",
+      phase: "Gateway materialization",
+      materialized: true,
+      unchanged: false,
+    },
+  ] as const)(
+    "recovers an accepted $executionMode checkpoint after restart during $phase unchanged=$unchanged",
+    async ({ executionMode, materialized, unchanged }) => {
+      const f = await fixture(executionMode);
+      await fs.writeFile(path.join(f.remote, "survives.txt"), "durable before restart\n");
+      if (unchanged) {
+        await f.finishTurn(await f.beginTurn("accepted-seed"));
+      }
+      const beforeFaultRef = (await f.store.get(f.repository.workspaceId))!.checkpointRef;
+      assert.ok(beforeFaultRef);
       const owned = await f.beginTurn("interrupted", !materialized);
       const destination = path.join(root, "materialized-worktree");
       if (materialized) {
@@ -626,7 +723,18 @@ describe("repository workspace result ownership", () => {
         record.mockRestore();
       }
       const checkpointRef = workerWorkspaceResultRef(owned.turnClaim.claimId);
-      expect((await f.store.get(f.repository.workspaceId))?.checkpointRef).toBe(checkpointRef);
+      expect((await f.store.get(f.repository.workspaceId))?.checkpointRef).toBe(
+        unchanged ? beforeFaultRef : checkpointRef,
+      );
+      const artifact = f.store.artifactPath(f.repository.workspaceId);
+      expect(
+        await hasWorkerWorkspaceResultRef({ root: artifact, stagedResultRef: checkpointRef }),
+      ).toBe(true);
+      if (unchanged) {
+        expect(await requireWorkspaceResultGit(artifact, ["rev-parse", checkpointRef])).toBe(
+          await requireWorkspaceResultGit(artifact, ["rev-parse", beforeFaultRef]),
+        );
+      }
       expect(await placements.listPendingWorkspaceResultsAsync()).toMatchObject([
         materialized
           ? {

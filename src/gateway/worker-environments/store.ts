@@ -441,6 +441,8 @@ export async function createWorkerEnvironmentStore(
         revocationSubscriptions.delete(unsubscribe);
       };
     },
+    recordRetention: (input: Input<"recordRetention">, assertCurrent?: () => void) =>
+      mutate("workerEnvironments.recordRetention", { input }, assertCurrent),
     createIntent: (input: Input<"createIntent">, assertCurrent?: () => void) =>
       mutate("workerEnvironments.createIntent", { input }, assertCurrent),
     ensureNodeEnrollment: (input: string) =>

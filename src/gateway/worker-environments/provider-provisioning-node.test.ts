@@ -147,6 +147,128 @@ describe("node worker provider provisioning", () => {
     },
   );
 
+  it.each(["unchanged", "destroy", "replacement-owner"] as const)(
+    "revalidates provisioning authority after pairing when owner is %s",
+    async (change) => {
+      vi.stubEnv("OPENCLAW_STATE_DIR", support.testState.root);
+      onTestFinished(() => {
+        vi.unstubAllEnvs();
+      });
+      const deviceId = "snapshot-fork-device";
+      const transfer = createWorkerBootstrapArtifactTransferService();
+      const enrollmentManager = createWorkerNodeEnrollmentManager({
+        store: support.testState.store,
+        getConfig: () => ({
+          gateway: {
+            publicOrigin: "https://gateway.example.test",
+            auth: { mode: "token", token: "gateway-token" },
+          },
+        }),
+        resolveAvailability: async () => ({ available: true }),
+        prepareArtifact: async () => ({
+          tarballPath: path.join(support.testState.root, "node-runtime.tgz"),
+          tarballSha256: support.NODE_BOOTSTRAP.sha256,
+          tarballBytes: 1,
+          openclawVersion: "2026.8.1",
+          buildId: "gateway-source-build",
+          enabledPluginIds: [],
+        }),
+        transfer,
+      });
+      onTestFinished(() => enrollmentManager.stop());
+      const destroy = vi.fn(async () => {});
+      const workerService = support.createService(
+        support.createProvider({
+          supportedExecutionModes: ["worker-turn"],
+          provisionBeforeInstallation: true,
+          requiresNodeEnrollment: true,
+          provision: async (_profile, _operationId, options) => {
+            const enrollment = await options?.beginNodeEnrollment?.();
+            if (enrollment?.mode !== "connect") {
+              throw new Error("expected pending enrollment");
+            }
+            const { bootstrapToken: token } = decodePairingSetupCode(enrollment.setupCode);
+            await expect(
+              verifyDeviceBootstrapToken({
+                token,
+                deviceId,
+                publicKey: "snapshot-fork-public-key",
+                role: "node",
+                scopes: [],
+              }),
+            ).resolves.toEqual({ ok: true });
+            await expect(
+              consumeDeviceBootstrapTokenWithSetupCompletion({
+                token,
+                deviceId,
+                completedAtMs: 1_000,
+                admitsCloudWorkerSetup: enrollmentManager.admitsNodeSetupCompletion,
+              }),
+            ).resolves.toMatchObject({ completion: { setupId: enrollment.setupId, deviceId } });
+            expect(await enrollment.waitForDeviceId()).toBe(deviceId);
+            const owner = support.testState.store.list()[0]!;
+            if (change === "destroy") {
+              await support.testState.store.requestDestroy({
+                environmentId: owner.environmentId,
+                state: owner.state,
+              });
+            } else if (change === "replacement-owner") {
+              await support.testState.store.transition({
+                environmentId: owner.environmentId,
+                from: owner.state,
+                to: "ready",
+                patch: {
+                  ...support.readyPatch(owner.environmentId),
+                  leaseId: "replacement-lease",
+                  nodeDeviceId: deviceId,
+                  sshEndpoint: null,
+                },
+              });
+            }
+            // Snapshot demand bookkeeping revalidates the allocation after node connection.
+            if (change === "replacement-owner") {
+              expect(() => options?.assertCurrent?.()).toThrow(
+                "Worker environment owner changed during teardown",
+              );
+            }
+            options?.assertCurrent?.();
+            return { leaseId: "snapshot-fork-lease", node: { deviceId }, sharedHost: false };
+          },
+          destroy,
+        }),
+        {
+          prepareNodeEnrollment: enrollmentManager.begin,
+          closeNodeEnrollment: enrollmentManager.close,
+          ensureNodeWorkerBundle: async () => support.BOOTSTRAP_RECEIPT,
+        },
+      );
+      const creation = workerService.createWithRequest({
+        profileId: "development",
+        idempotencyKey: "snapshot-fork-admission",
+        executionMode: "worker-turn",
+      });
+      if (change === "unchanged") {
+        await expect(creation).resolves.toMatchObject({ state: "ready", nodeDeviceId: deviceId });
+        expect(destroy).not.toHaveBeenCalled();
+      } else if (change === "replacement-owner") {
+        // The stale error writer is also fenced from the replacement's ready row.
+        await expect(creation).rejects.toThrow("changed during update");
+        expect(support.testState.store.list()[0]).toMatchObject({
+          state: "ready",
+          leaseId: "replacement-lease",
+          nodeDeviceId: deviceId,
+        });
+        expect(destroy).not.toHaveBeenCalled();
+      } else {
+        await expect(creation).rejects.toMatchObject({
+          code: "provider_failure",
+          message: expect.stringContaining("Worker provisioning operation is closed"),
+        });
+        expect(support.testState.store.list()[0]?.leaseId).not.toBe("snapshot-fork-lease");
+      }
+    },
+  );
+
   it.each(["bundle-failed", "provider-timeout"] as const)(
     "prepares the bundle before project-less enrollment while preserving a %s outcome",
     async (outcome) => {

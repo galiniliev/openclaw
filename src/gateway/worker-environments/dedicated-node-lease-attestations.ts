@@ -98,6 +98,7 @@ export function createDedicatedNodeLeaseAttestations(
       return record;
     },
     async inspect(
+      this: void,
       record: WorkerEnvironmentRecord,
       provider: WorkerProvider,
       lease: Parameters<WorkerProvider["inspect"]>[0],

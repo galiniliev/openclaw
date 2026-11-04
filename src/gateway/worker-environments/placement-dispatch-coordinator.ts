@@ -419,6 +419,18 @@ export function coordinateWorkerPlacementDispatch(
       registerOperation({ kind: "reclaim", request, ...tracked });
       return await tracked.operation;
     },
+    pause: (request, authorize) =>
+      admitDispatch(
+        request,
+        (_signal, assertCurrent) =>
+          runSessionOperation(request.sessionId, undefined, () =>
+            service.pause(
+              request,
+              composePlacementAuthorization(authorize, () => assertCurrent?.()),
+            ),
+          ),
+        authorize,
+      ),
     getEnvironmentAttachedSessionIds: (environmentId) =>
       service.getEnvironmentAttachedSessionIds(environmentId),
     readEnvironmentSessionIds: (environmentId) => service.readEnvironmentSessionIds(environmentId),

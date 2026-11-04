@@ -8,6 +8,7 @@ import type {
   WorkerPlacementDispatchContract,
   WorkerPlacementRedispatch,
 } from "./service-contract.js";
+import { readWorkerProfileSelection } from "./service-validation.js";
 import { canRedispatchFailedWorkerPlacement } from "./session-placement-lifecycle.js";
 
 export function createWorkerPlacementRedispatch(params: {
@@ -46,6 +47,7 @@ export function createWorkerPlacementRedispatch(params: {
       throw new Error(`Worker recovery is not ready: ${placement.recoveryError}`);
     }
     const { profileId, providerId, profileSnapshot, nodeDeviceId } = previousEnvironment;
+    const { machineClass, os } = readWorkerProfileSelection(profileSnapshot);
     const { sessionId, sessionKey, agentId, executionMode } = placement;
     const identity = { sessionId, sessionKey, agentId, executionMode };
     let devicePlacement: Awaited<ReturnType<WorkerDevicePlacementRequirementResolver>> | undefined;
@@ -57,9 +59,6 @@ export function createWorkerPlacementRedispatch(params: {
     }
     signal?.throwIfAborted();
     assertCurrent();
-    const machineClass =
-      typeof profileSnapshot.machineClass === "string" ? profileSnapshot.machineClass : undefined;
-    const os = typeof profileSnapshot.os === "string" ? profileSnapshot.os : undefined;
     const readNativeCredential = repositoryChatDispatchCredentialReader(
       identity,
       { profileId, providerId, profileSnapshot, executionMode },

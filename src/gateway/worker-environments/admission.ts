@@ -29,8 +29,8 @@ export const STALE_WORKER_BUILD_REASON =
 export class StaleWorkerBuildError extends Error {
   readonly code = "invalid_state";
 
-  constructor() {
-    super(STALE_WORKER_BUILD_REASON);
+  constructor(detail = STALE_WORKER_BUILD_REASON) {
+    super(detail);
   }
 }
 
@@ -62,7 +62,7 @@ export function requireCurrentWorkerTurnEnvironment(params: {
     throw new Error("Active worker placement does not match its attached environment");
   }
   if (!supportsCurrentWorkerLaunch(bootstrapReceipt)) {
-    throw new Error(
+    throw new StaleWorkerBuildError(
       "Active worker bundle lacks the current launch capability; reprovision the worker before launch",
     );
   }

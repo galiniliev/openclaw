@@ -11,6 +11,19 @@ export const gatewayPluginTestFiles = [
 
 // Native database consumers retain lifecycle cleanup within each forked process.
 export const gatewayDatabaseWorkerTestFiles = [
+  "src/gateway/worker-environments/placement-disk-pause.test.ts",
+  "src/gateway/worker-environments/placement-dispatch-retained.test.ts",
+  "src/gateway/worker-environments/placement-dispatch-retained-recovery.test.ts",
+  "src/gateway/worker-environments/placement-dispatch-repository-ref-recovery.test.ts",
+  "src/gateway/worker-environments/placement-dispatch-startup-containment.test.ts",
+  "src/gateway/worker-environments/provider-intent-replay.test.ts",
+  "src/gateway/worker-environments/provider-node-resume.test.ts",
+  "src/gateway/worker-environments/retained-lease-lifecycle.test.ts",
+  "src/gateway/worker-environments/repository-project-admission.integration.test.ts",
+  "src/gateway/worker-environments/worker-placement-retained-recovery.test.ts",
+  "src/gateway/worker-environments/worker-turn-retained-failure.test.ts",
+  "src/gateway/worker-environments/worker-turn-lease-admission.test.ts",
+  "src/gateway/worker-environments/workspace-result-retained-disk.test.ts",
   "src/gateway/agent-runtime-identity-token.test.ts",
   "src/gateway/agent-turn/agent-run-execution-phase.owner.test.ts",
   "src/gateway/agent-turn/agent-run-media.test.ts",
@@ -505,6 +518,7 @@ export const gatewayDatabaseWorkerTestFiles = [
   "src/gateway/worker-environments/worker-turn-early-final.test.ts",
   "src/gateway/worker-environments/worker-turn-execution.test.ts",
   "src/gateway/worker-environments/worker-turn-launcher-build-recovery.test.ts",
+  "src/gateway/worker-environments/worker-turn-launcher-capability-recovery.test.ts",
   "src/gateway/worker-environments/worker-turn-launcher-claim-admission.test.ts",
   "src/gateway/worker-environments/worker-turn-launcher-computer.test.ts",
   "src/gateway/worker-environments/worker-turn-launcher-failure-recovery.test.ts",
@@ -545,19 +559,8 @@ export const gatewayDatabaseWorkerTestFiles = [
   "test/plugins/codex-model-catalog.gateway.test.ts",
 ];
 
-export const gatewayClientTestInclude = [
-  "packages/gateway-client/src/**/*.test.ts",
-  "packages/gateway-protocol/src/**/*.test.ts",
-  "src/gateway/**/*client*.test.ts",
-  "src/gateway/**/*reconnect*.test.ts",
-  "src/gateway/**/*android-node*.test.ts",
-  "src/gateway/**/*gateway-cli-backend*.test.ts",
-];
-export const gatewayClientTestExclude = [
-  ...gatewayDatabaseWorkerTestFiles,
-  "src/gateway/**/*server*.test.ts",
-  "src/gateway/server-methods/**/*.test.ts",
-];
+export const gatewayClientTestInclude = [];
+export const gatewayClientTestExclude = [...gatewayDatabaseWorkerTestFiles];
 
 // Native Vitest subprocesses cold-import the real Gateway; keep their collection
 // outside concurrent files instead of expanding their process-lifecycle deadlines.
@@ -599,10 +602,7 @@ export const gatewayMethodsIsolatedTestFiles = [
   "src/gateway/server-methods/usage.sessions-usage.test.ts",
 ];
 
-export const gatewayMethodsTestInclude = [
-  "src/gateway/server-methods/**/*.test.ts",
-  ...gatewayPluginTestFiles,
-];
+export const gatewayMethodsTestInclude = [...gatewayPluginTestFiles];
 export const gatewayMethodsTestExclude = [
   ...gatewayDatabaseWorkerTestFiles,
   ...gatewayMethodsIsolatedTestFiles,
@@ -660,13 +660,6 @@ export const gatewayCoreTestExclude = [
   ...gatewayServerIsolatedTestFiles,
   ...databaseWorkerCoreTestFiles,
   ...gatewayDatabaseWorkerTestFiles,
-  "src/gateway/server-methods/**/*.test.ts",
-  "packages/gateway-protocol/src/**/*.test.ts",
-  "src/gateway/**/*client*.test.ts",
-  "src/gateway/**/*reconnect*.test.ts",
-  "src/gateway/**/*android-node*.test.ts",
-  "src/gateway/**/*gateway-cli-backend*.test.ts",
-  "src/gateway/**/*server*.test.ts",
   "src/gateway/gateway.test.ts",
   "src/gateway/embeddings-http.test.ts",
   "src/gateway/models-http.test.ts",

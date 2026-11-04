@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { Selectable, Updateable } from "kysely";
 import { REPOSITORY_BRANCH_PREFIX_PATTERN } from "../config/repository-branch-prefix.js";
 import {
@@ -11,9 +12,12 @@ import type { EngineConnection } from "../infra/sql-connection.js";
 import { ensureSessionRepositoryWorkspaceSchema } from "./openclaw-state-db-schema-additive.js";
 import { tableExists } from "./openclaw-state-db-schema-helpers.js";
 import type { DB, SessionRepositoryWorkspaces } from "./openclaw-state-db.generated.js";
+import { readRetainedWorkspaceAuthority } from "./retained-workspace-authority.js";
 import { repositoryWorkspacePublication } from "./session-repository-workspaces.receipts.js";
+import { readRepositoryWorkspaceRecovery } from "./session-repository-workspaces.recovery.js";
 import type {
   RepositoryWorkspaceBase,
+  RepositoryWorkspaceBranchReset,
   RepositoryWorkspaceCheckpoint,
   RepositoryWorkspaceCreate,
   RepositoryWorkspaceMutation,
@@ -68,9 +72,13 @@ function project(row: Selectable<SessionRepositoryWorkspaces>): SessionRepositor
     branch: row.branch,
     checkpointRef: row.checkpoint_ref,
     manifestHash: row.manifest_hash,
+    ...(row.disk_authority_json
+      ? { diskAuthority: readRetainedWorkspaceAuthority(row.disk_authority_json) }
+      : {}),
     revision: row.revision,
     createdAtMs: row.created_at_ms,
     updatedAtMs: row.updated_at_ms,
+    ...(row.recovery_json ? { recovery: readRepositoryWorkspaceRecovery(row.recovery_json) } : {}),
   };
 }
 
@@ -220,9 +228,59 @@ export function bindSessionRepositoryWorkspaceBaseInDatabase(
     ) {
       throw new Error("Repository workspace base changed");
     }
+    if (current.diskAuthority && !isDeepStrictEqual(current.diskAuthority, input.diskAuthority)) {
+      throw new Error("Retained workspace disk authority changed; replacement is refused");
+    }
     return {
+      ...(input.diskAuthority ? { disk_authority_json: JSON.stringify(input.diskAuthority) } : {}),
       base_commit: input.baseCommit,
       ...(input.baseManifestHash ? { base_manifest_hash: input.baseManifestHash } : {}),
+    };
+  });
+}
+
+/** Persist the admitted replacement SHA before dropping the lost worker checkpoint binding. */
+export function resetSessionRepositoryWorkspaceToBranchInDatabase(
+  db: EngineConnection,
+  input: RepositoryWorkspaceBranchReset,
+  nowMs: number,
+): RepositoryWorkspaceMutationResult {
+  if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(input.sourceCommit)) {
+    throw new Error("Repository recovery requires an admitted immutable source");
+  }
+  return mutate(db, input, nowMs, (current) => {
+    if (current.diskAuthority) {
+      throw new Error("Retained workspace disk is authoritative; source replacement is refused");
+    }
+    return {
+      requested_ref: input.sourceCommit,
+      base_commit: null,
+      base_manifest_hash: null,
+      checkpoint_ref: null,
+      manifest_hash: null,
+      ...(input.recovery
+        ? {
+            // Copy accepted facts from the CAS-protected row, never a caller's old snapshot.
+            recovery_json: JSON.stringify({
+              ...input.recovery,
+              atMs: nowMs,
+              // A retry before any replacement checkpoint is accepted must not erase
+              // the unavailable checkpoint's provenance with the reset row's nulls.
+              original:
+                !current.checkpointRef && current.recovery
+                  ? current.recovery.original
+                  : {
+                      revision: current.revision,
+                      baseCommit: current.baseCommit,
+                      baseManifestHash: current.baseManifestHash,
+                      checkpointRef: current.checkpointRef,
+                      manifestHash: current.manifestHash,
+                    },
+              sourceCommit: input.sourceCommit,
+              unrecoverablePrivateContent: true,
+            }),
+          }
+        : {}),
     };
   });
 }

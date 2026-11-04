@@ -72,7 +72,7 @@ export function poolPolicy(options: PoolOptions, profileId: string, providerId?:
   const profile = config?.profiles?.[profileId];
   const configuredProvider = profile ? normalizeCapabilityProviderId(profile.provider) : undefined;
   const configured = providerId === undefined || configuredProvider === providerId;
-  const target = profile && configured ? (profile.readyWorkers ?? 1) : 0;
+  const target = profile && configured && !profile.retention ? (profile.readyWorkers ?? 1) : 0;
   return { configured, target, maxTotal: config?.preparedPool?.maxTotal ?? DEFAULT_MAX_TOTAL };
 }
 export function retirePoolRecord(

@@ -285,6 +285,8 @@ export async function withNodeWorkerTransferHttpRequest<T>(
   return consumed.value;
 }
 
+export const NODE_WORKER_TRANSFER_RESULT_MAX_BYTES = 64 * 1024;
+
 export async function requireNodeWorkerTransferOk(response: IncomingMessage): Promise<void> {
   if (response.statusCode === 200) {
     return;

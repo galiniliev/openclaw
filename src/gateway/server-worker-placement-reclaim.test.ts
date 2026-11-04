@@ -448,6 +448,7 @@ it("an idempotent failed-cleanup result does not cancel work already on the loca
     placements: {
       get: () => local as never,
       getAsync: async () => local as never,
+      listPendingWorkspaceResultsAsync: async () => [],
       waitForTurnClaimRelease: vi.fn(),
     },
     loadSessionRuntime: async () => sessionRuntime(storePath),

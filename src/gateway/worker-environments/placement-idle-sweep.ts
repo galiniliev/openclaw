@@ -15,8 +15,9 @@ class WorkerPlacementAutoSuspendBusyError extends Error {}
 
 export function createWorkerPlacementIdleSweep(options: {
   placements: WorkerSessionPlacementStore;
-  environments: Pick<WorkerEnvironmentService, "get">;
-  dispatch: Pick<WorkerPlacementDispatchService, "reclaim">;
+  environments: Pick<WorkerEnvironmentService, "get"> &
+    Partial<Pick<WorkerEnvironmentService, "list">>;
+  dispatch: Pick<WorkerPlacementDispatchService, "reclaim" | "pause">;
   reportChanges: (operation: () => Promise<void>) => Promise<void>;
   getConfig: () => OpenClawConfig;
   info: (message: string) => void;
@@ -78,8 +79,11 @@ export function createWorkerPlacementIdleSweep(options: {
       if (signal?.aborted || options.isStopping?.()) {
         return;
       }
-      const profiles = options.getConfig().cloudWorkers?.profiles;
-      if (!profiles || !Object.values(profiles).some((profile) => profile.suspendAfter)) {
+      const profiles = options.getConfig().cloudWorkers?.profiles ?? {};
+      if (
+        !Object.values(profiles).some((profile) => profile.suspendAfter || profile.retention) &&
+        !options.environments.list?.().some((environment) => environment.retention)
+      ) {
         return;
       }
       await options.reportChanges(async () => {
@@ -99,11 +103,30 @@ export function createWorkerPlacementIdleSweep(options: {
           }
           const environment = options.environments.get(placement.environmentId);
           const suspendAfter = environment && profiles[environment.profileId]?.suspendAfter;
-          if (!environment || !suspendAfter) {
+          const retained = environment?.retention;
+          if (
+            retained?.receipt?.computeWindow.state === "closed" &&
+            retained.receipt.desiredState === "suspended" &&
+            !retained.receipt.stopPending &&
+            !retained.operation
+          ) {
+            continue;
+          }
+          const computeExpired =
+            retained &&
+            (!retained.receipt ||
+              Date.parse(retained.receipt.computeWindow.expiresAt) <= Date.now() ||
+              retained.operation !== null ||
+              retained.desiredState === "suspended");
+          if (!environment || (!suspendAfter && !computeExpired)) {
             continue;
           }
           // Placement activation and every turn-claim admission/release durably refresh this fact.
-          if (Date.now() - placement.updatedAtMs < parseDurationMs(suspendAfter)) {
+          if (
+            !computeExpired &&
+            suspendAfter &&
+            Date.now() - placement.updatedAtMs < parseDurationMs(suspendAfter)
+          ) {
             continue;
           }
           if (
@@ -153,7 +176,11 @@ export function createWorkerPlacementIdleSweep(options: {
               },
               { assertCurrent },
             );
-            await options.dispatch.reclaim(request, undefined, beforeDrain);
+            if (retained) {
+              await options.dispatch.pause(request, beforeDrain);
+            } else {
+              await options.dispatch.reclaim(request, undefined, beforeDrain);
+            }
             options.info(
               `auto-suspended ${placement.sessionKey} after ${suspendAfter} idle; wakes on next message`,
             );

@@ -46,14 +46,14 @@ export type WorkerPlacementPendingOperations = {
 };
 
 export type WorkerPlacementReclaimBarriers = {
-  runReclaimPreparation: (
+  runReclaimPreparation: <T extends WorkerSessionPlacementRecord>(
     params: WorkerPlacementReclaimRequest & {
       authorize?: WorkerPlacementAuthorization;
       beforeDrain?: WorkerPlacementAuthorization;
       pendingOperations?: WorkerPlacementPendingOperations;
-      run: (authorize?: WorkerPlacementAuthorization) => Promise<WorkerReclaimPlacement>;
+      run: (authorize?: WorkerPlacementAuthorization) => Promise<T>;
     },
-  ) => Promise<WorkerReclaimPlacement>;
+  ) => Promise<T>;
   runReclaimBarrier: (
     params: WorkerPlacementReclaimRequest & {
       authorize?: WorkerPlacementAuthorization;

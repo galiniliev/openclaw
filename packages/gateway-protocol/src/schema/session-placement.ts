@@ -303,13 +303,14 @@ export const SessionsReclaimParamsSchema = closedObject({
   ),
 });
 
-/** Terminal placement returned after a worker reclaim operation. */
+/** Placement after worker reclaim, retained compute pause, or Gateway recovery. */
 export const SessionsReclaimResultPlacementSchema = Type.Union([
+  ActiveWorkerSessionPlacementSchema,
   LocalSessionPlacementSchema,
   ReclaimedSessionPlacementSchema,
 ]);
 
-/** Result returned once worker ownership is reclaimed or a failed placement is cleared. */
+/** Result after worker reclaim, retained compute pause, or failed-placement recovery. */
 export const SessionsReclaimResultSchema = closedObject({
   ok: Type.Literal(true),
   key: NonEmptyString,

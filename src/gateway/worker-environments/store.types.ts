@@ -1,3 +1,4 @@
+import type { WorkerSessionDiskRetention } from "../../plugins/worker-retention.types.js";
 import type { WorkerCredentialRecord } from "./credential.js";
 import type {
   WorkerEnvironmentIntentInput,
@@ -35,6 +36,13 @@ export type WorkerEnvironmentCommitAdmission = Array<{
 
 /** Native mutation signatures own the host callbacks and the worker's serializable contract. */
 export type WorkerEnvironmentMutationMethods = {
+  recordRetention(input: {
+    environmentId: string;
+    expectedOwnerEpoch: number;
+    expectedRetention: WorkerSessionDiskRetention;
+    retention: WorkerSessionDiskRetention;
+    assertCurrent?: () => void;
+  }): WorkerEnvironmentRecord;
   createIntent(input: WorkerEnvironmentIntentInput): WorkerEnvironmentRecord;
   ensureNodeEnrollment(environmentId: string): WorkerEnvironmentRecord;
   revokeEnvironmentCredential(input: CredentialRevocationInput): void;

@@ -17,6 +17,7 @@ import type {
   WorkerMachineOption,
   WorkerOperatingSystem,
   WorkerProfile,
+  WorkerExecutionMode,
 } from "../../plugins/capability-provider.types.js";
 import type { DesktopObserveRequester } from "../desktop/observe-requester.js";
 import type { WorkerEnvironmentPreparation } from "./environment-record.js";
@@ -47,6 +48,12 @@ import type {
   WorkerTunnelStatus,
 } from "./tunnel-contract.js";
 
+export type WorkerEnvironmentPreparationAuthority = {
+  signal?: AbortSignal;
+  readNativeCredential?: GitHubCredentialReader;
+  retainCredentialCleanup?: (revoke: () => Promise<void>) => void;
+};
+
 export function deriveEnvironmentIntent(idempotencyKey: string): {
   environmentId: string;
   provisionOperationId: string;
@@ -60,6 +67,7 @@ export function deriveEnvironmentIntent(idempotencyKey: string): {
 
 /** Non-secret worker projection available to Gateway request handlers. */
 export type WorkerEnvironmentServiceRecord = {
+  retention?: import("../../plugins/worker-retention.types.js").WorkerSessionDiskRetention | null;
   startStatus?: import("../../../packages/gateway-protocol/src/schema/environments.js").WorkerEnvironmentStartStatus;
   environmentId: string;
   providerId: string;
@@ -71,6 +79,8 @@ export type WorkerEnvironmentServiceRecord = {
   state: WorkerEnvironmentState;
   ownerEpoch: number;
   createdAtMs: number;
+  /** Persisted activation history, already carried by the native service projection. */
+  lastActivatedAtMs?: number | null;
   idleSinceAtMs: number | null;
   destroyRequestedAtMs: number | null;
   attachedSessionIds: readonly string[];
@@ -170,6 +180,7 @@ export type WorkerEnvironmentServiceContract = {
   prepare(
     request: EnvironmentsPrepareParams,
     authorize?: () => void,
+    authority?: WorkerEnvironmentPreparationAuthority,
   ): Promise<EnvironmentsPrepareResult>;
   create(
     profileId: string,
@@ -191,6 +202,14 @@ export type WorkerEnvironmentServiceContract = {
     requester?: DesktopObserveRequester;
   }): Promise<WorkerDesktopObserveResult>;
   launchDesktopApp(request: WorkerDesktopLaunchParams): Promise<WorkerDesktopLaunchResult>;
+  /** Existing exact-lease admission for explicit retained-file requests; never allocates a replacement. */
+  inspectTurnLease?(request: {
+    environmentId: string;
+    ownerEpoch: number;
+    leaseId: string;
+    assertCurrent: () => void;
+    signal?: AbortSignal;
+  }): Promise<void>;
   startTunnel(request: WorkerTunnelRequest): Promise<WorkerTunnelHandle>;
   stopTunnel(environmentId: string, ownerEpoch?: number): Promise<void>;
 };
@@ -245,6 +264,8 @@ export type WorkerPlacementMoveDestination = Pick<
 
 export type WorkerPlacementReclaimRequest = WorkerSessionPlacementIdentity & {
   recoverToGateway?: SessionsReclaimParams["recoverToGateway"];
+  /** Server-owned delete/archive only; never accepted from sessions.reclaim RPC input. */
+  retireRetainedWorkspace?: true;
 };
 
 export type WorkerPlacementMoveRequest = WorkerSessionPlacementIdentity & {
@@ -291,9 +312,37 @@ export type WorkerPlacementDispatchContract = {
     authorize?: WorkerPlacementAuthorization,
     beforeDrain?: WorkerPlacementReclaimSourceCheck,
   ): Promise<Extract<WorkerSessionPlacementRecord, { state: "local" | "reclaimed" }>>;
+  /** Close retained compute without retiring its private disk or active placement. */
+  pause?(
+    request: WorkerPlacementReclaimRequest,
+    authorize?: WorkerPlacementAuthorization,
+  ): Promise<Extract<WorkerSessionPlacementRecord, { state: "active" }>>;
   forceDestroyEnvironment?(
     environmentId: string,
     onCleanupError?: (error: unknown) => void,
   ): Promise<WorkerEnvironmentServiceRecord>;
   reconcileActive?(environmentId?: string): Promise<void>;
 };
+
+export function workerAllocationProfileSnapshot(
+  profile: WorkerProfile,
+  {
+    machineClass,
+    os,
+    executionMode,
+  }: { machineClass?: string; os?: string; executionMode?: WorkerExecutionMode },
+): WorkerProfile {
+  // New allocations inherit selectors and settings, not preparation or archival evidence.
+  const {
+    project: _project,
+    runtimePreparation: _runtimePreparation,
+    historicalProfileSnapshotJson: _historicalProfileSnapshotJson,
+    ...snapshot
+  } = profile;
+  return {
+    ...snapshot,
+    ...(machineClass === undefined ? {} : { machineClass }),
+    ...(os === undefined ? {} : { os }),
+    ...(executionMode === undefined ? {} : { executionMode }),
+  };
+}

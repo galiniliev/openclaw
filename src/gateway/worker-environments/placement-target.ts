@@ -1,6 +1,10 @@
+import { RequiredWorkerProfileError } from "../../config/required-worker-profile.js";
+import type { OpenClawConfig } from "../../config/types.js";
 import { supportsCurrentWorkerLaunch } from "../../worker/worker-build-identity.js";
+import { DEVICE_WORKER_PROVIDER_ID } from "./device-provider-identity.js";
 import type { WorkerEnvironmentRecord } from "./environment-record.js";
 import type { WorkerSessionPlacementRecord } from "./placement-record.js";
+import type { WorkerPlacementReclaimRequest } from "./service-contract.js";
 
 export type WorkerPlacementCancellationTarget = Readonly<
   Pick<WorkerSessionPlacementRecord, "state" | "generation" | "environmentId" | "activeOwnerEpoch">
@@ -74,6 +78,32 @@ export function isCurrentActiveWorkerEnvironment(
   );
 }
 
+/** Initial setup never owned a workspace; completed teardown may admit a fresh attempt. */
+export function isCompletedInitialRetainedWorkerCleanup(
+  placement: WorkerSessionPlacementRecord,
+  environment: WorkerEnvironmentRecord | undefined,
+): boolean {
+  return Boolean(
+    placement.state === "failed" &&
+    placement.activeOwnerEpoch === null &&
+    placement.workspaceBaseManifestRef === null &&
+    placement.remoteWorkspaceDir === null &&
+    !placement.turnClaim &&
+    !placement.confirmedLossRecovery &&
+    environment &&
+    environment.environmentId === placement.environmentId &&
+    environment.providerId !== DEVICE_WORKER_PROVIDER_ID &&
+    environment.sharedHost !== true &&
+    environment.state === "destroyed" &&
+    environment.lastActivatedAtMs === null &&
+    environment.attachedSessionIds.length === 0 &&
+    environment.retention &&
+    environment.retention.owner.sessionId === placement.sessionId &&
+    environment.retention.owner.sessionKey === placement.sessionKey &&
+    environment.retention.owner.agentId === placement.agentId,
+  );
+}
+
 export function isFailedWorkerPlacementEnvironmentGone(params: {
   environmentService:
     | {
@@ -99,5 +129,47 @@ export function isFailedWorkerPlacementEnvironmentGone(params: {
     );
   } catch {
     return false;
+  }
+}
+
+/** Explicit Gateway recovery requires a failed placement and proven old cleanup. */
+export function assertWorkerGatewayRecoverySource({
+  request,
+  source,
+  config,
+  environmentService,
+}: {
+  request: WorkerPlacementReclaimRequest;
+  source: WorkerSessionPlacementRecord | undefined;
+  config: OpenClawConfig;
+  environmentService: Parameters<
+    typeof isFailedWorkerPlacementEnvironmentGone
+  >[0]["environmentService"];
+}) {
+  if (request.recoverToGateway && config.cloudWorkers?.requiredProfile) {
+    throw new RequiredWorkerProfileError(
+      "Gateway recovery is disabled by the required worker profile policy; Stop retains the workspace for remote recovery.",
+    );
+  }
+  if (!request.recoverToGateway) {
+    return;
+  }
+  if (
+    source?.state !== "failed" ||
+    source.generation !== request.recoverToGateway.expectedGeneration ||
+    source.sessionKey !== request.sessionKey ||
+    source.agentId !== request.agentId
+  ) {
+    throw new Error(`Session ${request.sessionKey} changed before Gateway recovery. Retry.`);
+  }
+  if (
+    !isFailedWorkerPlacementEnvironmentGone({
+      environmentService,
+      placement: source,
+    })
+  ) {
+    throw new Error(
+      "Failed cloud worker environment cleanup is still pending; use Stop cloud worker",
+    );
   }
 }

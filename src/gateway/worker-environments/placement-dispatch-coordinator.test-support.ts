@@ -51,6 +51,7 @@ export function createCoordinatorTestService(overrides: Partial<DispatchService>
   };
   return {
     dispatch: unexpected,
+    pause: unexpected,
     move: unexpected,
     reclaim: unexpected,
     forceDestroyEnvironment: unexpected,

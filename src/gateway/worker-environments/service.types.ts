@@ -17,6 +17,7 @@ import type { WorkerTunnelManager } from "./tunnel.js";
 
 export type WorkerEnvironmentCreateRequest = {
   profileId: string;
+  retentionOwner?: { sessionId: string; sessionKey: string; agentId: string };
   idempotencyKey: string;
   machineClass?: string;
   executionMode?: WorkerExecutionMode;

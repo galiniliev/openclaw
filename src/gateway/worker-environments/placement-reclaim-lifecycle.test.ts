@@ -1,4 +1,6 @@
-import { expect, it, vi } from "vitest";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { expect, it, onTestFinished, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { NODE_WORKER_ENVIRONMENT_STOP_COMMAND } from "../../infra/node-commands.js";
 import {
@@ -29,15 +31,21 @@ it.each([
   { operation: "recovery", failure: "rejection" },
   { operation: "reclaim", failure: "reconciliation" },
   { operation: "reclaim", failure: "resume-owner-close" },
+  { operation: "idle suspend", failure: "disconnect-worker-loss" },
+  { operation: "idle suspend", failure: "disconnect-reconnect" },
+  { operation: "idle suspend", failure: "disconnect-enrolled-worker-loss" },
 ] as const)(
   "preserves $operation $failure through quiescence and teardown",
   async ({ operation, failure }) => {
+    const disconnected = failure.startsWith("disconnect-");
+    let nodeConnected = true;
     const { stateDb: database, store: environments, root } = support.testState;
     let placements = createWorkerSessionPlacementStore({ database });
     const harnessOptions = {
       workspacePath: root,
       reconcileChanged: false,
       reconcileCommitsManifest: false,
+      hasCurrentRunner: () => nodeConnected,
     };
     let harness = await createHarness(database, placements, harnessOptions);
     const environmentId = harness.ready.environmentId;
@@ -117,12 +125,13 @@ it.each([
         },
       })),
     });
+    const launchNodeWorker = vi.fn();
     const tunnels = createNodeWorkerTunnelManager({
       gatewayDeviceId: "gateway-fixture",
       getEnvironment: (id) => environments.get(id),
       listEnvironments: () => environments.list(),
       getTransport: () => transport,
-      launchNodeWorker: vi.fn(),
+      launchNodeWorker,
       validateWorkerTurn: (claim) => placements.validateTurnClaim(claim),
       workspaceTransfer: transfer,
     });
@@ -152,6 +161,7 @@ it.each([
       vi.mocked(handle.reconcileWorkspace).mockImplementationOnce(async () => {
         if (failure === "resume-owner-close") {
           transport.listCurrentNodes = async () => {
+            nodeConnected = true;
             transport.listCurrentNodes = async () => nodes;
             closingOwner = service.destroy(environmentId);
             await closingOwner;
@@ -164,7 +174,7 @@ it.each([
     const providerPending = createDeferred();
     const destroyStarted = createDeferred();
     const destroy = vi.fn(async () => {});
-    if (failure !== "reconciliation" && failure !== "resume-owner-close") {
+    if (failure !== "reconciliation" && failure !== "resume-owner-close" && !disconnected) {
       destroy.mockImplementationOnce(async () => {
         destroyStarted.resolve();
         if (failure === "timeout") {
@@ -174,8 +184,13 @@ it.each([
         }
       });
     }
+    let workerLost = false;
     const service = support.createService(
-      support.createProvider({ supportedExecutionModes: ["worker-turn"], destroy }),
+      support.createProvider({
+        supportedExecutionModes: ["worker-turn"],
+        destroy,
+        inspect: async () => ({ status: workerLost ? "unknown" : "active" }),
+      }),
       { nodeTunnelManager: tunnels, providerCallTimeoutMs: 1_000 },
     );
     let primaryError: unknown;
@@ -208,20 +223,120 @@ it.each([
     );
     invoke.mockClear();
     vi.mocked(harness.environments.startTunnel).mockClear();
+    if (disconnected) {
+      nodeConnected = false;
+      transport.listCurrentNodes = async () => [];
+    }
     // SQLite workers compare cross-thread monotonic deadlines; fake only the provider timer.
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const warn = vi.fn();
+    if (operation === "idle suspend") {
+      const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 120_000);
+      onTestFinished(() => clock.mockRestore());
+    }
+    const idleSweep = createWorkerPlacementIdleSweep({
+      placements,
+      environments: harness.environments,
+      dispatch: coordinated,
+      reportChanges: (run) => run(),
+      getConfig: () => ({
+        cloudWorkers: {
+          profiles: { [REQUEST.profileId]: { provider: "fake", suspendAfter: "1m" } },
+        },
+      }),
+      info: vi.fn(),
+      warn,
+    });
     const result = (
-      operation === "recovery"
-        ? coordinated.reconcileActive()
-        : operation === "reclaim"
-          ? coordinated.reclaim(REQUEST)
-          : coordinated.move({
-              ...REQUEST,
-              source: placementSource(active),
-              target: { kind: "gateway" },
-            })
+      operation === "idle suspend"
+        ? idleSweep.sweep()
+        : operation === "recovery"
+          ? coordinated.reconcileActive()
+          : operation === "reclaim"
+            ? coordinated.reclaim(REQUEST)
+            : coordinated.move({
+                ...REQUEST,
+                source: placementSource(active),
+                target: { kind: "gateway" },
+              })
     ).catch((error: unknown) => error);
     try {
+      if (disconnected) {
+        const preserved = path.join(support.testState.root, "preserved-history.txt");
+        await fs.writeFile(preserved, "Historical input and unknown effects remain preserved");
+        await result;
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining("not connected"));
+        expect(placements.get(active.sessionId)).toMatchObject({
+          state: "draining",
+          turnClaim: null,
+        });
+        expect(await placements.listPendingWorkspaceResultsAsync()).toEqual([]);
+        expect(destroy).not.toHaveBeenCalled();
+        if (failure === "disconnect-enrolled-worker-loss") {
+          await coordinated.reconcileActive();
+          const pending = await placements.listPendingWorkspaceResultsAsync();
+          expect(pending).toHaveLength(1);
+          const tunnelAttempts = vi.mocked(harness.environments.startTunnel).mock.calls.length;
+          for (let pass = 0; pass < 3; pass++) {
+            await coordinated.reconcileActive();
+          }
+          expect(await placements.listPendingWorkspaceResultsAsync()).toEqual(pending);
+          expect(harness.environments.startTunnel).toHaveBeenCalledTimes(tunnelAttempts);
+        }
+        if (failure === "disconnect-reconnect") {
+          await coordinated.reconcileActive();
+          const pending = await placements.listPendingWorkspaceResultsAsync();
+          expect(pending).toHaveLength(1);
+          expect(pending[0]).toMatchObject({
+            stagedResultRef: null,
+            workspaceAcceptedAtMs: null,
+          });
+          await coordinated.reconcileActive();
+          expect(await placements.listPendingWorkspaceResultsAsync()).toEqual(pending);
+          expect(destroy).not.toHaveBeenCalled();
+          nodeConnected = true;
+          transport.listCurrentNodes = async () => nodes;
+          await coordinated.reconcileActive();
+          expect(placements.get(active.sessionId)).toMatchObject({
+            state: "reclaimed",
+            turnClaim: null,
+          });
+          expect(await placements.listPendingWorkspaceResultsAsync()).toEqual([]);
+          expect(await fs.readFile(preserved, "utf8")).toBe(
+            "Historical input and unknown effects remain preserved",
+          );
+          expect(destroy).toHaveBeenCalledOnce();
+          expect(launchNodeWorker).not.toHaveBeenCalled();
+          return;
+        }
+        workerLost = true;
+        await coordinated.reconcileActive();
+        expect(service.get(environmentId)).toMatchObject({
+          state: "failed",
+          leaseId: null,
+          lastError: "Worker provider no longer recognizes the lease",
+        });
+        expect(placements.get(active.sessionId)).toMatchObject({
+          state: "failed",
+          turnClaim: null,
+          environmentId,
+          remoteWorkspaceDir: active.remoteWorkspaceDir,
+          workspaceBaseManifestRef: active.workspaceBaseManifestRef,
+          recoveryError: expect.stringContaining("recovery required"),
+        });
+        const failed = placements.get(active.sessionId);
+        await coordinated.reconcileActive();
+        expect(placements.get(active.sessionId)).toEqual(failed);
+        expect(await fs.readFile(preserved, "utf8")).toBe(
+          "Historical input and unknown effects remain preserved",
+        );
+        // Provider reconciliation performs one canonical lost-lease cleanup; placement
+        // recovery and later sweeps must not repeat that effect or run an old command.
+        expect(destroy).toHaveBeenCalledOnce();
+        expect(invoke).not.toHaveBeenCalled();
+        expect(launchNodeWorker).not.toHaveBeenCalled();
+        return;
+      }
       if (failure === "resume-owner-close") {
         const outcome = await result;
         expect(closingOwner).toBeDefined();

@@ -140,6 +140,9 @@ export const workerEnvironmentOperations = {
     "refreshBootstrapReceipt",
     (input, store) => store.refreshBootstrapReceipt(input),
   ),
+  "workerEnvironments.recordRetention": environmentMutation("recordRetention", (input, store) =>
+    store.recordRetention(input),
+  ),
   "workerEnvironments.transition": environmentMutation("transition", (input, store) =>
     store.transition(input),
   ),

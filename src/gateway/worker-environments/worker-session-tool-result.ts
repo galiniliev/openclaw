@@ -99,3 +99,24 @@ export function parseWorkerSessionToolResult(resultJson: string): AgentToolResul
   }
   return { ...result, details: result.details };
 }
+
+export function createWorkerWorkshopCallRetention() {
+  const calls = new Map<string, { digest: string; result: ReturnType<AnyAgentTool["execute"]> }>();
+  return (
+    toolCallId: string,
+    args: unknown,
+    execute: () => ReturnType<AnyAgentTool["execute"]>,
+  ) => {
+    const digest = JSON.stringify(args);
+    const prior = calls.get(toolCallId);
+    if (prior && prior.digest !== digest) {
+      throw new Error("Workshop tool call id was reused with different arguments.");
+    }
+    if (!prior && calls.size >= 64) {
+      throw new Error("This turn reached its Workshop operation limit. Continue in a fresh turn.");
+    }
+    const result = prior?.result ?? execute();
+    calls.set(toolCallId, { digest, result });
+    return result;
+  };
+}

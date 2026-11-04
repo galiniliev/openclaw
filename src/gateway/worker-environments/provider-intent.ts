@@ -26,13 +26,19 @@ import {
 import {
   readWorkerProjectEnvironmentRecipe,
   readWorkerProjectSnapshot,
+  workerProjectReplayIdentity,
 } from "./project-preparation.js";
-import type { WorkerProviderLifecycleOptions } from "./provider-lifecycle.types.js";
+import type {
+  WorkerProviderLifecycleOptions,
+  WorkerProviderResumeProvision,
+} from "./provider-lifecycle.types.js";
 import type { WorkerProviderRepositorySource } from "./provider-project-preparation.js";
 import { prepareRepositoryWorkerProjectSource } from "./repository-project-admission.js";
 import type { RepositoryWorkerProjectSnapshot } from "./repository-project-source.schema.js";
-import { deriveEnvironmentIntent } from "./service-contract.js";
+import { createWorkerSessionDiskRetention } from "./retained-lease-lifecycle.js";
+import { deriveEnvironmentIntent, workerAllocationProfileSnapshot } from "./service-contract.js";
 import {
+  configuredWorkerProfileSnapshot,
   requireInheritedWorkerProfileAuthorization,
   requireWorkerProfile,
 } from "./service-validation.js";
@@ -45,17 +51,11 @@ type WorkerProviderIntentOptions = Pick<
   "store" | "getConfig" | "projectNamespace" | "prepareNodeArtifacts" | "isStopping" | "withLock"
 > & {
   providerFor: (providerId: string) => WorkerProvider;
-  resumeProvision: (
-    record: WorkerEnvironmentRecord,
-    provider?: WorkerProvider,
-    signal?: AbortSignal,
-    retainProviderSettlement?: (settled: Promise<void>) => void,
-    beforeProvision?: () => void,
-    repositorySource?: WorkerProviderRepositorySource,
-  ) => Promise<WorkerEnvironmentRecord>;
+  resumeProvision: WorkerProviderResumeProvision;
 };
 
 export type WorkerProviderIntentPreparationOptions = {
+  retentionOwner?: { sessionId: string; sessionKey: string; agentId: string };
   inherited?: { providerId: string; profileSnapshot: WorkerProfile };
   machineClass?: string;
   os?: string;
@@ -76,34 +76,6 @@ export type WorkerProviderIntentPreparationOptions = {
   readNativeCredential?: GitHubCredentialReader;
   retainCredentialCleanup?: (revoke: () => Promise<void>) => void;
 };
-
-function allocationSnapshot(
-  profile: WorkerProfile,
-  { machineClass, os, executionMode }: WorkerProviderIntentPreparationOptions,
-): WorkerProfile {
-  // A new allocation admits its own project, even when it inherits provider settings.
-  const { project: _project, runtimePreparation: _runtimePreparation, ...snapshot } = profile;
-  return {
-    ...snapshot,
-    ...(machineClass === undefined ? {} : { machineClass }),
-    ...(os === undefined ? {} : { os }),
-    ...(executionMode === undefined ? {} : { executionMode }),
-  };
-}
-
-function projectReplayIdentity(project: unknown): unknown {
-  if (!isRecord(project)) {
-    return project;
-  }
-  // Display metadata can change without changing the admitted preparation.
-  const identity = { ...project };
-  delete identity.label;
-  // Local keys bind shared Git storage; a checkout path is only its transport location.
-  if (!Object.hasOwn(identity, "source")) {
-    delete identity.root;
-  }
-  return identity;
-}
 
 export async function failUnallocatedImageIntent(
   options: Pick<WorkerProviderLifecycleOptions, "store" | "move">,
@@ -195,15 +167,14 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
       }
       provider = providerFor(configuredProfile.provider);
       providerId = normalizeCapabilityProviderId(provider.id) ?? provider.id;
-      const settings = requireWorkerProfile(configuredProfile.settings ?? {});
-      profileSnapshot = { install: configuredProfile.install ?? "bundle", settings };
+      profileSnapshot = configuredWorkerProfileSnapshot(configuredProfile);
     }
-    const snapshot = allocationSnapshot(profileSnapshot, createOptions);
-    requireWorkerProfile(snapshot);
     return {
       provider,
       providerId,
-      profileSnapshot: structuredClone(snapshot),
+      profileSnapshot: structuredClone(
+        requireWorkerProfile(workerAllocationProfileSnapshot(profileSnapshot, createOptions)),
+      ),
     };
   };
 
@@ -239,7 +210,9 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
     const resolved = resolveProfile(profileId, createOptions);
     const { provider, providerId } = resolved;
     const { signal, projectPath } = createOptions;
-    let profileSnapshot: WorkerProviderPreparedIntent["profileSnapshot"] = resolved.profileSnapshot;
+    let profileSnapshot = resolved.profileSnapshot;
+    const runSetupScript =
+      profileSnapshot.runSetupScript === false ? false : createOptions.runSetupScript;
     const machineClass =
       typeof profileSnapshot.machineClass === "string" ? profileSnapshot.machineClass : undefined;
     const os = typeof profileSnapshot.os === "string" ? profileSnapshot.os : undefined;
@@ -262,11 +235,10 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
         "Worker preparation must have exactly one project source",
       );
     }
-    const supportsProjectPreparation = provider.supportsProjectPreparation?.(
-      profile,
-      machineClass,
-      os,
-    );
+    const supportsProjectPreparation =
+      (!profileSnapshot.retention ||
+        provider.supportsRetainedProjectImages?.(profile, machineClass, os) === true) &&
+      provider.supportsProjectPreparation?.(profile, machineClass, os);
     if (
       (projectPath ||
         createOptions.repository ||
@@ -341,7 +313,9 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
             ? repositoryAdmission?.recipe
             : await readWorkerProjectEnvironmentRecipe(project, signal)
           : undefined;
-        assertEnvironmentRecipeSecretsMapped(recipe, profile.setupSecrets);
+        if (runSetupScript !== false) {
+          assertEnvironmentRecipeSecretsMapped(recipe, profile.setupSecrets);
+        }
         const setupRecipe = recipe?.identity;
         signal?.throwIfAborted();
         // An executable recipe does not authorize itself. Non-admin callers retain
@@ -457,14 +431,8 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
       !configured ||
       normalizeCapabilityProviderId(configured.provider) !== record.providerId ||
       !isDeepStrictEqual(
-        allocationSnapshot(
-          {
-            install: configured.install ?? "bundle",
-            settings: requireWorkerProfile(configured.settings ?? {}),
-          },
-          createOptions,
-        ),
-        allocationSnapshot(record.profileSnapshot, createOptions),
+        workerAllocationProfileSnapshot(configuredWorkerProfileSnapshot(configured), createOptions),
+        workerAllocationProfileSnapshot(record.profileSnapshot, createOptions),
       )
     ) {
       return invalid("configured profile changed");
@@ -570,7 +538,7 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
     const inherited = createOptions.inherited
       ? {
           providerId: createOptions.inherited.providerId,
-          profileSnapshot: allocationSnapshot(
+          profileSnapshot: workerAllocationProfileSnapshot(
             createOptions.inherited.profileSnapshot,
             createOptions,
           ),
@@ -641,8 +609,8 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
           assertPreparedIntentCurrent(profileId, requested);
           if (
             !isDeepStrictEqual(
-              projectReplayIdentity(existing.profileSnapshot.project),
-              projectReplayIdentity(requested.profileSnapshot.project),
+              workerProjectReplayIdentity(existing.profileSnapshot.project),
+              workerProjectReplayIdentity(requested.profileSnapshot.project),
             ) ||
             !isDeepStrictEqual(
               existing.profileSnapshot.runtimePreparation,
@@ -660,7 +628,7 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
           (inherited !== undefined &&
             (existing.providerId !== inherited.providerId ||
               !isDeepStrictEqual(existing.profileSnapshot, {
-                ...inherited.profileSnapshot,
+                ...workerAllocationProfileSnapshot(inherited.profileSnapshot, createOptions),
                 ...(existingProject ? { project: existing.profileSnapshot.project } : {}),
                 ...(existing.profileSnapshot.runtimePreparation
                   ? { runtimePreparation: existing.profileSnapshot.runtimePreparation }
@@ -705,6 +673,18 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
           providerId,
           profileId: normalizedProfileId,
           profileSnapshot,
+          ...(profileSnapshot.retention
+            ? {
+                retention: createWorkerSessionDiskRetention({
+                  provider,
+                  policy:
+                    options.getConfig().cloudWorkers?.profiles?.[normalizedProfileId]?.retention,
+                  owner: createOptions.retentionOwner,
+                  environmentId,
+                  provisionOperationId,
+                }),
+              }
+            : {}),
           provisionOperationId,
         },
         () => {
@@ -722,5 +702,14 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
       );
     });
   };
-  return { prepareIntent, prepareRetention, assertPreparedIntentCurrent, createWithProfile };
+  return {
+    prepareIntent,
+    prepareRetention,
+    assertPreparedIntentCurrent,
+    createWithProfile,
+    preparedRepositorySource(profileId: string, intent: WorkerProviderPreparedIntent) {
+      assertPreparedIntentCurrent(profileId, intent);
+      return preparedIntents.get(intent)?.repository;
+    },
+  };
 }

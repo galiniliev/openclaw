@@ -95,6 +95,12 @@ const ownedDirectory = (parent, target) => {
     const retained = input.preparation && await prepareWorkspace({ ...input, ...input.preparation }, true);
     const retainedWorkspace = input.preparation ? { retainedWorkspace: retained ?? null } : {};
     if (!transport) {
+      // A completed workspace at the requested revision already has its setup.
+      // Reuse needs neither the pristine seed nor another checkout inventory scan.
+      if (retained?.baseCommit === input.baseCommit) {
+        process.stdout.write(JSON.stringify({ ready: true, preparedWorkspace: retained, ...retainedWorkspace }));
+        return;
+      }
       if (fs.existsSync(seed)) {
         ownedDirectory(namespace, seed);
         ownedDirectory(seed, path.join(seed, ".git"));

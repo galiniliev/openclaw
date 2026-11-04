@@ -350,10 +350,14 @@ export function createPlacementFailureActions(deps: {
       await placements.closeWorkerTurnToolState(claim);
     }
     const reconciling = await startReconcile(current);
-    const teardownErrors = await cleanupEnvironment({
-      environmentId: current.environmentId,
-      ownerEpoch: current.activeOwnerEpoch,
-    });
+    // Proven loss has already retired the provider owner. Keep the placement's workspace
+    // identity for explicit recovery without retrying remote effects against a lost worker.
+    const teardownErrors = workerDisappearanceError(environments.get(current.environmentId))
+      ? []
+      : await cleanupEnvironment({
+          environmentId: current.environmentId,
+          ownerEpoch: current.activeOwnerEpoch,
+        });
     await updateFailure(reconciling, error, teardownErrors);
   };
 

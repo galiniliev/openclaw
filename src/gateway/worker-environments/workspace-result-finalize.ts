@@ -28,6 +28,8 @@ import type {
   WorkerSessionPlacementStore,
   WorkerSessionTurnClaim,
 } from "./placement-store.js";
+import { boundRetainedWorkerTurn } from "./retained-lease-lifecycle.js";
+import { settleRetainedWorkspaceResult } from "./retained-workspace-result.js";
 import type { WorkerEnvironmentService } from "./service.js";
 import {
   createWorkerWorkspaceReconcileRequest,
@@ -39,11 +41,12 @@ import {
   WorkerTunnelOwnerDisconnectedError,
   type WorkerTunnelHandle,
 } from "./tunnel-contract.js";
-import { latestDurableWorkspaceConflict, waitForTurnOperation } from "./worker-turn-admission.js";
+import { waitForTurnOperation } from "./worker-turn-admission.js";
 import { prepareWorkerTurnAttachments } from "./worker-turn-attachments.js";
 import { WorkerWorkspaceReconciliationError } from "./worker-turn-failure.js";
 import { resolveWorkerTurnTranscriptTarget } from "./worker-turn-transcript-target.js";
 import {
+  latestDurableWorkspaceConflict,
   formatWorkspaceConflictSummary,
   WORKSPACE_CONFLICT_CLEARED_TRANSCRIPT_TYPE,
   WORKSPACE_CONFLICT_TRANSCRIPT_TYPE,
@@ -161,6 +164,8 @@ export async function reconcileWorkspaceAfterTurn(params: {
   workspace: WorkerSessionWorkspace;
   transcriptTarget: ReturnType<typeof resolveWorkerTurnTranscriptTarget>;
   tunnel: WorkerTunnelHandle;
+  environments?: Pick<WorkerEnvironmentService, "get">;
+  needsAcceptedWorkspacePublication?: (claim: WorkerSessionTurnClaim) => Promise<boolean>;
   beforeTurn?: true;
   beforeTurnSignal?: AbortSignal;
   prepareAcceptedWorkspacePublication?: (claim: WorkerSessionTurnClaim) => Promise<void>;
@@ -192,6 +197,12 @@ export async function reconcileWorkspaceAfterTurn(params: {
     resolveWorkerTurnTranscriptTarget({ ...transcriptTarget, sessionTarget: transcriptTarget });
   };
   await params.placements.prepareWorkspaceResultClaim(params.turnClaim);
+  if (
+    !params.beforeTurn &&
+    (await settleRetainedWorkspaceResult({ ...params, assertCurrent: assertResultCurrent }))
+  ) {
+    return undefined;
+  }
   const completed = await SessionManager.openAsync(transcriptTarget);
   const currentPlacement = requireCurrentPlacement();
   assertResultCurrent();
@@ -381,7 +392,7 @@ function appendWorkspaceConflict(
   return { ...result, payloads };
 }
 
-export async function executeRemoteExecTurn(params: {
+export async function executeRemoteExecTurn(input: {
   environments: Pick<WorkerEnvironmentService, "get" | "startTunnel"> &
     Partial<Pick<WorkerEnvironmentService, "prepareComputer">>;
   onHandoff: (custody?: { requiresTerminalReceipt: true }) => void;
@@ -391,22 +402,24 @@ export async function executeRemoteExecTurn(params: {
   turn: SessionPlacementTurnParams;
   turnClaim: WorkerSessionTurnClaim;
   workspace: WorkerSessionWorkspace;
+  needsAcceptedWorkspacePublication?: (claim: WorkerSessionTurnClaim) => Promise<boolean>;
   runLocal: () => Promise<EmbeddedAgentRunResult>;
   assertRunCurrent?: () => void;
   prepareAcceptedWorkspacePublication?: (claim: WorkerSessionTurnClaim) => Promise<void>;
   publishAcceptedWorkspace?: (claim: WorkerSessionTurnClaim) => Promise<void>;
 }): Promise<EmbeddedAgentRunResult> {
-  const environment = params.environments.get(params.placement.environmentId);
+  const environment = input.environments.get(input.placement.environmentId);
   if (
     !environment ||
     environment.state !== "attached" ||
-    environment.ownerEpoch !== params.placement.activeOwnerEpoch ||
-    environment.bootstrapReceipt?.bundleHash !== params.placement.workerBundleHash ||
+    environment.ownerEpoch !== input.placement.activeOwnerEpoch ||
+    environment.bootstrapReceipt?.bundleHash !== input.placement.workerBundleHash ||
     environment.attachedSessionIds.length !== 1 ||
-    environment.attachedSessionIds[0] !== params.placement.sessionId
+    environment.attachedSessionIds[0] !== input.placement.sessionId
   ) {
     throw new Error("Active remote-exec placement does not match its attached environment");
   }
+  const params = { ...input, turn: boundRetainedWorkerTurn(input.turn, environment.retention) };
   params.assertRunCurrent?.();
   const tunnel = await waitForTurnOperation({
     start: () =>
@@ -568,6 +581,8 @@ export async function executeRemoteExecTurn(params: {
     tunnel,
     prepareAcceptedWorkspacePublication: params.prepareAcceptedWorkspacePublication,
     publishAcceptedWorkspace: params.publishAcceptedWorkspace,
+    environments: params.environments,
+    needsAcceptedWorkspacePublication: params.needsAcceptedWorkspacePublication,
   }).catch(async (reconciliationError: unknown) => {
     const isDisconnectedOwnerCurrent = () => {
       const currentEnvironment = params.environments.get(params.placement.environmentId);
@@ -583,6 +598,7 @@ export async function executeRemoteExecTurn(params: {
       );
     };
     if (
+      !environment.retention &&
       isDisconnectedOwnerCurrent() &&
       reconciliationError instanceof WorkerWorkspaceReconciliationError &&
       reconciliationError.cause instanceof WorkerTunnelOwnerDisconnectedError

@@ -24,6 +24,7 @@ import { root as fsRoot, FsSafeError } from "../infra/fs-safe.js";
 import { resolveRuntimeProcessEntrypointUrl } from "../infra/runtime-process-url.js";
 import { resolveRuntimeWorkerArgv } from "../infra/runtime-worker-url.js";
 import { resolvePreferredOpenClawTmpDir } from "../infra/tmp-openclaw-dir.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import {
   ensureStagedInputDirectory,
   isStagedInputPath,
@@ -57,6 +58,7 @@ import {
   requireNodeWorkerTransferOk as requireOk,
   downloadNodeWorkerTransferFile as downloadFile,
   nodeWorkerTransferWorkspacePath as workspacePath,
+  NODE_WORKER_TRANSFER_RESULT_MAX_BYTES,
   NodeWorkerTransferHttpError,
   withNodeWorkerTransferHttpRequest,
   type NodeWorkerTransferHttpRequest,
@@ -76,8 +78,6 @@ import {
   replaceNodeWorkerDirectory,
 } from "./node-worker-workspace-replacement.js";
 import { copyNodeWorkerProjectSeedObjects } from "./node-worker-workspace-seeds.js";
-
-const TRANSFER_RESULT_MAX_BYTES = 64 * 1024;
 
 export type NodeWorkerTransferGateway = {
   url: string;
@@ -138,6 +138,7 @@ async function downloadBuffer(params: NodeWorkerTransferHttpRequest, maxBytes: n
   );
 }
 
+const transferLog = createSubsystemLogger("node-host/worker-workspace");
 const workspaceTransferQueue = new KeyedAsyncQueue();
 
 export function serializeNodeWorkerWorkspace<T>(
@@ -498,6 +499,7 @@ async function uploadWorkspace(params: WorkspaceTransferOperation<"upload">): Pr
     params.transfer.baseManifestRef,
     params.signal,
   );
+  const captureStartedAt = performance.now();
   params.setStage("capture");
   const currentRef = await captureManifest({
     workspaceDir: params.workspaceDir,
@@ -513,9 +515,11 @@ async function uploadWorkspace(params: WorkspaceTransferOperation<"upload">): Pr
     currentRef,
     params.signal,
   );
+  const captureMs = performance.now() - captureStartedAt;
   const changed = new Set(workerWorkspaceTransferPaths(current, base, params.signal));
   const manifestBytes = Buffer.from(currentRaw);
   const baseBytes = Buffer.from(baseRaw);
+  const snapshotStartedAt = performance.now();
   params.setStage("snapshot");
   return await withTempWorkspace(
     {
@@ -560,6 +564,8 @@ async function uploadWorkspace(params: WorkspaceTransferOperation<"upload">): Pr
         baseCommit: base.baseCommit,
         packPath: workspace.path("worker-history.pack"),
       });
+      const snapshotMs = performance.now() - snapshotStartedAt;
+      const payloadBytes = files.reduce((total, file) => total + file.size, 0);
       const contentLength =
         8 +
         baseBytes.byteLength +
@@ -567,7 +573,8 @@ async function uploadWorkspace(params: WorkspaceTransferOperation<"upload">): Pr
         files.reduce((total, file) => total + 8 + file.size, 0) +
         (gitResult?.byteLength ?? 0);
       params.setStage("reconcile");
-      return await withNodeWorkerTransferHttpRequest(
+      const httpStartedAt = performance.now();
+      const result = await withNodeWorkerTransferHttpRequest(
         {
           ...params.request,
           routePath: nodeWorkspaceTransferReconcilePath(
@@ -604,7 +611,9 @@ async function uploadWorkspace(params: WorkspaceTransferOperation<"upload">): Pr
           params.setStage("acknowledgement");
           await requireOk(response);
           const payload = JSON.parse(
-            (await readResponseBody(response, TRANSFER_RESULT_MAX_BYTES)).toString("utf8"),
+            (await readResponseBody(response, NODE_WORKER_TRANSFER_RESULT_MAX_BYTES)).toString(
+              "utf8",
+            ),
           ) as { manifestRef?: unknown };
           if (payload.manifestRef !== currentRef) {
             throw new Error("workspace transfer upload acknowledgement is invalid");
@@ -612,6 +621,19 @@ async function uploadWorkspace(params: WorkspaceTransferOperation<"upload">): Pr
           return currentRef;
         },
       );
+      transferLog.debug("node worker workspace transfer completed", {
+        environmentId: params.environmentId,
+        direction: "upload",
+        outcome: "succeeded",
+        hasPinnedBase: base.baseCommit !== null,
+        captureMs,
+        snapshotMs,
+        httpRoundTripMs: performance.now() - httpStartedAt,
+        payloadFiles: files.length,
+        payloadBytes,
+        bodyBytes: contentLength,
+      });
+      return result;
     },
   );
 }

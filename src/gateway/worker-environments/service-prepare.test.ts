@@ -4,7 +4,7 @@ import { expectDefined } from "@openclaw/normalization-core";
 import { describe, expect, it, vi } from "vitest";
 import { requireGit } from "../../agents/worktrees/git.js";
 import { withPluginRuntimeGatewayRequestScope } from "../../plugins/runtime/gateway-request-scope.js";
-import type { WorkerProvider } from "../../plugins/types.js";
+import type { WorkerExecutionMode, WorkerProfile, WorkerProvider } from "../../plugins/types.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { createCoreGatewayMethodDescriptors } from "../methods/core-method-policy.js";
 import { createGatewayMethodRegistry } from "../methods/registry.js";
@@ -47,89 +47,131 @@ describe("on-demand prepared worker admission", () => {
       resolvePreparedIdleTimeoutMs: () => 10_000,
       provision,
     });
+    const prepareNodeArtifacts = vi.fn(async (profileSnapshot: WorkerProfile) => ({
+      artifacts: {
+        nodeBootstrapSha256: support.NODE_BOOTSTRAP.sha256,
+        enabledPluginIds: profileSnapshot.executionMode === "remote-exec" ? ["runtime-plugin"] : [],
+        workerBundleHash: support.BUNDLE_HASH,
+        workerArchiveSha256: support.BUNDLE_ARTIFACT.tarballSha256,
+        openclawVersion: support.BUNDLE_ARTIFACT.openclawVersion,
+        protocolFeatures: [],
+      },
+      assertCurrent: () => {},
+    }));
     const service = support.createService(provider, {
       projectNamespace: "gateway-test",
       prepareNodeEnrollment: async () => {
         throw new Error("Synthetic provider must not enroll");
       },
-      prepareNodeArtifacts: async () => ({
-        artifacts: {
-          nodeBootstrapSha256: support.NODE_BOOTSTRAP.sha256,
-          enabledPluginIds: ["runtime-plugin"],
-          workerBundleHash: support.BUNDLE_HASH,
-          workerArchiveSha256: support.BUNDLE_ARTIFACT.tarballSha256,
-          openclawVersion: support.BUNDLE_ARTIFACT.openclawVersion,
-          protocolFeatures: [],
-        },
-        assertCurrent: () => {},
-      }),
+      prepareNodeArtifacts,
     });
     return {
       service,
       provider,
       projectPath,
       provision,
+      prepareNodeArtifacts,
       request: { profileId: "development", projectPath },
     };
   }
 
-  it("admits HEAD without a session, authorizes setup, and starts background preparation", async () => {
-    const f = await fixture();
-    await f.service.ready();
-    support.getDevelopmentProfile().readyWorkers = 0;
-    const entered = createDeferredCore();
-    const release = createDeferredCore();
-    const provision = expectDefined(f.provision.getMockImplementation(), "provider implementation");
-    f.provision.mockImplementationOnce(async (...args) => {
-      entered.resolve();
-      await release.promise;
-      return await provision(...args);
-    });
-    try {
-      const result = await f.service.prepare(f.request);
-      // Provider entry follows the committed provisioning transition; hold it during reads.
-      await entered.promise;
-      const baseCommit = await requireGit(f.projectPath, ["rev-parse", "HEAD"]);
-      const record = support.testState.store.get(result.environmentId)!;
-      expect(result).toEqual({
-        environmentId: record.environmentId,
-        preparationKey: record.preparation!.key,
-        reused: false,
+  it.each<{ executionMode?: WorkerExecutionMode; runSetupScript?: false }>([
+    {},
+    { executionMode: "worker-turn" },
+    { executionMode: "remote-exec" },
+    { executionMode: "remote-exec", runSetupScript: false },
+  ])(
+    "admits HEAD with mode $executionMode and profile setup policy $runSetupScript",
+    async ({ executionMode, runSetupScript }) => {
+      const f = await fixture();
+      if (runSetupScript === false) {
+        support.getDevelopmentProfile().runSetupScript = false;
+      }
+      await f.service.ready();
+      support.getDevelopmentProfile().readyWorkers = 0;
+      const entered = createDeferredCore();
+      const release = createDeferredCore();
+      const provision = expectDefined(
+        f.provision.getMockImplementation(),
+        "provider implementation",
+      );
+      f.provision.mockImplementationOnce(async (...args) => {
+        entered.resolve();
+        await release.promise;
+        return await provision(...args);
       });
-      expect(record).toMatchObject({
-        profileId: "development",
-        attachedSessionIds: [],
-        profileSnapshot: {
-          executionMode: "worker-turn",
-          project: {
-            root: f.projectPath,
-            baseCommit,
+      try {
+        const result = await f.service.prepare({
+          ...f.request,
+          ...(executionMode ? { executionMode } : {}),
+        });
+        // Provider entry follows the committed provisioning transition; hold it during reads.
+        await entered.promise;
+        const baseCommit = await requireGit(f.projectPath, ["rev-parse", "HEAD"]);
+        const record = support.testState.store.get(result.environmentId)!;
+        expect(result).toEqual({
+          environmentId: record.environmentId,
+          preparationKey: record.preparation!.key,
+          cacheKey: readWorkerProjectPreparation(record.profileSnapshot.project)!.cacheKey,
+          reused: false,
+        });
+        expect(record).toMatchObject({
+          profileId: "development",
+          attachedSessionIds: [],
+          profileSnapshot: {
+            executionMode: executionMode ?? "worker-turn",
+            project: {
+              root: f.projectPath,
+              baseCommit,
+            },
           },
-        },
-        preparation: {
+          preparation: {
+            purpose: "build",
+            demandAtMs: 1_000,
+            expiresAtMs: 11_000,
+            consumedAtMs: null,
+          },
+        });
+        expect(
+          readWorkerProjectPreparation(record.profileSnapshot.project)?.artifacts.enabledPluginIds,
+        ).toEqual(executionMode === "remote-exec" ? ["runtime-plugin"] : []);
+        expect(record.profileSnapshot.runSetupScript).toBe(runSetupScript);
+        expect(readWorkerProjectPreparation(record.profileSnapshot.project)?.runSetupScript).toBe(
+          runSetupScript,
+        );
+        expect(readWorkerProjectPreparation(record.profileSnapshot.project)?.setupRecipe).toMatch(
+          /^[a-f0-9]{40}$/u,
+        );
+        expect(f.provision).toHaveBeenCalledOnce();
+        expect(support.testState.store.get(record.environmentId)?.destroyRequestedAtMs).toBeNull();
+        expect(f.service.list()[0]?.preparation).toEqual({
           purpose: "build",
+          key: result.preparationKey,
           demandAtMs: 1_000,
           expiresAtMs: 11_000,
           consumedAtMs: null,
-        },
-      });
-      expect(readWorkerProjectPreparation(record.profileSnapshot.project)?.setupRecipe).toMatch(
-        /^[a-f0-9]{40}$/u,
-      );
-      expect(f.provision).toHaveBeenCalledOnce();
-      expect(support.testState.store.get(record.environmentId)?.destroyRequestedAtMs).toBeNull();
-      expect(f.service.list()[0]?.preparation).toEqual({
-        purpose: "build",
-        key: result.preparationKey,
-        demandAtMs: 1_000,
-        expiresAtMs: 11_000,
-        consumedAtMs: null,
-        project: { label: "project", baseCommit },
-      });
-    } finally {
-      release.resolve();
-      await f.service.stop();
-    }
+          project: { label: "project", baseCommit },
+        });
+      } finally {
+        release.resolve();
+        await f.service.stop();
+      }
+    },
+  );
+
+  it("rejects an unsupported explicit mode before source, artifacts, or provider effects", async () => {
+    const f = await fixture();
+    f.provider.supportedExecutionModes = ["worker-turn"];
+    const source = vi.spyOn(workspaceGitBase, "prepareWorkerProjectSnapshot");
+    await expect(
+      f.service.prepare({ ...f.request, executionMode: "remote-exec" }),
+    ).rejects.toMatchObject({
+      code: "invalid_profile",
+    });
+    expect(source).not.toHaveBeenCalled();
+    expect(f.prepareNodeArtifacts).not.toHaveBeenCalled();
+    expect(f.provision).not.toHaveBeenCalled();
+    expect(support.testState.store.list()).toHaveLength(0);
   });
 
   it("uses the admitted profile's idle timeout after configuration changes during Git validation", async () => {
@@ -228,13 +270,32 @@ describe("on-demand prepared worker admission", () => {
     await requireGit(f.projectPath, ["commit", "--allow-empty", "--quiet", "-m", "next"]);
     await expect(f.service.prepare(f.request)).rejects.toMatchObject({ code: "capacity" });
     expect(support.testState.store.list()).toHaveLength(1);
+    const first = results[0]!;
+    await f.service.destroyUnattached(first.environmentId);
+    expect(support.testState.store.get(first.environmentId)?.state).toBe("destroyed");
+    const next = await f.service.prepare(f.request);
+    expect(next.preparationKey).not.toBe(first.preparationKey);
+    expect(next.cacheKey).toMatch(/^[a-f0-9]{64}$/u);
+    expect(next.cacheKey).toBe(first.cacheKey);
   });
 
-  it.each([false, true])(
-    "enforces the original Gateway source at durable admission with revoked=%s",
-    async (revoked) => {
+  it.each([
+    { revoked: false, retained: false },
+    { revoked: true, retained: false },
+    { revoked: false, retained: true },
+    { revoked: true, retained: true },
+  ])(
+    "enforces the original Gateway source at durable admission with revoked=$revoked retained=$retained",
+    async ({ revoked, retained }) => {
       const f = await fixture();
-      support.getDevelopmentProfile().readyWorkers = 0;
+      const profile = support.getDevelopmentProfile();
+      profile.readyWorkers = retained ? 1 : 0;
+      if (retained) {
+        profile.retention = { mode: "session-disk", computeWindowSeconds: 14400 };
+        f.provider.supportsRetainedProjectImages = () => true;
+        support.testState.config.cloudWorkers!.preparedPool = { maxTotal: 1 };
+        expect(f.service.readReadyWorkerTarget("development")).toBe(0);
+      }
       const context = createContext();
       context.resolveGatewayContext = () => context;
       context.getRuntimeConfig = () => support.testState.config;
@@ -270,7 +331,7 @@ describe("on-demand prepared worker admission", () => {
           () =>
             dispatchGatewayMethodInProcess<{ environmentId: string; reused: boolean }>(
               "environments.prepare",
-              f.request,
+              { ...f.request, executionMode: "remote-exec" },
             ),
         );
         if (revoked) {
@@ -280,6 +341,9 @@ describe("on-demand prepared worker admission", () => {
         } else {
           const result = await request;
           expect(result.reused).toBe(false);
+          expect(
+            support.testState.store.get(result.environmentId)?.profileSnapshot.executionMode,
+          ).toBe("remote-exec");
           expect(support.testState.store.get(result.environmentId)?.preparation?.purpose).toBe(
             "build",
           );

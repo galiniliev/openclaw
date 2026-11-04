@@ -12,10 +12,12 @@ import {
   deleteSessionRepositoryWorkspaceInDatabase,
   findSessionRepositoryWorkspaceInDatabase,
   readSessionRepositoryWorkspaceInDatabase,
+  resetSessionRepositoryWorkspaceToBranchInDatabase,
 } from "./session-repository-workspaces.kernel.js";
 import { repositoryWorkspacePublication } from "./session-repository-workspaces.receipts.js";
 import type {
   RepositoryWorkspaceBase,
+  RepositoryWorkspaceBranchReset,
   RepositoryWorkspaceCheckpoint,
   RepositoryWorkspaceCreate,
   RepositoryWorkspaceMutationResult,
@@ -41,6 +43,13 @@ export const repositoryWorkspaceOperations = {
   ) =>
     mutate(open(), "repositoryWorkspaces.bindBase", (db) =>
       bindSessionRepositoryWorkspaceBaseInDatabase(db, input, input.nowMs ?? Date.now()),
+    ),
+  "repositoryWorkspaces.resetToBranch": (
+    input: RepositoryWorkspaceBranchReset & { nowMs?: number },
+    { open },
+  ) =>
+    mutate(open(), "repositoryWorkspaces.resetToBranch", (db) =>
+      resetSessionRepositoryWorkspaceToBranchInDatabase(db, input, input.nowMs ?? Date.now()),
     ),
   "repositoryWorkspaces.acceptCheckpoint": (
     input: RepositoryWorkspaceCheckpoint & { nowMs?: number },

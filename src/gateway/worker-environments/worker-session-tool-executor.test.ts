@@ -452,10 +452,6 @@ describe("worker session tool topology", () => {
           agentId: CHILD.agentId,
           executionMode: "worker-turn",
           profileId: "cloud-profile",
-          inheritedProfile: {
-            providerId: "fake",
-            profileSnapshot: { install: "bundle", settings: { region: "source" } },
-          },
         },
         undefined,
         expect.any(Function),
@@ -529,6 +525,32 @@ describe("worker session tool topology", () => {
       expect(JSON.stringify(runtimeIdentity?.sessionSpawnContext)).not.toContain(SOURCE.sessionKey);
     },
   );
+
+  it("selects the current required profile for a new child of a retained obsolete profile", async () => {
+    setEntry(SOURCE.sessionKey, SOURCE.sessionId);
+    getFixture().cfg.cloudWorkers = {
+      requiredProfile: "latest-profile",
+      profiles: { "latest-profile": { provider: "latest-provider", settings: {} } },
+    };
+    await spawn("latest-child");
+    expect(dispatchChild).toHaveBeenCalledWith(
+      expect.objectContaining({ profileId: "latest-profile" }),
+      undefined,
+      expect.any(Function),
+    );
+    expect(dispatchChild.mock.calls[0]?.[0]).not.toHaveProperty("inheritedProfile");
+    expect(gatewayRequest).toHaveBeenCalledOnce();
+  });
+
+  it("refuses an unconfigured fresh child destination before allocation or task execution", async () => {
+    setEntry(SOURCE.sessionKey, SOURCE.sessionId);
+    getFixture().cfg.cloudWorkers = { profiles: {} };
+    const result = await spawn("removed-profile-child");
+    // Session creation already committed; the tool must retain its conservative outcome.
+    expect(result.resultJson).toContain("outcome is unknown");
+    expect(dispatchChild).not.toHaveBeenCalled();
+    expect(gatewayRequest).not.toHaveBeenCalled();
+  });
 
   it.each(["create", "dispatch", "send"] as const)(
     "recovers a lost child %s response without repeating committed effects",

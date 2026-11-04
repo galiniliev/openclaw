@@ -16,6 +16,7 @@ import type { GatewayNodeWorkerBundleInstall } from "./node-worker-bundle-instal
 import type { WorkerSessionPlacementGate } from "./placement-worker-gate.js";
 import type { WorkerPreparationArtifacts } from "./preparation-identity.schema.js";
 import type { createWorkerProjectPreparation } from "./project-preparation.js";
+import type { WorkerProviderRepositorySource } from "./provider-project-preparation.js";
 import type { WorkerSshIdentityResolver } from "./ssh.js";
 import type { WorkerEnvironmentState } from "./state.js";
 import type {
@@ -25,7 +26,18 @@ import type {
 } from "./store.js";
 import type { WorkerTunnelStopReason } from "./tunnel-contract.js";
 
+export type WorkerProviderResumeProvision = (
+  record: WorkerEnvironmentRecord,
+  provider?: WorkerProvider,
+  signal?: AbortSignal,
+  retainProviderSettlement?: (settled: Promise<void>) => void,
+  beforeProvision?: () => void,
+  repositorySource?: WorkerProviderRepositorySource,
+) => Promise<WorkerEnvironmentRecord>;
+
 export type WorkerEnvironmentAbandonment = {
+  /** Dedicated retained-resource retirement; omitted for paired-device abandonment. */
+  retainedOwnerBinding?: string;
   sessionId: string;
   ownerEpoch: number;
   authorize?: () => void;
@@ -131,6 +143,10 @@ export type WorkerProviderLifecycleOptions = Omit<
     patch?: WorkerEnvironmentTransitionPatch,
     assertCurrent?: () => void,
   ) => Promise<WorkerEnvironmentRecord>;
-  saveError: (record: WorkerEnvironmentRecord, error: unknown) => Promise<WorkerEnvironmentRecord>;
+  saveError: (
+    record: WorkerEnvironmentRecord,
+    error: unknown,
+    assertCurrent?: () => void,
+  ) => Promise<WorkerEnvironmentRecord>;
   withLock: <T>(environmentId: string, task: () => Promise<T>) => Promise<T>;
 };

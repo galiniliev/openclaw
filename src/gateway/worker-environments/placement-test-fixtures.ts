@@ -157,6 +157,7 @@ export function writePlacementEnvironmentFixture(
       ? JSON.stringify(environment.sshEndpoint.keyRef)
       : null,
     desktop_json: environment.desktop ? JSON.stringify(environment.desktop) : null,
+    session_retention_json: environment.retention ? JSON.stringify(environment.retention) : null,
     bootstrap_bundle_hash: environment.bootstrapReceipt?.bundleHash ?? null,
     bootstrap_openclaw_version: environment.bootstrapReceipt?.openclawVersion ?? null,
     bootstrap_protocol_features_json: environment.bootstrapReceipt
@@ -197,6 +198,9 @@ export function writePlacementEnvironmentFixture(
                 ? { provider_id: environment.providerId }
                 : {}),
               ...(environment.profileId !== undefined ? { profile_id: environment.profileId } : {}),
+              ...(environment.retention !== undefined
+                ? { session_retention_json: values.session_retention_json }
+                : {}),
               ...(environment.nodeDeviceId !== undefined
                 ? { node_device_id: environment.nodeDeviceId }
                 : {}),

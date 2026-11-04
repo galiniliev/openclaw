@@ -8,7 +8,7 @@ import type {
   WorkerSessionPlacementStore,
   WorkerSessionTurnClaim,
 } from "./placement-store.js";
-import { matchesWorkerPlacementTarget } from "./placement-target.js";
+import { isExactAttachedEnvironment, matchesWorkerPlacementTarget } from "./placement-target.js";
 import { findPendingWorkerWorkspaceResult } from "./placement-workspace-result.js";
 import type { WorkerEnvironmentService } from "./service.js";
 import { boundedWorkerError } from "./worker-error.js";
@@ -21,6 +21,7 @@ export type WorkerTurnEnvironmentService = Pick<
   | "acquireTurnCredential"
   | "destroy"
   | "get"
+  | "inspectTurnLease"
   | "startTunnel"
   | "stopTunnel"
 > &
@@ -123,6 +124,26 @@ export async function failHandedOffTurn(params: {
     registerRecovery(recover: (assertCurrent?: () => void) => Promise<string | undefined>): void;
   };
 }): Promise<void> {
+  const environment = params.environments.get(params.placement.environmentId);
+  if (environment?.retention) {
+    const assertCurrent = () => {
+      const placement = params.placements.get(params.placement.sessionId);
+      const current = params.environments.get(params.placement.environmentId);
+      if (
+        !matchesWorkerPlacementTarget(placement, params.placement) ||
+        !params.placements.validateTurnClaim(params.turnClaim) ||
+        !isExactAttachedEnvironment(current, params.placement) ||
+        current?.retention?.ownerBinding !== environment.retention?.ownerBinding
+      ) {
+        throw new Error("Retained worker failure lost its workspace recovery owner");
+      }
+    };
+    // A failed transport does not prove the native process exited. Keep the
+    // original disk and claim fenced until the existing recovery owner settles
+    // its workspace; destructive retirement belongs to explicit session cleanup.
+    await params.placements.retainInterruptedTurnWorkspace(params.turnClaim, assertCurrent);
+    return;
+  }
   const failures = [boundedWorkerError(params.error)];
   let drained: WorkerSessionPlacementRecord;
   try {

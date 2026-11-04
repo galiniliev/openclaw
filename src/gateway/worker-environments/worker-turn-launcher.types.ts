@@ -22,6 +22,7 @@ export type WorkerTurnLauncherOptions = WorkerTurnAdmissionOptions & {
     signal?: AbortSignal,
   ) => Promise<WorkerSessionPlacementRecord>;
   redispatchPlacement: WorkerPlacementRedispatch;
+  needsAcceptedWorkspacePublication?: (claim: WorkerSessionTurnClaim) => Promise<boolean>;
   prepareAcceptedWorkspacePublication?: (claim: WorkerSessionTurnClaim) => Promise<void>;
   publishAcceptedWorkspace?: (claim: WorkerSessionTurnClaim) => Promise<void>;
   persistAbandonedPartial?: (claim: WorkerTurnPartialIdentity) => Promise<void>;

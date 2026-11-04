@@ -10,6 +10,7 @@ export type WorkerEnvironmentPlacementFacts = Pick<
   | "providerId"
   | "profileId"
   | "profileSnapshot"
+  | "retention"
   | "state"
   | "leaseId"
   | "ownerEpoch"

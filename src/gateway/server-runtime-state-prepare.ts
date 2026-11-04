@@ -185,6 +185,15 @@ export async function prepareGatewayKernelState(params: {
     workerEnvironmentStartup && workerPlacementModule
       ? workerPlacementModule.createGatewayGitHubPublicationRuntime({
           placements: workerEnvironmentStartup.placementStore,
+          prepareRepositoryCheckpoint: async (identity, assertCurrent) => {
+            if (!workerPlacement) {
+              throw new Error("Repository workspace capture owner is unavailable");
+            }
+            await workerPlacement.repositoryWorkspaceMutationService.captureCheckpoint(
+              identity,
+              assertCurrent,
+            );
+          },
           getCommittedRuntimeConfig,
           warn: (message) => log.warn(message),
         })

@@ -1,8 +1,13 @@
 import { randomUUID } from "node:crypto";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { runTasksWithConcurrency } from "../../utils/run-with-concurrency.js";
 import { DEVICE_FOLDER_MANIFEST_REF } from "../../worker/device-folder.js";
+import { supportsCurrentWorkerLaunch } from "../../worker/worker-build-identity.js";
 import { measureGatewayRestartTrace } from "../restart-trace.js";
-import { hasForcedWorkerEnvironmentAbandonment } from "./environment-errors.js";
+import {
+  hasForcedWorkerEnvironmentAbandonment,
+  WorkerRetainedLeaseInspectionUnavailableError,
+} from "./environment-errors.js";
 import {
   isUnavailableEnvironment,
   workerDisappearanceError,
@@ -31,6 +36,10 @@ import {
   isExactAttachedEnvironment,
 } from "./placement-target.js";
 import { WorkerRuntimeRefreshPendingError } from "./provider-runtime-refresh.js";
+import { boundedWorkerError } from "./worker-error.js";
+import { WorkerWorkspaceReconciliationError } from "./worker-turn-failure.js";
+
+const log = createSubsystemLogger("gateway/worker-environments");
 
 const admitRecovery: WorkerPlacementRecoveryAdmission = async (_sessionIds, run) => {
   await run();
@@ -108,6 +117,14 @@ export function createPlacementRecoveryActions(
     mode: "restart" | "runtime",
   ): Promise<void> => {
     const environment = environments.get(placement.environmentId);
+    const assertMirrorRecoveryAllowed = async () => {
+      const workspace = await deps.resolveWorkspace(placement);
+      if (workspace.kind === "repository" && workspace.repository.diskAuthority) {
+        throw new WorkerWorkspaceReconciliationError(
+          "Retained workspace disk ownership is unproven; verify the original disk and owner before recovery, without mirror replacement",
+        );
+      }
+    };
     if (mode === "restart" && placement.turnClaim) {
       const claim = projectWorkerSessionTurnClaim(placement);
       if (claim && isExactAttachedEnvironment(environment, placement)) {
@@ -126,6 +143,8 @@ export function createPlacementRecoveryActions(
         );
         return;
       }
+      // Disk authority also forbids fencing away the old claim through mirror recovery.
+      await assertMirrorRecoveryAllowed();
       await failure.failActive(
         placement,
         new Error("Active worker turn claim cannot be proven live after gateway restart"),
@@ -144,6 +163,7 @@ export function createPlacementRecoveryActions(
     }
     const disappearance = workerDisappearanceError(environment);
     if (disappearance || (environment && isUnavailableEnvironment(environment))) {
+      await assertMirrorRecoveryAllowed();
       await failure.reclaimActive(
         placement,
         environment,
@@ -151,7 +171,18 @@ export function createPlacementRecoveryActions(
       );
       return;
     }
+    if (
+      environment?.nodeDeviceId &&
+      isExactAttachedEnvironment(environment, placement) &&
+      environment.bootstrapReceipt?.bundleHash === placement.workerBundleHash &&
+      !supportsCurrentWorkerLaunch(environment.bootstrapReceipt)
+    ) {
+      // An incompatible runtime is still this lease's owner. Keep its workspace while
+      // in-place refresh retries; launch admission continues to refuse its capabilities.
+      return;
+    }
     if (!environment || !isCurrentActiveWorkerEnvironment(placement, environment)) {
+      await assertMirrorRecoveryAllowed();
       await failure.reclaimActive(
         placement,
         environment,
@@ -321,6 +352,7 @@ export function createPlacementRecoveryActions(
     if (deps.isShuttingDown?.()) {
       return;
     }
+    const heldEnvironments = new Set<string>();
     // Cancel old setup before environment reconciliation can perform provider work.
     // Existing allocations, staged results, and move journals retain their cleanup owners.
     if (mode === "startup") {
@@ -393,18 +425,39 @@ export function createPlacementRecoveryActions(
       }
       // Drain the bounded environment pass before recovering placement authority or results.
       // Unowned teardown remains in the service-owned sweep.
+      const environmentIds = new Set<string>();
+      for (const {
+        environmentId,
+        state,
+        moveSourceEnvironmentId,
+      } of await placements.readRecoveryCandidates()) {
+        if (environmentId && state !== "failed" && state !== "local" && state !== "reclaimed") {
+          environmentIds.add(environmentId);
+        }
+        if (moveSourceEnvironmentId && environments.get(moveSourceEnvironmentId)?.retention) {
+          environmentIds.add(moveSourceEnvironmentId);
+        }
+      }
       const reconciled = await runTasksWithConcurrency({
-        tasks: (await placements.readRecoveryCandidates()).flatMap(({ environmentId, state }) =>
-          environmentId && state !== "failed" && state !== "local" && state !== "reclaimed"
-            ? [
-                async () => {
-                  if (!deps.isShuttingDown?.()) {
-                    await environments.reconcileEnvironment(environmentId);
-                  }
-                },
-              ]
-            : [],
-        ),
+        tasks: [...environmentIds].map((environmentId) => async () => {
+          if (deps.isShuttingDown?.()) {
+            return;
+          }
+          try {
+            await environments.reconcileEnvironment(environmentId);
+          } catch (error) {
+            if (
+              !(error instanceof WorkerRetainedLeaseInspectionUnavailableError) ||
+              deps.isShuttingDown?.()
+            ) {
+              throw error;
+            }
+            heldEnvironments.add(environmentId);
+            log.warn(
+              `Retained worker startup recovery held (${environmentId}): ${boundedWorkerError(error)}`,
+            );
+          }
+        }),
         limit: 8,
         errorMode: "stop",
       });
@@ -435,11 +488,32 @@ export function createPlacementRecoveryActions(
             }
           : undefined;
     }
-    for (const { sessionId } of candidates) {
+    for (const { sessionId, environmentId, moveSourceEnvironmentId } of candidates) {
+      if (
+        (environmentId && heldEnvironments.has(environmentId)) ||
+        (moveSourceEnvironmentId && heldEnvironments.has(moveSourceEnvironmentId))
+      ) {
+        continue;
+      }
       if (deps.isShuttingDown?.()) {
         return;
       }
-      await admit([sessionId], () => recoverSession(sessionId, mode ?? "restart"));
+      try {
+        await admit([sessionId], () => recoverSession(sessionId, mode ?? "restart"));
+      } catch (error) {
+        if (
+          mode !== "startup" ||
+          !(error instanceof WorkerWorkspaceReconciliationError) ||
+          deps.isShuttingDown?.()
+        ) {
+          throw error;
+        }
+        // This session keeps its exact disk, placement and result owners. A held
+        // workspace cannot authorize mirror fallback or gate unrelated startup.
+        log.warn(
+          `Cloud workspace recovery deferred for ${boundedWorkerError(sessionId, 128)}: ${boundedWorkerError(error)}`,
+        );
+      }
     }
     if (
       mode !== "startup" &&

@@ -120,16 +120,14 @@ it.each(["worker-turn", "remote-exec"] as const)(
         });
         const server = await startNodeWorkspaceTransferTestServer(service);
         try {
-          await service.prepareSync({
-            environmentId: worker.ENVIRONMENT_ID,
-            ownerEpoch: worker.OWNER_EPOCH,
-            sessionId: worker.SESSION_ID,
-            localPath: local,
-            isAuthorized: request.isAuthorized,
-          });
           const prepared = await service.prepareAttachments({
             ...request,
-            environmentId: worker.ENVIRONMENT_ID,
+            owner: {
+              environmentId: worker.ENVIRONMENT_ID,
+              ownerEpoch: worker.OWNER_EPOCH,
+              sessionId: worker.SESSION_ID,
+              isAuthorized: request.isAuthorized,
+            },
           });
           await runNodeWorkerWorkspaceTransfer({
             gatewayUrl: server.gatewayUrl,

@@ -1,5 +1,6 @@
 import { mkdir, realpath } from "node:fs/promises";
 import path from "node:path";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WORKER_COMPUTER_PROTOCOL_FEATURE } from "../../../packages/gateway-protocol/src/schema/worker-computer.js";
 import { createSolidPngBuffer } from "../../../test/helpers/image-fixtures.js";
@@ -13,9 +14,14 @@ import { createAgentRunDirectAbortError } from "../../agents/run-termination.js"
 import { installSessionPlacementAdmissionProvider } from "../../agents/session-placement-admission.js";
 import { loadSessionEntry } from "../../config/sessions/session-accessor.js";
 import {
+  onInternalDiagnosticEvent,
+  type DiagnosticEventPayload,
+} from "../../infra/diagnostic-events.js";
+import {
   attachErrorDiagnostic,
   formatErrorMessageForDisplay,
 } from "../../infra/error-diagnostics.js";
+import { resetLogger, setLoggerOverride } from "../../logging/logger.js";
 import { saveMediaBuffer } from "../../media/store.js";
 import { getPluginRuntimeGatewayRequestScope } from "../../plugins/runtime/gateway-request-scope.js";
 import { runCommandWithTimeout } from "../../process/exec.js";
@@ -483,13 +489,31 @@ describe("worker launch capabilities", () => {
           })
         : undefined;
       const uninstall = installSessionPlacementAdmissionProvider(provider);
-      const operation = provider.executeTurn(runIdentity("run-remote-exec"), inputTurn, runLocal);
+      const phaseEvents: Array<Extract<DiagnosticEventPayload, { type: "log.record" }>> = [];
+      setLoggerOverride({ level: "info", consoleLevel: "silent" });
+      const unsubscribeTiming = onInternalDiagnosticEvent((event) => {
+        if (event.type === "log.record" && event.message === "Worker turn phase") {
+          phaseEvents.push(event);
+        }
+      });
+      const operation = provider.executeTurn(
+        {
+          sessionId: fx.SESSION_ID,
+          sessionKey: fx.SESSION_KEY,
+          agentId: "main",
+          runId: "run-remote-exec",
+        },
+        inputTurn,
+        runLocal,
+      );
       try {
         if (resourceCleanup) {
           await resourceCleanup.entered.promise;
           expect(fx.placements.get(fx.SESSION_ID)?.turnClaim).not.toBeNull();
           expect(retainedNodeAuthority).toThrow("no longer current");
           expect(closeComputer).not.toHaveBeenCalled();
+          await yieldToEventLoop();
+          expect(phaseEvents.map((event) => event.attributes?.phase)).toEqual(["agent-execution"]);
           resourceCleanup.release.resolve();
           await expect(operation).rejects.toBe(skillCleanupError);
         } else if (primaryError) {
@@ -598,11 +622,34 @@ describe("worker launch capabilities", () => {
       } finally {
         resourceCleanup?.release.resolve();
         await operation.catch(() => undefined);
+        await yieldToEventLoop();
+        unsubscribeTiming();
+        setLoggerOverride(null);
+        resetLogger();
         transfer?.mockRestore();
         uninstall();
         inputTurn.preparedRunAdmission.close();
       }
-      expectRestoredPrompts();
+      expect(
+        phaseEvents.map((event) => [event.attributes?.phase, event.attributes?.outcome]),
+      ).toEqual([
+        ["agent-execution", primaryError ? "failed" : "success"],
+        ...(resourceCleanup ? [["skill-cleanup", "failed"]] : []),
+        ...(nodeDeviceId ? [["computer-close", closeFails ? "failed" : "success"]] : []),
+        ["workspace-reconciliation", "success"],
+      ]);
+      for (const event of phaseEvents) {
+        expect(event.attributes).toMatchObject({
+          runId: "run-remote-exec",
+          sessionId: fx.SESSION_ID,
+          startedAt: expect.any(Number),
+          endedAt: expect.any(Number),
+          durationMs: expect.any(Number),
+        });
+      }
+      expect(JSON.stringify(phaseEvents)).not.toContain(secret);
+      expect(inputTurn.prompt).toBe(originalPrompt);
+      expect(inputTurn.transcriptPrompt).toBe("Canonical transcript request");
       expect(closeComputer).toHaveBeenCalledTimes(nodeDeviceId ? 1 : 0);
       expect(order).toEqual([
         "pre-turn:quiesce",

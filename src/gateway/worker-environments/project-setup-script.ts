@@ -2,7 +2,16 @@ import { z } from "zod";
 import { gitMaintenanceEnvironmentExpression } from "../../infra/git-maintenance-env.js";
 import type { WorkerProvider } from "../../plugins/capability-provider.types.js";
 import type { EnvironmentRecipe, LifecycleCommand } from "./environment-recipe.js";
+import { INSPECT_NODE_TOOLCHAIN_JS } from "./node-toolchain-inspection.js";
 import { DEFAULT_NODE_TOOLCHAIN_SETUP_SH } from "./node-toolchain.js";
+import { INSPECT_PROJECT_MACHINE_CACHES_JS } from "./project-machine-caches.js";
+import {
+  logWorkerSetupFailure,
+  SETUP_MARKER_STAGES,
+  SETUP_MARKER_REASONS,
+  SETUP_NATIVE_STAGES,
+  SETUP_SIGNALS,
+} from "./project-setup-diagnostics.js";
 import { PREPARE_REPOSITORY_NODE_JS } from "./repository-node-toolchain.js";
 import type { WorkerTunnelHandle } from "./tunnel-contract.js";
 import {
@@ -10,6 +19,11 @@ import {
   MAX_WORKSPACE_MANIFEST_BYTES,
 } from "./workspace-inventory-limits.js";
 import { REMOTE_WORKSPACE_MANIFEST_JS } from "./workspace-sync-scripts.js";
+
+type ProjectPreparation = NonNullable<
+  NonNullable<Parameters<WorkerProvider["provision"]>[2]>["project"]
+>;
+type SetupInitializer = Parameters<ProjectPreparation["prepare"]>[0]["setupInitializer"];
 
 const PreparedSetupEnvironment = z
   .record(
@@ -28,24 +42,83 @@ export type PreparedProjectVerification = {
   baseCommit: string;
   sourceManifestRef: string;
   preparedManifestRef: string;
+  completionManifestRef?: string;
 };
 
 const RUN_ENVIRONMENT_COMMAND_JS = `async (command, context) => {
 const { spawn } = require("node:child_process");
-const { workspaceDir, homeDir, timeoutMs, env = {}, settleDescendants = true } = context;
-const run = async (command) => {
+const { workspaceDir, homeDir, timeoutMs, env = {}, settleDescendants = true, setupInitializer } = context;
+const deadline = performance.now() + timeoutMs;
+const stages = ${JSON.stringify(SETUP_MARKER_STAGES)};
+const markerReasons = ${JSON.stringify(SETUP_MARKER_REASONS)};
+const nativeStages = ${JSON.stringify(SETUP_NATIVE_STAGES)};
+const signals = ${JSON.stringify(SETUP_SIGNALS)};
+const phase = nativeStages.includes(context.phase) ? context.phase : "setup";
+const events = [];
+let truncatedEvents = 0;
+const record = (event) => {
+  if (events.length === 32) {
+    // Preserve failure evidence when later progress markers flood the bounded channel.
+    const progress = events.findIndex((previous) => previous.outcome !== "failed");
+    truncatedEvents++;
+    if (progress < 0 && event.outcome !== "failed") return;
+    events.splice(progress < 0 ? 0 : progress, 1);
+  }
+  events.push(event);
+};
+const fail = (initializing, reason, startedAt, code, signal) => {
+  record({ origin: "native", stage: initializing ? "initializer" : phase, phase, outcome: "failed", reason,
+    elapsedMs: Math.min(2147483647, Math.max(0, Math.round(performance.now() - startedAt))),
+    ...(Number.isInteger(code) && code >= 0 && code <= 255 ? { exit: code } : {}),
+    ...(signal ? { signal: signals.includes(signal) ? signal : "unknown" } : {}) });
+};
+const run = async (command, initializing = false) => {
 if (command && !Array.isArray(command) && typeof command === "object") {
-  const results = await Promise.allSettled(Object.values(command).map(run));
+  const results = await Promise.allSettled(Object.values(command).map((branch) => run(branch)));
   const failed = results.find((result) => result.status === "rejected");
   if (failed) throw failed.reason;
   return results.map((result) => result.value).filter(Boolean).join("\\n");
 }
+const commandStartedAt = performance.now();
+let projectedEnv = {};
+if (!initializing && setupInitializer) {
+  const output = await run(setupInitializer.command, true);
+  try {
+    projectedEnv = JSON.parse(output);
+    if (!projectedEnv || typeof projectedEnv !== "object" || Array.isArray(projectedEnv) ||
+        Object.keys(projectedEnv).length !== setupInitializer.envKeys.length ||
+        Object.entries(projectedEnv).some(([key, value]) => !setupInitializer.envKeys.includes(key) || typeof value !== "string" || value.length > 4096 || value.includes("\\0"))) throw new Error();
+  } catch {
+    fail(true, "invalid_environment", commandStartedAt);
+    throw new Error("Prepared project initializer returned an invalid environment");
+  }
+}
 const argv = typeof command === "string" ? ["/bin/sh", "-c", command] : command;
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2147483647) throw new Error("Prepared project command budget exhausted");
+const remainingMs = Math.ceil(deadline - performance.now());
+  if (!Number.isFinite(timeoutMs) || remainingMs <= 0 || timeoutMs > 2147483647) {
+    fail(initializing, "budget_exhausted", commandStartedAt);
+    throw new Error("Prepared project command budget exhausted");
+  }
   let child;
   let timeout;
   let stderr = Buffer.alloc(0);
+  let stdout = Buffer.alloc(0);
   let failure;
+  let markerLine = "";
+  let oversizedLine = false;
+  const readMarker = () => {
+    const match = /^TEAMCLAW_SETUP_V1 stage=([a-z_]+) outcome=(started|succeeded|failed)(?: exit=(0|[1-9][0-9]{0,2}))?(?: elapsedMs=(0|[1-9][0-9]{0,9}))?(?: reason=([a-z_]+))?$/.exec(markerLine.replace(/\\r$/, ""));
+    if (!oversizedLine && match && stages.includes(match[1]) &&
+        (match[3] === undefined || (match[2] === "failed" && Number(match[3]) <= 255)) &&
+        (match[4] === undefined || Number(match[4]) <= 2147483647) &&
+        (match[5] === undefined || (match[1] === "setup_contract" && match[2] === "failed" && markerReasons.includes(match[5])))) {
+      record({ origin: initializing ? "initializer" : "repository", stage: match[1], phase,
+        outcome: match[2], ...(match[3] !== undefined ? { exit: Number(match[3]) } : {}),
+        ...(match[4] !== undefined ? { elapsedMs: Number(match[4]) } : {}),
+        ...(match[5] !== undefined ? { reason: match[5] } : {}) });
+    }
+    markerLine = ""; oversizedLine = false;
+  };
   // A deadline/signal may retire the group before exit; never signal that group twice.
   let killed = false;
   const killGroup = () => {
@@ -55,49 +128,86 @@ const argv = typeof command === "string" ? ["/bin/sh", "-c", command] : command;
     }
   };
   const stop = (reason) => { failure ??= reason; killGroup(); };
-  const signals = ["SIGTERM", "SIGINT"].map((signal) => [signal, () => stop("interrupted by " + signal)]);
+  const signals = ["SIGTERM", "SIGINT"].map((signal) => [signal, () => stop("interrupted")]);
   // A recipe can signal its parent before spawn returns. Own those signals
   // before it starts, and release them even when spawn throws synchronously.
   for (const [signal, handler] of signals) process.once(signal, handler);
   return new Promise((resolve, reject) => {
-    child = spawn(argv[0], argv.slice(1), {
-      cwd: workspaceDir,
-      env: Object.fromEntries(Object.entries({ PATH: process.env.PATH, HOME: homeDir, LANG: "C.UTF-8", ...env, OPENCLAW_SOURCE_TREE_PATH: workspaceDir, OPENCLAW_WORKTREE_PATH: workspaceDir }).filter(([, value]) => value !== null)),
+    try { child = spawn(argv[0], argv.slice(1), {
+      // The initializer is image-owned and runs outside repository cwd with worker platform context.
+      cwd: initializing ? require("node:os").homedir() : workspaceDir,
+      env: initializing ? process.env : Object.fromEntries(Object.entries({ PATH: process.env.PATH, HOME: homeDir, LANG: "C.UTF-8", ...env, ...projectedEnv, OPENCLAW_SOURCE_TREE_PATH: workspaceDir, OPENCLAW_WORKTREE_PATH: workspaceDir }).filter(([, value]) => value !== null)),
       detached: true,
-      stdio: ["ignore", "ignore", "pipe"],
+      stdio: [initializing ? "pipe" : "ignore", initializing ? "pipe" : "ignore", "pipe"],
     });
-    timeout = setTimeout(() => stop("timed out within the provider command budget (" + Math.ceil(timeoutMs) + " ms)"), timeoutMs);
+    } catch {
+      fail(initializing, "spawn_failed", commandStartedAt);
+      reject(new Error(initializing ? "Prepared project initializer failed" : "Prepared project setup failed: spawn failed"));
+      return;
+    }
+    timeout = setTimeout(() => stop("timeout"), remainingMs);
+    if (initializing) {
+      child.stdin.on("error", () => {});
+      child.stdin.end(JSON.stringify({ timeoutMs: remainingMs }));
+      child.stdout.on("data", (chunk) => {
+        if (stdout.length + chunk.length > 32768) stop("output_limit");
+        else stdout = Buffer.concat([stdout, chunk]);
+      });
+    }
     child.stderr.on("data", (chunk) => {
+      // Only whole, closed marker lines cross the credential-bearing output boundary.
+      for (const byte of chunk) {
+        if (byte === 10) readMarker();
+        else if (markerLine.length < 512 && !oversizedLine) markerLine += String.fromCharCode(byte);
+        else { markerLine = ""; oversizedLine = true; }
+      }
+      if (setupInitializer) return;
       stderr = Buffer.concat([stderr, chunk]).subarray(-16384);
       let start = 0;
       while (start < stderr.length && (stderr[start] & 0xc0) === 0x80) start++;
       stderr = stderr.subarray(start);
     });
-    child.once("error", (error) => { failure ??= error.message; });
+    child.once("error", () => { failure ??= "spawn_failed"; });
     // Preparation must settle descendants before capture. Successful post-binding
     // services live until worker teardown; close our diagnostic pipe without killing them.
     child.once("exit", (code) => {
-      if (settleDescendants || code !== 0 || failure) killGroup();
+      if (initializing || settleDescendants || code !== 0 || failure) killGroup();
       else child.stderr.destroy();
     });
-    child.once("close", (code) => {
+    child.once("close", (code, signal) => {
+      if (markerLine || oversizedLine) readMarker();
       // Invalid UTF-8 expands when decoded; bound the serialized text as well as raw bytes.
       const output = Buffer.from(stderr.toString("utf8"));
       let start = Math.max(0, output.length - 16384);
       while (start < output.length && (output[start] & 0xc0) === 0x80) start++;
       const outputTail = output.subarray(start).toString("utf8");
       if (code !== 0 || failure) {
-        const error = new Error("Prepared project setup failed: " + (failure || "exit " + code));
-        error.outputTail = outputTail;
+        fail(initializing, failure ?? (signal ? "signal" : "nonzero_exit"), commandStartedAt, code, signal);
+        const error = new Error(initializing ? "Prepared project initializer failed" : "Prepared project setup failed: " + (failure || (signal ? "signal " + (signals.includes(signal) ? signal : "unknown") : "exit " + code)));
+        if (!setupInitializer) error.outputTail = outputTail;
         reject(error);
-      } else resolve(outputTail);
+      } else resolve(initializing ? stdout.toString("utf8") : setupInitializer ? "" : outputTail);
     });
   }).finally(() => {
     clearTimeout(timeout);
     for (const [signal, handler] of signals) process.removeListener(signal, handler);
   });
 };
-return await run(command);
+try { return await run(command); }
+catch (error) {
+  const envelope = { schema: "openclaw.setup-diagnostics.v1", events, truncatedEvents };
+  if (!setupInitializer && error.outputTail) {
+    // Preserve legacy non-credential stderr only inside the same bounded artifact.
+    let raw = Buffer.from(error.outputTail);
+    while (raw.length && Buffer.byteLength(JSON.stringify({ ...envelope, outputTail: raw.toString("utf8") })) > 16384) {
+      raw = raw.subarray(Math.min(raw.length, 256));
+      while (raw.length && (raw[0] & 0xc0) === 0x80) raw = raw.subarray(1);
+    }
+    envelope.outputTail = raw.toString("utf8");
+  }
+  error.outputTail = JSON.stringify(envelope);
+  throw error;
+}
 }`;
 
 export const PREPARE_PROJECT_WORKSPACE_JS = `async (input, inspectOnly = false) => {
@@ -192,10 +302,10 @@ const removeSetupOutputs = (workspaceDir, previous) => {
     if (fs.readdirSync(target).length === 0) fs.rmdirSync(target);
   }
 };
-const runSetup = (command, workspaceDir, homeDir) => {
-  if (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs > 2147483647) throw new Error("Prepared project command budget exhausted");
+const runSetup = (command, workspaceDir, homeDir, phase) => {
   return (${RUN_ENVIRONMENT_COMMAND_JS})(command, {
     workspaceDir, homeDir, env: { PATH: setupPath, ...input.recipe?.env, ...input.setupEnv },
+    setupInitializer: input.setupInitializer, phase,
     timeoutMs: input.timeoutMs - (performance.now() - startedAt),
   });
 };
@@ -216,23 +326,53 @@ const runSetup = (command, workspaceDir, homeDir) => {
     if (fs.existsSync(path.join(admin, "objects", "info", "alternates")) || fs.existsSync(path.join(admin, "info", "grafts"))) throw new Error("Prepared project Git base is not standalone");
     const baseCommit = git(workspaceDir, ["rev-parse", "--verify", "HEAD^{commit}"]);
     if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(baseCommit)) throw new Error("Prepared project Git base is invalid");
-    if (verified === undefined) git(workspaceDir, ["fsck", "--full", "--strict", "--no-reflogs", baseCommit]);
     const manifestRoot = ownedDirectory(ownedDirectory(homeDir, ".openclaw-worker"), "manifests");
     const completionRoot = ownedDirectory(manifestRoot, "prepared");
     const sourceDigest = singleArtifact(completionRoot, /^[a-f0-9]{64}$/);
     const completionDirectory = ownedDirectory(completionRoot, sourceDigest);
     const preparedFile = singleArtifact(completionDirectory, /^[a-f0-9]{64}[.]json$/);
     const sourceManifestRef = "sha256:" + sourceDigest;
-    const preparedManifestRef = "sha256:" + preparedFile.slice(0, -5);
+    const completionManifestRef = "sha256:" + preparedFile.slice(0, -5);
+    const completionBytes = readManifest(path.join(completionDirectory, preparedFile), completionManifestRef);
+    const completion = JSON.parse(completionBytes);
+    const envelope = completion.schema === "openclaw.prepared-completion.v1" ? completion : undefined;
+    if (completion.schema !== undefined && !envelope) throw new Error("Prepared completion version is unsupported");
+    if (envelope && (Object.keys(envelope).sort().join(",") !== "baseCommit,nodeToolchain,preparedManifestRef,schema,sourceManifestRef" || !envelope.nodeToolchain || typeof envelope.nodeToolchain !== "object" || envelope.baseCommit !== baseCommit || envelope.sourceManifestRef !== sourceManifestRef || !/^sha256:[a-f0-9]{64}$/.test(envelope.preparedManifestRef))) throw new Error("Prepared completion identity is invalid");
+    const preparedManifestRef = envelope ? envelope.preparedManifestRef : completionManifestRef;
+    if (input.expectedCompletionManifestRef && input.expectedCompletionManifestRef !== completionManifestRef) throw new Error("Prepared completion changed during inspection");
+    if (verified?.completionManifestRef && verified.completionManifestRef !== completionManifestRef) throw new Error("Prepared completion changed during preparation");
     if (verified && (baseCommit !== verified.baseCommit || sourceManifestRef !== verified.sourceManifestRef || preparedManifestRef !== verified.preparedManifestRef)) throw new Error("Prepared project changed during preparation");
+    // Reuse asks whether setup completed for this admitted cache, not whether
+    // every repository/toolchain file is unchanged. The receipt is published last.
+    // Revision refresh and shared snapshot publication still verify the contents.
+    if (inspectOnly && !input.snapshot) {
+      if (!envelope && (completion.version !== 1 || completion.baseCommit !== baseCommit || !Array.isArray(completion.entries))) throw new Error("Prepared completion identity is invalid");
+      return { workspaceDir, homeDir, sourceManifestRef, preparedManifestRef, completionManifestRef, baseCommit };
+    }
+    git(workspaceDir, ["fsck", "--full", "--strict", "--no-reflogs", baseCommit]);
     const completedManifest = path.join(completionDirectory, preparedFile);
     const sourceBytes = readManifest(path.join(manifestRoot, sourceDigest + ".json"), sourceManifestRef);
-    const preparedBytes = readManifest(completedManifest, preparedManifestRef);
-    readManifest(path.join(manifestRoot, preparedFile), preparedManifestRef);
+    const preparedBytes = envelope ? readManifest(path.join(manifestRoot, preparedManifestRef.slice(7) + ".json"), preparedManifestRef) : completionBytes;
+    readManifest(path.join(manifestRoot, preparedManifestRef.slice(7) + ".json"), preparedManifestRef);
     manifestEntries(sourceBytes, baseCommit);
-    if (verified === undefined && manifest(workspaceDir, baseCommit, [preparedManifestRef, sourceManifestRef], homeDir) !== preparedManifestRef) throw new Error("Prepared project completed workspace changed");
-    previous = { workspaceDir, homeDir, sourceManifestRef, preparedManifestRef, baseCommit, sourceBytes, preparedBytes, completedManifest, completionDirectory, manifestRoot };
-    if (inspectOnly) return { workspaceDir, homeDir, sourceManifestRef, preparedManifestRef, baseCommit };
+    if (manifest(workspaceDir, baseCommit, [preparedManifestRef, sourceManifestRef], homeDir) !== preparedManifestRef) throw new Error("Prepared project completed workspace changed");
+    previous = { workspaceDir, homeDir, sourceManifestRef, preparedManifestRef, completionManifestRef, nodeToolchain: envelope?.nodeToolchain, baseCommit, sourceBytes, preparedBytes, completedManifest, completionDirectory, manifestRoot };
+    if (inspectOnly) {
+      if (input.snapshot) {
+        const seedRoot = ownedDirectory(workerRoot, "git-seeds");
+        const seedNamespace = ownedDirectory(seedRoot, input.namespace);
+        const seed = ownedDirectory(seedNamespace, input.seedKey);
+        const seedAdmin = ownedDirectory(seed, ".git");
+        if (fs.existsSync(path.join(seedAdmin, "objects", "info", "alternates")) || fs.existsSync(path.join(seedAdmin, "info", "grafts"))) throw new Error("Prepared project Git base is not standalone");
+        if (git(seed, ["rev-parse", "HEAD"]) !== input.baseCommit || git(seed, ["status", "--porcelain=v1", "--untracked-files=all"])) throw new Error("Prepared project seed is not pristine");
+        git(seed, ["fsck", "--full", "--strict", "--no-reflogs", input.baseCommit]);
+        const machineManifests = ownedDirectory(workerRoot, "manifests");
+        readManifest(path.join(machineManifests, sourceDigest + ".json"), sourceManifestRef);
+        readManifest(path.join(machineManifests, preparedManifestRef.slice(7) + ".json"), preparedManifestRef);
+      }
+      const validatedMachineCaches = input.snapshot ? await (${INSPECT_PROJECT_MACHINE_CACHES_JS})(machineHome, homeDir, envelope?.nodeToolchain, input.snapshotWorkerBundle) : undefined;
+      return { workspaceDir, homeDir, sourceManifestRef, preparedManifestRef, completionManifestRef, baseCommit, ...(validatedMachineCaches ? { validatedMachineCaches } : {}) };
+    }
   }
   const seeds = ownedDirectory(ownedDirectory(workerRoot, "git-seeds"), input.namespace);
   const seed = ownedDirectory(seeds, input.seedKey);
@@ -287,7 +427,11 @@ const runSetup = (command, workspaceDir, homeDir) => {
   } else if (!fresh && previous.sourceManifestRef !== sourceManifestRef) {
     throw new Error("Prepared project pristine baseline changed");
   }
-  if (fresh || changed) setupPath = await (${PREPARE_REPOSITORY_NODE_JS})(workspaceDir, homeDir, machineHome) ?? setupPath;
+  let nodeToolchain = previous?.nodeToolchain;
+  if (fresh || changed) {
+    nodeToolchain = undefined;
+    setupPath = await (${PREPARE_REPOSITORY_NODE_JS})(workspaceDir, homeDir, machineHome, (fact) => { nodeToolchain = fact; }) ?? setupPath;
+  }
   const recipePreparation = { source: recipe.source, ...(recipe.ignoredPropertiesNote ? { ignoredPropertiesNote: recipe.ignoredPropertiesNote } : {}), phaseDurationsMs: {} };
   let setupFailure;
   let captureSkipped;
@@ -299,7 +443,7 @@ const runSetup = (command, workspaceDir, homeDir) => {
       if (command === undefined) continue;
       const phaseStart = performance.now();
       try {
-        const note = await runSetup(command, workspaceDir, homeDir);
+        const note = await runSetup(command, workspaceDir, homeDir, phase);
         if (recipe.source === "detected" && note.trim()) recipePreparation.note = note.trim();
       } catch (error) {
         recipePreparation.failure = { reason: error.message, ...(error.outputTail ? { outputTail: error.outputTail } : {}) };
@@ -310,6 +454,7 @@ const runSetup = (command, workspaceDir, homeDir) => {
     }
   }
   if (setupFailure) return { recipePreparation, setupFailure };
+  if (nodeToolchain) await (${INSPECT_NODE_TOOLCHAIN_JS})(machineHome, nodeToolchain);
   ownedDirectory(directory, "workspace");
   ownedDirectory(directory, "home");
   ownedDirectory(ownedDirectory(homeDir, ".openclaw-worker"), "manifests");
@@ -318,15 +463,18 @@ const runSetup = (command, workspaceDir, homeDir) => {
   verifyRecipe(workspaceDir, true);
   const preparedManifestRef = manifest(workspaceDir, input.baseCommit, [sourceManifestRef]);
   const preparedBytes = readManifest(path.join(workerRoot, "manifests", preparedManifestRef.slice(7) + ".json"), preparedManifestRef);
+  let completionManifestRef = previous?.completionManifestRef ?? preparedManifestRef;
   if (fresh || changed) {
     const completed = new Map([[sourceManifestRef, sourceBytes], [preparedManifestRef, preparedBytes]]);
     for (const [ref, bytes] of completed) fs.writeFileSync(path.join(manifestRoot, ref.slice(7) + ".json"), bytes, { flag: "wx", mode: 0o600 });
     const completionDirectory = ownedDirectory(completionRoot, sourceManifestRef.slice(7), true);
     // Publish this content-addressed pair last. Root B/P artifacts alone cannot
     // turn an interrupted setup into a reusable completed environment.
-    fs.writeFileSync(path.join(completionDirectory, preparedManifestRef.slice(7) + ".json"), preparedBytes, { flag: "wx", mode: 0o600 });
+    const completionBytes = nodeToolchain ? Buffer.from(JSON.stringify({ schema: "openclaw.prepared-completion.v1", baseCommit: input.baseCommit, sourceManifestRef, preparedManifestRef, nodeToolchain })) : preparedBytes;
+    completionManifestRef = "sha256:" + crypto.createHash("sha256").update(completionBytes).digest("hex");
+    fs.writeFileSync(path.join(completionDirectory, completionManifestRef.slice(7) + ".json"), completionBytes, { flag: "wx", mode: 0o600 });
   }
-  return { workspaceDir, homeDir, sourceManifestRef, preparedManifestRef, recipePreparation, ...(captureSkipped ? { captureSkipped } : {}) };
+  return { workspaceDir, homeDir, sourceManifestRef, preparedManifestRef, completionManifestRef, recipePreparation, ...(captureSkipped ? { captureSkipped } : {}) };
 }`;
 
 /** Setup runs at the final absolute paths, before enrollment or session overlays. */
@@ -342,7 +490,15 @@ export function createProjectSetupScript(
     recipe?: EnvironmentRecipe;
     timeoutMs?: number;
     setupEnv?: Record<string, string>;
+    setupInitializer?: SetupInitializer;
     verifiedRetained?: PreparedProjectVerification | null;
+    snapshot?: true;
+    expectedCompletionManifestRef?: string;
+    snapshotWorkerBundle?: {
+      bundleHash: string;
+      openclawVersion: string;
+      protocolFeatures: readonly string[];
+    };
   },
   inspectOnly = false,
 ): string {
@@ -377,27 +533,30 @@ export async function runWorkerProjectLifecycle(params: {
   assertCurrent: () => void;
   signal?: AbortSignal;
 }): Promise<void> {
-  const phases: LifecycleCommand[] = [];
+  const phases: { phase: "postCreate" | "postStart"; command: LifecycleCommand }[] = [];
   if (params.postCreate && params.recipe.postCreate !== undefined) {
-    phases.push(params.recipe.postCreate);
+    phases.push({ phase: "postCreate", command: params.recipe.postCreate });
   }
   if (params.recipe.postStart !== undefined) {
-    phases.push(params.recipe.postStart);
+    phases.push({ phase: "postStart", command: params.recipe.postStart });
   }
   if (!phases.length) {
     return;
   }
   params.assertCurrent();
   const timeoutMs = 10 * 60_000;
-  const createScript = (setupEnv: Record<string, string> = {}) => {
+  const createScript = (
+    setupEnv: Record<string, string> = {},
+    setupInitializer?: SetupInitializer,
+  ) => {
     PreparedSetupEnvironment.parse(setupEnv);
     return `const run = ${RUN_ENVIRONMENT_COMMAND_JS};
 const startedAt = performance.now();
 (async () => {
-  for (const command of ${JSON.stringify(phases)}) {
-    await run(command, { workspaceDir: process.cwd(), homeDir: process.env.HOME, env: ${JSON.stringify({ ...params.recipe.env, ...setupEnv })}, settleDescendants: false, timeoutMs: ${timeoutMs} - (performance.now() - startedAt) });
+  for (const { phase, command } of ${JSON.stringify(phases)}) {
+    await run(command, { workspaceDir: process.cwd(), homeDir: process.env.HOME, env: ${JSON.stringify({ ...params.recipe.env, ...setupEnv })}, setupInitializer: ${JSON.stringify(setupInitializer)}, phase, settleDescendants: false, timeoutMs: ${timeoutMs} - (performance.now() - startedAt) });
   }
-})().catch((error) => { console.error(error.message + (error.outputTail ? ": " + error.outputTail : "")); process.exitCode = 1; });`;
+})().catch((error) => { console.error(error.message + (error.outputTail ? "\\n" + error.outputTail : "")); process.exitCode = 1; });`;
   };
   if (params.runSetupCommand && (!params.workspaceDir || !params.homeDir)) {
     throw new Error("Cloud lifecycle setup requires the owned prepared workspace and HOME paths");
@@ -425,6 +584,7 @@ const startedAt = performance.now();
     }));
   params.assertCurrent();
   if (result.code !== 0) {
+    logWorkerSetupFailure(result.stderr?.trim().split("\n").at(-1));
     throw new Error(`Cloud environment lifecycle command failed: ${result.stderr || result.code}`);
   }
 }

@@ -10,7 +10,6 @@ import type {
 } from "../../agents/session-placement-admission.types.js";
 import { withSessionPlacementForcedTerminalSettlement } from "../../agents/session-placement-forced-terminal-settlement.js";
 import { withSessionPlacementTurnInput } from "../../agents/session-placement-turn-input.js";
-import { SessionManager } from "../../agents/sessions/session-manager.js";
 import { getRuntimeConfig } from "../../config/config.js";
 import { assertRequiredWorkerLocalExecution } from "../../config/required-worker-profile.js";
 import {
@@ -27,6 +26,7 @@ import { getGatewayRestartDrainSignal } from "../../process/gateway-work-admissi
 import { withSessionTurn } from "../../sessions/session-controller.admission.js";
 import { SESSION_CONTROLLER_DRAIN_TIMEOUT_MS } from "../../sessions/session-controller.lifecycle.js";
 import { parseCronRunScopeSuffix } from "../../sessions/session-key-utils.js";
+import { WORKER_ADMISSION_DEADLINE_MS } from "../../worker/worker-connection-contract.js";
 import { workerInferencePlacement } from "./inference-placement.js";
 import { placementTurnOwner, projectWorkerSessionTurnClaim } from "./placement-record.js";
 import type {
@@ -39,24 +39,22 @@ import {
   matchesWorkerPlacementTarget,
 } from "./placement-target.js";
 import { ActiveTurnClaimError } from "./placement-turn-claims.js";
+import { isCurrentWorkerWorkspacePendingResultOwner } from "./placement-workspace-result.js";
 import type { WorkerRuntimeRefreshInFlight } from "./provider-runtime-refresh.js";
+import type { WorkerPlacementRedispatch } from "./service-contract.js";
 import type { WorkerEnvironmentService } from "./service.js";
+import { canRedispatchFailedWorkerPlacement } from "./session-placement-lifecycle.js";
+import { WorkerRunnerUnavailableError } from "./tunnel-contract.js";
 import { prepareWorkerTurnTranscriptSource } from "./worker-turn-transcript-target.js";
-import {
-  projectWorkspaceResultConflict,
-  type WorkerWorkspaceResultConflict,
-  WORKSPACE_CONFLICT_CLEARED_TRANSCRIPT_TYPE,
-  WORKSPACE_CONFLICT_TRANSCRIPT_TYPE,
-} from "./workspace-conflicts.js";
 
 type ActiveWorkerPlacement = Extract<WorkerSessionPlacementRecord, { state: "active" }>;
 
 export type WorkerTurnAdmissionOptions = {
-  environments: Pick<WorkerEnvironmentService, "get">;
+  environments: Pick<WorkerEnvironmentService, "get" | "inspectTurnLease">;
   placements: WorkerSessionPlacementStore;
   reconcileActivePlacement: (environmentId: string) => Promise<void>;
   waitForAdmissionNode: (params: {
-    placement: ActiveWorkerPlacement;
+    placement: Extract<WorkerSessionPlacementRecord, { state: "active" | "draining" }>;
     signal: AbortSignal;
     assertCurrent: () => void;
   }) => Promise<void>;
@@ -110,6 +108,164 @@ export async function admitWorkerTurn(
 /** Required policy uses current placement facts at the existing turn-admission boundary. */
 export function createRequiredWorkerTurnAdmission(options: WorkerTurnAdmissionOptions) {
   return {
+    needsRedispatch: (
+      placement: WorkerSessionPlacementRecord,
+    ): placement is Parameters<WorkerPlacementRedispatch>[0] =>
+      placement.state === "reclaimed" ||
+      (placement.state === "failed" && placement.activeOwnerEpoch !== null),
+    async recoverTurnPlacement(
+      placement: WorkerSessionPlacementRecord,
+      turn: Pick<SessionPlacementTurnParams, "timeoutMs" | "abortSignal">,
+      assertCurrent: () => void,
+    ): Promise<WorkerSessionPlacementRecord> {
+      if (placement.state === "draining") {
+        const facts = await options.placements.readProjection([placement.sessionId], {
+          current: true,
+        });
+        assertCurrent();
+        const pending = facts.pendingResults.get(placement.sessionId);
+        const environment = options.environments.get(placement.environmentId);
+        if (
+          !pending ||
+          pending.claimId !== pending.runId ||
+          !pending.claimId.startsWith("reclaim-") ||
+          (pending.recoveryRequestedAtMs === null &&
+            pending.gatewayInstanceId === options.placements.workspaceResultInstanceId()) ||
+          facts.moves.has(placement.sessionId) ||
+          !matchesWorkerPlacementTarget(facts.placements.get(placement.sessionId), placement) ||
+          !isCurrentWorkerWorkspacePendingResultOwner(placement, pending) ||
+          !environment?.nodeDeviceId ||
+          !environment.leaseId ||
+          !isCurrentActiveWorkerEnvironment(placement, environment)
+        ) {
+          return placement;
+        }
+        const assertRecoveryCurrent = () => {
+          assertCurrent();
+          const current = options.placements.get(placement.sessionId);
+          if (
+            !matchesWorkerPlacementTarget(current, placement) ||
+            !isCurrentWorkerWorkspacePendingResultOwner(current, pending)
+          ) {
+            throw new Error("Deferred worker reclaim changed during foreground recovery");
+          }
+        };
+        const deadline = AbortSignal.timeout(
+          Math.min(WORKER_ADMISSION_DEADLINE_MS, turn.timeoutMs),
+        );
+        const signal = turn.abortSignal ? AbortSignal.any([turn.abortSignal, deadline]) : deadline;
+        // Deferred cleanup cannot reconnect a dead node by waiting. The fresh caller
+        // resumes only its retained owner; existing cleanup still owns the old files.
+        await options.environments.inspectTurnLease({
+          environmentId: placement.environmentId,
+          ownerEpoch: placement.activeOwnerEpoch,
+          leaseId: environment.leaseId,
+          assertCurrent: assertRecoveryCurrent,
+          signal,
+        });
+        assertCurrent();
+        if (
+          isCurrentActiveWorkerEnvironment(
+            placement,
+            options.environments.get(placement.environmentId),
+          )
+        ) {
+          await options.waitForAdmissionNode({
+            placement,
+            signal,
+            assertCurrent: assertRecoveryCurrent,
+          });
+        }
+        signal.throwIfAborted();
+        assertCurrent();
+        await options.reconcileActivePlacement(placement.environmentId);
+        const recovered = await options.placements.getAsync(placement.sessionId);
+        assertCurrent();
+        if (!recovered) {
+          throw new Error("Worker reclaim recovery lost placement");
+        }
+        return recovered;
+      }
+      if (placement.state !== "active") {
+        return placement;
+      }
+      let environment = options.environments.get(placement.environmentId);
+      if (environment?.state === "attached" && environment.leaseId && !placement.turnClaim) {
+        // An idle node can outlive its provider allocation. Qualify the exact lease
+        // before giving a fresh input a claim; readiness alone is not provider loss.
+        const pending = await options.placements.listPendingWorkspaceResultsAsync(
+          placement.sessionId,
+        );
+        assertCurrent();
+        if (pending.length) {
+          throw new Error("Workspace recovery is pending before worker lease admission");
+        }
+        const deadline = AbortSignal.timeout(
+          Math.min(WORKER_ADMISSION_DEADLINE_MS, turn.timeoutMs),
+        );
+        const signal = turn.abortSignal ? AbortSignal.any([turn.abortSignal, deadline]) : deadline;
+        await options.environments.inspectTurnLease({
+          environmentId: placement.environmentId,
+          ownerEpoch: placement.activeOwnerEpoch,
+          leaseId: environment.leaseId,
+          assertCurrent,
+          signal,
+        });
+        signal.throwIfAborted();
+        assertCurrent();
+        environment = options.environments.get(placement.environmentId);
+        if (
+          placement.executionMode === "remote-exec" &&
+          environment?.state === "attached" &&
+          environment.nodeDeviceId
+        ) {
+          // A running lease does not attest its supervisor connection. Wait before
+          // local inference takes custody, so reconnect never replays the failed input.
+          try {
+            await options.waitForAdmissionNode({ placement, signal, assertCurrent });
+          } catch (error) {
+            if (deadline.aborted && !turn.abortSignal?.aborted) {
+              throw new WorkerRunnerUnavailableError();
+            }
+            throw error;
+          }
+          signal.throwIfAborted();
+          assertCurrent();
+        }
+      }
+      const disappeared =
+        environment?.state === "destroyed" ||
+        (environment?.state === "failed" && environment.leaseId === null);
+      if (!disappeared) {
+        return placement;
+      }
+      // Provider loss can settle before placement recovery. Reconcile that recorded loss
+      // before claiming the new input; a vanished node cannot acknowledge a restart drain.
+      assertCurrent();
+      await options.reconcileActivePlacement(placement.environmentId);
+      const recovered = await options.placements.getAsync(placement.sessionId);
+      assertCurrent();
+      if (!recovered) {
+        throw new Error("Worker recovery lost placement");
+      }
+      // Foreground inspection may prove an idle retained disk gone before placement
+      // recovery sees it. Reconcile first, then apply the same exact failed-owner
+      // eligibility used by ordinary redispatch; never replace an intact or pending owner.
+      if (
+        disappeared &&
+        environment?.retention &&
+        (recovered.state !== "failed" ||
+          !canRedispatchFailedWorkerPlacement(
+            recovered,
+            options.environments.get(recovered.environmentId ?? ""),
+          ))
+      ) {
+        throw new Error(
+          "Retained session resource is unavailable; automatic replacement is refused",
+        );
+      }
+      return recovered;
+    },
     usesWorkerInference: async (identity: Omit<LocalTurnPlacementClaim, "runId">) => {
       const projection = await options.placements.readProjection([identity.sessionId], {
         current: true,
@@ -303,46 +459,6 @@ export async function waitForInitialWorkerPlacement(params: {
     await source.release();
     throw error;
   }
-}
-
-export function latestDurableWorkspaceConflict(
-  entries: ReturnType<SessionManager["getBranch"]>,
-): WorkerWorkspaceResultConflict | undefined {
-  for (const entry of entries.toReversed()) {
-    if (entry.type !== "custom_message") {
-      continue;
-    }
-    if (entry.customType === WORKSPACE_CONFLICT_CLEARED_TRANSCRIPT_TYPE) {
-      return undefined;
-    }
-    if (entry.customType !== WORKSPACE_CONFLICT_TRANSCRIPT_TYPE) {
-      continue;
-    }
-    const details = entry.details as
-      | { paths?: unknown; stagedResultRef?: unknown; totalCount?: unknown }
-      | null
-      | undefined;
-    if (
-      !Array.isArray(details?.paths) ||
-      details.paths.length === 0 ||
-      !details.paths.every(
-        (entryPath): entryPath is string => typeof entryPath === "string" && entryPath.length > 0,
-      ) ||
-      typeof details.stagedResultRef !== "string" ||
-      (details.totalCount !== undefined &&
-        (!Number.isSafeInteger(details.totalCount) ||
-          (details.totalCount as number) < details.paths.length)) ||
-      !/^refs\/openclaw\/worker-results\/[A-Za-z0-9-]+$/u.test(details.stagedResultRef)
-    ) {
-      return undefined;
-    }
-    return projectWorkspaceResultConflict(
-      details.paths,
-      details.stagedResultRef,
-      details.totalCount as number | undefined,
-    );
-  }
-  return undefined;
 }
 
 export async function waitForTurnOperation<T>(params: {

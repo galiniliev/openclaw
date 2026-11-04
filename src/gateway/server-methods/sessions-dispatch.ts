@@ -32,6 +32,7 @@ import {
   resolveProjectProfileDestination,
   resolveWorkerPlacementDestination,
 } from "../worker-environments/placement-destination.js";
+import { stopWorkerSessionPlacement } from "../worker-environments/placement-disk-pause.js";
 import { canRetryDeviceDispatch } from "../worker-environments/placement-dispatch-failure.js";
 import { readWorkerPlacementIdentity } from "../worker-environments/placement-projector.js";
 import {
@@ -653,7 +654,10 @@ export const sessionDispatchHandlers: GatewayRequestHandlers = {
       }
       let placement: WorkerSessionPlacementRecord;
       try {
-        placement = await placementService.reclaim!(
+        placement = await stopWorkerSessionPlacement(
+          placementService,
+          context.workerEnvironmentService,
+          existingPlacement,
           {
             ...session,
             ...(params.recoverToGateway ? { recoverToGateway: params.recoverToGateway } : {}),

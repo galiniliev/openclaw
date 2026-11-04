@@ -24,10 +24,17 @@ import { captureSessionMutationRouting } from "./session-sharing-preparation.js"
 import type { WorkerPlacementReclaimBarriers } from "./worker-environments/placement-reclaim-contract.js";
 import type { WorkerSessionPlacementStore } from "./worker-environments/placement-store.js";
 import { matchesWorkerPlacementTarget } from "./worker-environments/placement-target.js";
+import {
+  isCurrentWorkerWorkspacePendingResultOwner,
+  isWorkerReclaimWorkspaceResult,
+} from "./worker-environments/placement-workspace-result-owner.js";
 import type { WorkerPlacementReclaimRequest } from "./worker-environments/service-contract.js";
 
 type WorkerPlacementReclaimBarrierParams = {
-  placements: Pick<WorkerSessionPlacementStore, "get" | "getAsync" | "waitForTurnClaimRelease">;
+  placements: Pick<
+    WorkerSessionPlacementStore,
+    "get" | "getAsync" | "waitForTurnClaimRelease" | "listPendingWorkspaceResultsAsync"
+  >;
   loadSessionRuntime: () => Promise<WorkerPlacementSessionRuntime>;
   cancelSessionWork: WorkerPlacementSessionWorkCancellation;
   revokeSessionAuthority: (request: { sessionId: string; sessionKeys: readonly string[] }) => void;
@@ -40,6 +47,7 @@ export function createGatewayWorkerPlacementReclaimBarriers(
     sessionId,
     sessionKey,
     agentId,
+    retireRetainedWorkspace,
   }: WorkerPlacementReclaimRequest) => {
     const sessionRuntime = await params.loadSessionRuntime();
     const config = getRuntimeConfig();
@@ -189,6 +197,20 @@ export function createGatewayWorkerPlacementReclaimBarriers(
         }
         throw error;
       }
+      if (retireRetainedWorkspace) {
+        const projection = await params.placements.getAsync(sessionId);
+        const pending = (await params.placements.listPendingWorkspaceResultsAsync(sessionId))[0];
+        assertCurrent();
+        if (
+          pending &&
+          isCurrentWorkerWorkspacePendingResultOwner(projection, pending) &&
+          isWorkerReclaimWorkspaceResult(pending)
+        ) {
+          // The entered destructive owner will settle this exact reclaim journal.
+          // Never waive an inference claim or an unknown/mismatched result owner.
+          return;
+        }
+      }
       await params.placements.waitForTurnClaimRelease(sessionId, {
         timeoutMs: SESSION_CONTROLLER_DRAIN_TIMEOUT_MS,
       });
@@ -212,9 +234,15 @@ export function createGatewayWorkerPlacementReclaimBarriers(
     authorize,
     beforeDrain,
     pendingOperations,
+    retireRetainedWorkspace,
     run,
   }) => {
-    using context = await resolveLifecycleContext({ sessionId, sessionKey, agentId });
+    using context = await resolveLifecycleContext({
+      sessionId,
+      sessionKey,
+      agentId,
+      retireRetainedWorkspace,
+    });
     const { sessionRuntime, target, readCurrentTarget, lifecycleIdentities, cancelAndDrain } =
       context;
     const entry = sessionRuntime.resolveCanonicalSessionEntryFromStoreKeys(

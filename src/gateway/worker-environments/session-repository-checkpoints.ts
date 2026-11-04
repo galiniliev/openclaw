@@ -16,6 +16,11 @@ import {
 import type { SessionRepositoryWorkspaceRecord } from "../../state/session-repository-workspaces.types.js";
 import { MAX_WORKSPACE_RESULT_GIT_PACK_BYTES } from "../../worker/node-workspace-transfer-protocol.js";
 import { readGitHubRepositoryPublicationMetadata } from "../github-repository-publication-snapshot.js";
+import {
+  readSessionRepositoryCheckpointOwner as owner,
+  resolveSessionRepositoryCheckpointRef as checkpointRef,
+  type SessionRepositoryCheckpointOwner as CheckpointOwner,
+} from "./session-repository-checkpoint-owner.js";
 import { boundedWorkerError } from "./worker-error.js";
 import { sameEntry } from "./workspace-manifest-comparison.js";
 import {
@@ -54,7 +59,6 @@ type RepositoryGitHistory = {
   gitHistoryNote?: string;
 };
 
-type CheckpointOwner = { workspaceId: string; store?: SessionRepositoryWorkspaceStore };
 type CheckpointSource = CheckpointOwner & { checkpointRef?: string };
 type CheckpointSnapshot = Awaited<ReturnType<typeof readStagedWorkerWorkspaceResult>>;
 export type SessionRepositoryCheckpointPayload = CheckpointSnapshot &
@@ -66,29 +70,6 @@ export type SessionRepositoryCheckpointPayload = CheckpointSnapshot &
 const publicationRef = (ref: string) =>
   workerWorkspaceResultRef(`publication-${createHash("sha256").update(ref).digest("hex")}`);
 const workspaceLog = createSubsystemLogger("gateway/worker-workspace");
-
-async function owner(params: CheckpointOwner) {
-  const store = params.store ?? getSessionRepositoryWorkspaceStore();
-  const prepared = await store.prepare(params.workspaceId);
-  const workspace = prepared.workspace;
-  if (!workspace) {
-    throw new Error("Repository workspace no longer exists");
-  }
-  return {
-    store,
-    workspace,
-    current: prepared.current,
-    root: store.artifactPath(params.workspaceId),
-  };
-}
-
-function checkpointRef(workspace: SessionRepositoryWorkspaceRecord, ref?: string): string {
-  const selected = ref ?? workspace.checkpointRef;
-  if (!selected || !/^refs\/openclaw\/worker-results\/[A-Za-z0-9-]+$/u.test(selected)) {
-    throw new Error("Repository workspace has no valid checkpoint");
-  }
-  return selected;
-}
 
 function assertBase(
   workspace: SessionRepositoryWorkspaceRecord,
@@ -321,6 +302,8 @@ export async function stageSessionRepositoryCheckpoint(
     RepositoryGitHistory & {
       expectedRevision: number;
       checkpointRef?: string;
+      /** The recovery owner has verified exact artifact absence and a source-only snapshot. */
+      missingCheckpoint?: true;
       stagingRoot: string;
       baseManifestRaw: string;
       currentManifestRaw: string;
@@ -391,7 +374,11 @@ export async function stageSessionRepositoryCheckpoint(
     }
   };
   assertRevision();
-  if (workspace.checkpointRef && params.currentManifestRef === workspace.manifestHash) {
+  if (
+    !params.missingCheckpoint &&
+    workspace.checkpointRef &&
+    params.currentManifestRef === workspace.manifestHash
+  ) {
     const acceptedRef = checkpointRef(workspace);
     const companionRef = publicationRef(acceptedRef);
     const objects = await readWorkspaceResultRefObjects(root, [acceptedRef, companionRef]);

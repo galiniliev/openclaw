@@ -16,6 +16,7 @@ import type {
 } from "../node-registry-private.js";
 import { readNodeSessionWithheldCommands } from "../node-registry.js";
 import { deviceUnavailableText, resolveDeviceWorkerAvailability } from "./device-provider.js";
+import type { WorkerPlacementDispatchRequest } from "./service-contract.js";
 
 type DevicePlacementEligibility =
   | { ok: true; availableSlots: number; node: NodeWorkerSupervisorNodeProof }
@@ -149,3 +150,10 @@ export async function resolveDevicePlacementEligibility(params: {
   }
   return { ok: true, availableSlots, node };
 }
+
+export type WorkerDevicePlacementRequirementResolver = (
+  identity: Pick<
+    WorkerPlacementDispatchRequest,
+    "sessionId" | "sessionKey" | "agentId" | "executionMode"
+  >,
+) => Promise<DevicePlacementRequirement>;

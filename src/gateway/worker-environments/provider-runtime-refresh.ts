@@ -2,11 +2,15 @@ import type { WorkerProvider } from "../../plugins/types.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { notifyListeners, registerListener } from "../../shared/listeners.js";
 import { sameWorkerBuild } from "../../worker/worker-build-identity.js";
+import { DEFAULT_BOOTSTRAP_TIMEOUT_MS, NODE_ENROLLMENT_TIMEOUT_MS } from "./bootstrap-timeouts.js";
 import type { WorkerInstallationArtifact } from "./bundle.js";
 import { workerEnvironmentServiceError as serviceError } from "./environment-errors.js";
+import { DEFAULT_NODE_TOOLCHAIN_SETUP_SH } from "./node-toolchain.js";
 import type { WorkerSessionPlacementGate } from "./placement-worker-gate.js";
+import { readWorkerPreparation } from "./preparation-identity.schema.js";
 import type { WorkerProviderLifecycleOptions } from "./provider-lifecycle.types.js";
 import type { createWorkerProviderOwnerLifecycle } from "./provider-owner-lifecycle.js";
+import { requireWorkerProfile } from "./service-validation.js";
 import type { WorkerEnvironmentRecord } from "./store.js";
 
 export type WorkerRuntimeRefreshInFlight = {
@@ -29,17 +33,19 @@ export class WorkerRuntimeRefreshPendingError extends Error {
 type WorkerRuntimeRefreshOptions = Pick<
   WorkerProviderLifecycleOptions,
   | "store"
+  | "withLock"
   | "callBootstrap"
   | "isStopping"
   | "placementStore"
   | "ensureNodeWorkerBundle"
   | "bootstrapWorker"
   | "credentialBroker"
+  | "callProvider"
 > &
   Pick<
     ReturnType<typeof createWorkerProviderOwnerLifecycle>,
     "requireCurrentOwner" | "stopOwner" | "identityResolverFor"
-  >;
+  > & { providerFor: (providerId: string) => WorkerProvider };
 
 export function createWorkerRuntimeRefresher(options: WorkerRuntimeRefreshOptions) {
   const { store, callBootstrap, requireCurrentOwner, stopOwner, identityResolverFor } = options;
@@ -156,5 +162,101 @@ export function createWorkerRuntimeRefresher(options: WorkerRuntimeRefreshOption
       settled.resolve();
     }
   };
-  return { refresh, read: (environmentId: string) => inFlight.get(environmentId) };
+  const resumeNode = async (
+    record: WorkerEnvironmentRecord,
+    provider: WorkerProvider,
+    request: { signal: AbortSignal; assertCurrent: () => void },
+  ) => {
+    const resume = provider.resumeNode;
+    const { leaseId, nodeDeviceId } = record;
+    if (!resume || record.sharedHost !== false || !nodeDeviceId) {
+      return;
+    }
+    const preparation = readWorkerPreparation(record.profileSnapshot);
+    // Legacy/unprepared leases keep ordinary reconnect behavior; never guess a runtime.
+    if (!preparation) {
+      return;
+    }
+    if (!record.bootstrapReceipt || !leaseId) {
+      throw serviceError(
+        "invalid_state",
+        "Worker node recovery requires its retained runtime identity",
+      );
+    }
+    const sessionId = record.attachedSessionIds[0];
+    if (
+      record.state !== "attached" ||
+      record.attachedSessionIds.length !== 1 ||
+      !sessionId ||
+      !options.placementStore
+    ) {
+      throw serviceError("invalid_state", "Worker node recovery requires its exclusive placement");
+    }
+    const authority = await options.placementStore.prepareWorkerRuntimeRefresh({
+      sessionId,
+      environmentId: record.environmentId,
+      ownerEpoch: record.ownerEpoch,
+    });
+    const assertCurrent = () => {
+      request.signal.throwIfAborted();
+      request.assertCurrent();
+      authority.assertCurrent();
+      const current = requireCurrentOwner(record);
+      if (
+        options.isStopping() ||
+        current.state !== "attached" ||
+        current.destroyRequestedAtMs !== null ||
+        current.leaseId !== record.leaseId
+      ) {
+        throw serviceError("invalid_state", "Worker node recovery owner changed");
+      }
+    };
+    try {
+      assertCurrent();
+      await options.callProvider(
+        record.environmentId,
+        "resume-node",
+        () =>
+          resume({
+            leaseId,
+            profile: requireWorkerProfile(record.profileSnapshot.settings),
+            deviceId: nodeDeviceId,
+            nodeBootstrapSha256: preparation.artifacts.nodeBootstrapSha256,
+            openclawVersion: preparation.artifacts.openclawVersion,
+            linuxToolchainSetup: DEFAULT_NODE_TOOLCHAIN_SETUP_SH,
+            signal: request.signal,
+            assertCurrent,
+          }),
+        // A retained host may need the current Node prerequisite before reconnect.
+        DEFAULT_BOOTSTRAP_TIMEOUT_MS + NODE_ENROLLMENT_TIMEOUT_MS,
+      );
+      assertCurrent();
+    } finally {
+      authority.release();
+    }
+  };
+  return {
+    refresh,
+    resumeCurrentNode: async (request: {
+      environmentId: string;
+      ownerEpoch: number;
+      leaseId: string;
+      signal: AbortSignal;
+      assertCurrent: () => void;
+    }) =>
+      options.withLock(request.environmentId, async () => {
+        await store.ready();
+        request.assertCurrent();
+        const record = store.get(request.environmentId);
+        if (
+          !record ||
+          record.ownerEpoch !== request.ownerEpoch ||
+          record.leaseId !== request.leaseId
+        ) {
+          throw serviceError("invalid_state", "Worker node recovery lease changed");
+        }
+        await resumeNode(record, options.providerFor(record.providerId), request);
+      }),
+    read: (environmentId: string) => inFlight.get(environmentId),
+  };
 }

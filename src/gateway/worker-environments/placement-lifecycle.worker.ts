@@ -21,6 +21,7 @@ import {
   normalizeIdentity,
   normalizeWorkerPlacementExecutionMode,
   type WorkerPlacementExecutionMode,
+  type WorkerSessionPlacementRecord,
   type WorkerSessionPlacementDispatchIdentity,
 } from "./placement-record.js";
 import {
@@ -39,6 +40,7 @@ import {
 } from "./placement-row-codec.js";
 import type { PlacementStoreRuntime } from "./placement-runtime.js";
 import {
+  isCompletedInitialRetainedWorkerCleanup,
   isFailedWorkerPlacementEnvironmentGone,
   matchesWorkerPlacementTarget,
 } from "./placement-target.js";
@@ -135,9 +137,21 @@ function startWorkerPlacementDispatch(
     );
   }
   const expected = input.expectedPlacement;
+  if (
+    !expected &&
+    current.state === "failed" &&
+    current.activeOwnerEpoch === null &&
+    current.environmentId &&
+    findWorkerEnvironment(db, current.environmentId)?.retention
+  ) {
+    throw new Error(`Failed worker placement ${identity.sessionId} requires its exact predecessor`);
+  }
+  let confirmedLossRecovery: WorkerSessionPlacementRecord["confirmedLossRecovery"];
   if (expected) {
     if (
       !matchesWorkerPlacementTarget(current, expected) ||
+      current.sessionKey !== identity.sessionKey ||
+      current.agentId !== identity.agentId ||
       current.executionMode !== executionMode ||
       (current.state !== "reclaimed" && current.state !== "failed") ||
       current.turnClaim
@@ -165,7 +179,6 @@ function startWorkerPlacementDispatch(
         ? findWorkerEnvironment(db, current.environmentId)
         : undefined;
       if (
-        current.activeOwnerEpoch === null ||
         !environment ||
         !isFailedWorkerPlacementEnvironmentGone({
           environmentService: { get: () => environment },
@@ -173,6 +186,32 @@ function startWorkerPlacementDispatch(
         })
       ) {
         throw new Error(`Failed worker placement ${identity.sessionId} still requires recovery`);
+      }
+      if (current.activeOwnerEpoch === null) {
+        if (!isCompletedInitialRetainedWorkerCleanup(current, environment)) {
+          throw new Error(`Failed worker placement ${identity.sessionId} still requires recovery`);
+        }
+      } else if (environment.retention) {
+        const owner = environment.retention.owner;
+        if (
+          owner.sessionId !== identity.sessionId ||
+          owner.sessionKey !== identity.sessionKey ||
+          owner.agentId !== identity.agentId
+        ) {
+          throw new Error("Confirmed lost worker retained owner changed before redispatch");
+        }
+        // Teardown may advance the revoked environment epoch; the fenced placement owns the predecessor epoch.
+        confirmedLossRecovery = {
+          version: 1,
+          predecessor: {
+            ...identity,
+            environmentId: environment.environmentId,
+            ownerEpoch: current.activeOwnerEpoch,
+            retentionOwnerBinding: environment.retention.ownerBinding,
+          },
+          predecessorGeneration: current.generation,
+          replacementDispatchGeneration: nextGeneration(current.generation),
+        };
       }
     }
   }
@@ -183,6 +222,9 @@ function startWorkerPlacementDispatch(
       .updateTable("worker_session_placements")
       .set({
         state: "requested",
+        confirmed_loss_recovery_json: confirmedLossRecovery
+          ? JSON.stringify(confirmedLossRecovery)
+          : null,
         execution_mode: executionMode,
         environment_id: null,
         transition_generation: nextGeneration(current.generation),

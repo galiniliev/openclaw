@@ -10,6 +10,7 @@ import {
   DevicePlacementUnavailableError,
   resolveDevicePlacementEligibility,
   type WorkerNodePlacementAuthority,
+  type WorkerDevicePlacementRequirementResolver,
 } from "./device-placement-eligibility.js";
 import { composePlacementAuthorization } from "./placement-authorization.js";
 import type {
@@ -26,20 +27,17 @@ import { readWorkerProjectPreparation } from "./preparation-identity.schema.js";
 import { readWorkerProjectSnapshot } from "./project-preparation.js";
 import { runWorkerProjectLifecycle } from "./project-setup-script.js";
 import { syncSessionRepositoryWorkspace } from "./repository-workspace-startup.js";
+import { retainedRepositoryDisk } from "./retained-workspace.js";
 import type {
   WorkerPlacementAuthorization,
   WorkerPlacementDispatchRequest,
 } from "./service-contract.js";
 import type { WorkerEnvironmentService } from "./service.js";
+import { prepareCheckpointRecovery } from "./session-repository-checkpoint-owner.js";
 import type { WorkerSessionWorkspace } from "./session-workspace.js";
 import { AcceptedWorkspacePublicationIndeterminateError } from "./workspace-accepted-publication.js";
 
-export type WorkerDevicePlacementRequirementResolver = (
-  identity: Pick<
-    WorkerPlacementDispatchRequest,
-    "sessionId" | "sessionKey" | "agentId" | "executionMode"
-  >,
-) => Promise<DevicePlacementRequirement>;
+export type { WorkerDevicePlacementRequirementResolver } from "./device-placement-eligibility.js";
 
 type WorkerNodePlacementAdmission = {
   node: NodeWorkerSupervisorNodeProof;
@@ -392,6 +390,8 @@ export function createWorkerPlacementDispatchStartup(options: {
             ? await syncSessionRepositoryWorkspace({
                 markPhase: params.markPhase,
                 repository: params.workspace.repository,
+                retainedDisk: (workspaceDir) =>
+                  retainedRepositoryDisk(requireAttachedEnvironment(), request, workspaceDir),
                 preparedRepository,
                 readNativeCredential: request.readNativeCredential,
                 retainCredentialCleanup: params.retainCredentialCleanup,
@@ -403,6 +403,8 @@ export function createWorkerPlacementDispatchStartup(options: {
                 gitAuthor,
                 runSetupScript: request.runSetupScript,
                 assertCurrent: assertWorkspaceCurrent,
+                prepareCheckpointRecovery: () =>
+                  prepareCheckpointRecovery(placements, syncingPlacement, assertSyncOwner),
               })
             : await tunnel.syncWorkspace({
                 source: {

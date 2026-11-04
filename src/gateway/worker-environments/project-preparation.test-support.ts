@@ -22,11 +22,14 @@ export async function runProjectScriptWithGitProbe(
     args: string[],
     options: cp.SpawnSyncOptionsWithStringEncoding,
   ) => cp.SpawnSyncReturns<string> | undefined,
+  guest?: { platform: string; arch: string; env: NodeJS.ProcessEnv; fetch: typeof fetch },
 ): Promise<string> {
   let stdout = "";
   let stderr = "";
   const guestProcess = {
-    env: { PATH: process.env.PATH, HOME: home },
+    env: guest?.env ?? { PATH: process.env.PATH, HOME: home },
+    platform: guest?.platform,
+    arch: guest?.arch,
     execPath: process.execPath,
     umask: () => {},
     exitCode: 0,
@@ -55,7 +58,11 @@ export async function runProjectScriptWithGitProbe(
     clearTimeout,
     process: guestProcess,
     console: { error: (text: string) => (stderr += text) },
-    require: (id: string) => modules.get(id) ?? requireModule(id),
+    fetch: guest?.fetch,
+    AbortSignal,
+    require: Object.assign((id: string) => modules.get(id) ?? requireModule(id), {
+      resolve: requireModule.resolve,
+    }),
   });
   if (guestProcess.exitCode !== 0) {
     throw new Error(stderr);
@@ -119,7 +126,12 @@ export async function createProjectPreparationFixture(
   const seed = path.join(home, ".openclaw-worker", "git-seeds", "gateway", seedKey);
   const preparedOperation = async (
     requireCurrent = () => {},
-    options: { project?: typeof project; key?: string; cacheKey?: string } = {},
+    options: {
+      project?: typeof project;
+      key?: string;
+      cacheKey?: string;
+      runSetupScript?: boolean;
+    } = {},
   ) => {
     const snapshot = options.project ?? project;
     const recipe = await readWorkerProjectEnvironmentRecipe(snapshot);
@@ -135,6 +147,7 @@ export async function createProjectPreparationFixture(
         recipe,
       },
       setupAuthorized: true,
+      runSetupScript: options.runSetupScript,
       requireCurrent,
     });
   };

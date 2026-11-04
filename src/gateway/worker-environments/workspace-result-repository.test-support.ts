@@ -22,6 +22,8 @@ import { createWorkerPlacementReclaim } from "./placement-reclaim.js";
 import { placementTurnOwner } from "./placement-record.js";
 import { createRepositoryWorkspaceMutationService } from "./repository-workspace-mutation.js";
 import { syncSessionRepositoryWorkspace } from "./repository-workspace-startup.js";
+import { retainedRepositoryDisk } from "./retained-workspace.js";
+import type { WorkerEnvironmentService } from "./service.js";
 import { readSessionRepositoryArtifacts } from "./session-repository-checkpoints.js";
 import type { WorkerTunnelHandle } from "./tunnel-contract.js";
 import {
@@ -96,6 +98,7 @@ export function useRepositoryWorkspaceResultFixture() {
     executionMode: "worker-turn" | "remote-exec",
     runSetupScript = false,
     incognito = false,
+    retainedDisk = false,
   ) {
     if (incognito) {
       setWorkerTurnSessionTarget({
@@ -128,10 +131,55 @@ export function useRepositoryWorkspaceResultFixture() {
       repositoryWorkspaceId: repository.workspaceId,
       ...(incognito ? { incognito: true } : {}),
     });
+    const environment = attachedEnvironment();
+    const retainDisk = () => {
+      environment.providerId = "crabbox";
+      environment.profileSnapshot = {
+        ...environment.profileSnapshot,
+        settings: { provider: "azure-sandbox" },
+      };
+      environment.retention = {
+        policy: { mode: "session-disk", computeWindowSeconds: 14400 },
+        owner: {
+          sessionId: SESSION_ID,
+          sessionKey: sessionTarget.sessionKey,
+          agentId: sessionTarget.agentId,
+        },
+        ownerBinding: "synthetic-disk-owner",
+        desiredState: "running",
+        operation: null,
+        receipt: {
+          schema: "synthetic-receipt",
+          mode: "session-disk",
+          ownerBinding: "synthetic-disk-owner",
+          identity: {
+            leaseId: environment.leaseId!,
+            attemptLeaseId: environment.leaseId!,
+            slug: "synthetic",
+            resourceId: "synthetic-session-disk",
+          },
+          claimRevision: "1",
+          computeWindowSeconds: 14400,
+          desiredState: "running",
+          policyVerified: true,
+          observedState: "running",
+          stopPending: false,
+          computeWindow: {
+            id: "1",
+            authorizedAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 14400000).toISOString(),
+            state: "active",
+          },
+        },
+      };
+    };
+    if (retainedDisk) {
+      retainDisk();
+    }
     const workspaceOperations = createWorkerWorkspaceOperationCoordinator();
     const service = createNodeWorkspaceTransferService({
       temporaryRoot: path.join(root, "transfers"),
-      getOwner: () => ({ credential: credential(), environment: attachedEnvironment() }),
+      getOwner: () => ({ credential: credential(), environment }),
     });
     const server = await startNodeWorkspaceTransferTestServer(service);
     closeNode = async () => {
@@ -174,6 +222,12 @@ export function useRepositoryWorkspaceResultFixture() {
       ...sessionTarget,
       repository,
       tunnel,
+      ...(retainedDisk
+        ? {
+            retainedDisk: (dir: string) =>
+              retainedRepositoryDisk(environment, { ...sessionTarget, sessionId: SESSION_ID }, dir),
+          }
+        : {}),
       generation: 1,
       runSetupScript,
       assertCurrent: () => {},
@@ -216,11 +270,13 @@ export function useRepositoryWorkspaceResultFixture() {
             workspace,
             transcriptTarget,
             tunnel,
+            environments,
             publishAcceptedWorkspace,
           }),
       );
     }
-    const environments: WorkerDispatchEnvironmentService = {
+    const environments: WorkerDispatchEnvironmentService &
+      Partial<Pick<WorkerEnvironmentService, "inspectTurnLease">> = {
       prepareProjectIntent: async () => {
         throw new Error("unexpected local-project preparation");
       },
@@ -230,7 +286,18 @@ export function useRepositoryWorkspaceResultFixture() {
       bindPreparedWorkspace: async () => {
         throw new Error("unexpected prepared binding");
       },
-      get: () => attachedEnvironment(),
+      inspectTurnLease: vi.fn(async (request) => {
+        request.assertCurrent();
+        if (environment.retention?.receipt) {
+          environment.retention.desiredState = "running";
+          environment.retention.receipt.observedState = "running";
+          environment.retention.receipt.computeWindow.state = "active";
+          environment.retention.receipt.computeWindow.expiresAt = new Date(
+            Date.now() + 60000,
+          ).toISOString();
+        }
+      }),
+      get: () => environment,
       createWithRequest: vi.fn(async () => attachedEnvironment()),
       attachSession: vi.fn(async () => credential()),
       destroy: vi.fn(async () => attachedEnvironment()),
@@ -284,6 +351,8 @@ export function useRepositoryWorkspaceResultFixture() {
     });
     return {
       ...operations,
+      environment,
+      retainDisk,
       remote,
       store,
       repository,
