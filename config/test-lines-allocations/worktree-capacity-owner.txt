@@ -1,0 +1,2 @@
+# Real SQLite/PostgreSQL worker capacity admission: insert, same-owner update, and replaced-owner refusal.
+123

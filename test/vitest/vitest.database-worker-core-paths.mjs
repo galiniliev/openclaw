@@ -713,6 +713,7 @@ export const databaseWorkerCoreTestFiles = [
   "src/auto-reply/reply/session.test.ts",
   "src/auto-reply/reply/session.worktree-reset.test.ts",
   "src/agents/worktrees/empty-source.test.ts",
+  "src/agents/worktrees/capacity.ownership.postgres.test.ts",
   "src/agents/worktrees/pending-slots.worker.test.ts",
   "src/agents/worktrees/registry-read.test.ts",
   "src/agents/worktrees/registry-migration.test.ts",

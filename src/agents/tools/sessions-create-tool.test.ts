@@ -48,24 +48,28 @@ beforeEach(() => {
 });
 
 describe("sessions_create", () => {
-  it("keeps the definition stable while refusing calls without session-write authority", async () => {
-    const denied = [
-      createSessionsCreateTool(),
-      createSessionsCreateTool({
-        sessionControlAuthority: issueAuthority(["operator.read"]).authority,
-      }),
-    ];
-    await withTool(async (authorized) => {
-      for (const tool of denied) {
-        expect(tool.name).toBe(authorized.name);
-        expect(tool.description).toBe(authorized.description);
-        expect(tool.parameters).toEqual(authorized.parameters);
-        const result = await tool.execute("denied", {});
-        expect(result.details).toMatchObject({ gated: true });
-        expect(JSON.stringify(result.content)).toContain("session write authority");
-      }
+  it("uses current invocation authority for tools prepared before caller admission", async () => {
+    const tool = createSessionsCreateTool();
+    const denied = createSessionsCreateTool({
+      sessionControlAuthority: issueAuthority(["operator.read"]).authority,
     });
-    expect(gateway.request).not.toHaveBeenCalled();
+    expect((await tool.execute("unbound", {})).details).toMatchObject({ gated: true });
+    await withSessionToolTestCaller(async () => {
+      expect((await tool.execute("admitted", {})).details).toMatchObject({
+        sessionId: created.sessionId,
+      });
+      await expect(denied.execute("different-source", {})).rejects.toThrow(
+        "Session control operator source changed",
+      );
+    }, issueAuthority().authority);
+    await withSessionToolTestCaller(
+      async () => {
+        expect((await tool.execute("read-only", {})).details).toMatchObject({ gated: true });
+      },
+      issueAuthority(["operator.read"]).authority,
+    );
+    expect((await tool.execute("after-turn", {})).details).toMatchObject({ gated: true });
+    expect(gateway.request).toHaveBeenCalledOnce();
   });
 
   it("requires issued authority and rejects a retained revoked source", async () => {
@@ -73,9 +77,9 @@ describe("sessions_create", () => {
     const tool = createSessionsCreateTool({ sessionControlAuthority: authority });
     expect(tool.parameters).not.toHaveProperty("properties.action");
     expect(tool.parameters).toHaveProperty("additionalProperties", false);
-    expect(() => createSessionsCreateTool({ sessionControlAuthority: { ...authority } })).toThrow(
-      /issued by the host/i,
-    );
+    await expect(
+      createSessionsCreateTool({ sessionControlAuthority: { ...authority } }).execute("forged", {}),
+    ).rejects.toThrow(/issued by the host/i);
     await withSessionToolTestCaller(async () => {
       revoke();
       await expect(tool.execute("revoked", {})).rejects.toThrow("creation source revoked");

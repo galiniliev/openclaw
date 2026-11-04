@@ -645,6 +645,7 @@ export async function stageSessionRepositoryCheckpoint(
 
 export async function forkSessionRepositoryWorkspace(params: {
   branchPrefix?: string;
+  runSetupScript?: boolean;
   sourceWorkspaceId: string;
   agentId: string;
   sessionKey: string;
@@ -666,7 +667,7 @@ export async function forkSessionRepositoryWorkspace(params: {
     ...params,
     url: source.url,
     requestedRef: source.requestedRef ?? undefined,
-    runSetupScript: source.runSetupScript,
+    runSetupScript: source.runSetupScript && (params.runSetupScript ?? true),
     assertCurrent,
   });
   try {

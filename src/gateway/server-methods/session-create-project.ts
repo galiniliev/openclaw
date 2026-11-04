@@ -52,6 +52,7 @@ import {
   prepareSessionWorktree,
   resolveSessionWorktreeBase,
 } from "../session-worktree-preparation.js";
+import { forkSessionRepositoryWorkspace } from "../worker-environments/session-repository-checkpoints.js";
 import { hasActiveAgentRuntimeAuthority } from "./agent-runtime-authority.js";
 import type { AdmittedChatSend } from "./chat-send-admission.js";
 import type { PreparedChatSendSession } from "./chat-send-session.js";
@@ -103,7 +104,12 @@ export function resolveSessionRepositoryCreation(
 
 export function prepareSessionRepositoryWorkspace(
   repository: RepositorySource,
-  options: { runSetupScript: boolean; branchPrefix?: string; assertCurrent: () => void },
+  options: {
+    runSetupScript: boolean;
+    branchPrefix?: string;
+    forkSourceWorkspaceId?: string;
+    assertCurrent: () => void;
+  },
 ): PrepareGatewaySessionLifecycle {
   const { assertCurrent } = options;
   return async (target) => {
@@ -128,15 +134,25 @@ export function prepareSessionRepositoryWorkspace(
       return invalidSessionRequest("session repository source cannot be changed");
     }
     assertSourceCurrent();
-    const workspace = await store.create({
-      agentId: target.agentId,
-      sessionKey: target.key,
-      url: repository.url,
-      requestedRef: repository.ref,
-      runSetupScript: options.runSetupScript,
-      branchPrefix: options.branchPrefix,
-      assertCurrent: assertSourceCurrent,
-    });
+    const workspace = options.forkSourceWorkspaceId
+      ? await forkSessionRepositoryWorkspace({
+          store,
+          sourceWorkspaceId: options.forkSourceWorkspaceId,
+          agentId: target.agentId,
+          sessionKey: target.key,
+          branchPrefix: options.branchPrefix,
+          runSetupScript: options.runSetupScript,
+          assertCurrent: assertSourceCurrent,
+        })
+      : await store.create({
+          agentId: target.agentId,
+          sessionKey: target.key,
+          url: repository.url,
+          requestedRef: repository.ref,
+          runSetupScript: options.runSetupScript,
+          branchPrefix: options.branchPrefix,
+          assertCurrent: assertSourceCurrent,
+        });
     const withCommit: NonNullable<PreparedGatewaySessionLifecycle["withCommit"]> = (run) =>
       runOpenClawStateWorkerOperation(source, () => run(assertSourceCurrent), {
         assertCurrent: assertSourceCurrent,
