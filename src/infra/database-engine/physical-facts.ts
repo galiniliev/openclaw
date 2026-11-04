@@ -72,7 +72,7 @@ export function admitPostgresPhysicalFacts(params: {
         params.preserveSchemaSeal,
       );
     }
-    retainPostgresSchema(params.db, schema);
+    retainPostgresSchema(params.db, schema.postgresSchemaForCatalog?.(schema, catalog) ?? schema);
   }
   const facts: PostgresPhysicalFacts = {
     engine: "postgres",

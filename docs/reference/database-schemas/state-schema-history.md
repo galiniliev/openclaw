@@ -73,6 +73,17 @@ their identities, leases, claims, and payloads. The existing schema transaction 
 backup owners apply the additive change to SQLite and PostgreSQL. Older binaries
 refuse schema 37; rollback restores the verified predecessor tables.
 
+PostgreSQL inspection also recognizes the previously qualified retention-bearing
+schema 33. Its retention fields and archival `repository_preparation` column stay
+in the migration and verified backups, with their original values and column
+order. Inspection preserves the installed seal; the existing migration transaction
+publishes the successor seal after complete catalog verification. Unexpected
+columns, types, constraints, or other drift remain refused. The archival column
+remains until an explicit owner migration consumes its evidence.
+That predecessor used versions 32 and 33 for retention rather than main's index
+ordering changes. Its exact earlier index definitions are verified before the
+existing index-ordering migration runs in the 33-to-34 transaction.
+
 Each SQLite `ALTER TABLE` may validate its existing STRICT table. The migration
 adds five columns across four worker tables, with no row payload rewrite or index
 rebuild. Deployment-scale migration timing remains a required validation step.

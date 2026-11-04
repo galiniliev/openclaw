@@ -36,6 +36,7 @@ openclaw backup create --output ~/Backups
 openclaw backup create --dry-run --json
 openclaw backup create --verify
 openclaw backup create --no-include-workspace
+openclaw backup create --exclude-worktree-templates
 openclaw backup create --only-config
 openclaw backup create --to offsite --keep-daily 7 --keep-weekly 4 --keep-monthly 12
 openclaw backup list --from offsite
@@ -749,6 +750,21 @@ pending or recovering allocations and live worktrees under a previous
 paths from removed registrations remain eligible. Config, credentials, and
 agent databases nested inside an excluded checkout remain included.
 
+`--exclude-worktree-templates` omits regenerable `.templates` caches under the
+managed worktree root (the default state `worktrees/` root and a configured
+`worktreeRoot`). The default remains a full backup. The JSON result and embedded
+manifest record `excludeWorktreeTemplates: true`; existing cache roots appear in
+`skipped` as `worktree templates` with reason `regenerable`. Explicitly configured
+durable agent, credential, workspace, and plugin resources nested inside a cache
+remain included.
+
+This option does **not** exclude checkout files: a live checkout can contain unique
+uncommitted edits. Checkout payloads, source Git repositories and snapshot refs,
+retained restore data, history, databases, and private session context keep their
+normal backup policy. Safe checkout omission requires a backup-owned lossless
+capture of its current files, index, and source Git objects; a snapshot reference
+alone does not provide that archive coverage. The option does not remove local files.
+
 `--only-config` skips state, agent, credentials-directory, workspace, and
 plugin-resource discovery and archives only the active config file path.
 
@@ -936,3 +952,23 @@ no-clobber move, so cleanup does not try to replace an existing directory.
 - [Restore a full archive](/install/backups#restore-a-full-archive)
 - [Storage locations](/concepts/storage-locations)
 - [Storage CLI](/cli/storage)
+
+## Local companion checkpoints
+
+Use `openclaw backup create --local-companion --verify` for a local restart
+checkpoint when PostgreSQL owns shared state. It archives local files, fixed-local
+SQLite databases, and PostgreSQL anchor files, without exporting PostgreSQL rows.
+Verification checks the captured anchors offline and does not contact PostgreSQL.
+The profile requires PostgreSQL for every portable database family. It preserves
+local Codex state, credentials, rollouts, and history needed by retained sessions;
+Codex diagnostic `logs_2.sqlite` files and their WAL/SHM companions are excluded.
+See [exact migration captures and selected dependency recovery](/reference/database-engines#exact-migration-captures)
+for the separate offline database recovery commands.
+
+Use `openclaw backup restore <archive> --target <dir> --local-companion`
+to require this profile and refuse ordinary backups before extraction.
+
+This profile is **not disaster recovery**. Restore keeps the same PostgreSQL store
+identities and namespaces; it does not roll back PostgreSQL data or create new
+namespaces. Keep the corresponding PostgreSQL database available. Ordinary backups
+continue to include PostgreSQL exports for disaster recovery.

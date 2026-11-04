@@ -134,7 +134,7 @@ export const databaseEngineAdapters: {
               snapshot.catalog.filter((fact) => fact.kind === "table").map((fact) => fact.table),
             ),
           );
-          db.exec(migration.sql);
+          db.exec(migration.sqlForCatalog?.(snapshot.catalog) ?? migration.sql);
           db.prepare("UPDATE openclaw_schema_meta SET version = ? WHERE store = ?").run(
             version,
             store.schema.id,

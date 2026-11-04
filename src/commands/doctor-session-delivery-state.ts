@@ -32,7 +32,7 @@ import {
 } from "../state/openclaw-agent-db.js";
 import { getOpenClawDatabaseMaintenanceScope } from "../state/openclaw-state-db-async-lifecycle.js";
 import { runDoctorAgentDatabaseOperation } from "./doctor-agent-database-operation.js";
-import { backupDoctorSqliteDatabases } from "./doctor-migration-backup.js";
+import { backupDoctorMigrationDatabases } from "./doctor-migration-backup.js";
 import type { DoctorSqliteMaintenanceAuthority } from "./doctor-sqlite-maintenance-lock.js";
 import {
   rewriteDoctorSessionEntries,
@@ -309,7 +309,9 @@ export async function repairLegacySessionEntryStates(params: {
         }
       };
       assertCurrent();
-      const backup = await backupDoctorSqliteDatabases({
+      // Schema migration backups describe the predecessor. Preserve the current
+      // PostgreSQL families as well as native companions before this later repair.
+      const backup = await backupDoctorMigrationDatabases({
         env: params.env,
         pendingDatabasePaths: plan.pending.map(({ target }) => target.sqlitePath),
         databasePaths: (params.deferToMediaPreparation ? plan.inspectedTargets : plan.targets).map(

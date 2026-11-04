@@ -118,6 +118,8 @@ type BackupInput = {
   /** Native migration owns the stopped Gateway until Doctor takes custody. */
   stopped?: boolean;
   postgresOffline?: boolean;
+  /** Migration exporters may require a physical engine before any server export. */
+  sourceEngine?: "sqlite";
   pluginOwners?: UpdateDatabaseBackup["pluginOwners"];
 };
 type InspectionPlan = z.infer<typeof UpdateStateSchemaInspectionPlanSchema>;
@@ -348,7 +350,7 @@ export async function createUpdateDatabaseBackupInProcess(
         // an engine-only image. PostgreSQL access still waits for the inventory custody gate.
         const engines = new Map(
           inventory.present
-            .filter((file) => !stoppedSources.has(file))
+            .filter((file) => input.sourceEngine === "sqlite" || !stoppedSources.has(file))
             .map((file) => {
               const observation =
                 !input.stopped && !requestedOriginalSources.has(file)
@@ -363,6 +365,14 @@ export async function createUpdateDatabaseBackupInProcess(
               return [file, observation?.engine ?? readBackupEngine(file)];
             }),
         );
+        if (
+          input.sourceEngine === "sqlite" &&
+          [...engines.values()].some((engine) => engine.engine !== "sqlite")
+        ) {
+          throw new Error(
+            "This capture requires physical SQLite sources; no PostgreSQL data was exported.",
+          );
+        }
         const originalCaptureSources = new Set(
           input.originalCaptureSourcePaths?.filter(
             (file) => engines.get(file)?.engine === "sqlite",

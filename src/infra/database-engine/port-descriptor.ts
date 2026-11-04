@@ -96,23 +96,25 @@ function selectFragments(descriptor: PortDescriptor, tables: ReadonlySet<string>
 /** Resolve optional schema exactly once against the source's admitted catalog. */
 export async function admitDatabasePortDescriptor(
   source: Endpoint,
-  descriptor: PortDescriptor,
+  baseDescriptor: PortDescriptor,
   requiredFragments?: readonly string[],
 ) {
+  let descriptor = baseDescriptor;
+  let postgresTables: Set<string> | undefined;
+  if (!descriptor.activeFragments && source.engine === "postgres") {
+    const catalog = readPostgresCatalog(
+      (await source.db.query(postgresCatalogQuery(source.namespace))).rows[0].catalog,
+    );
+    descriptor = (await descriptor.postgresSourceSchema?.(catalog)) ?? descriptor;
+    postgresTables = new Set(
+      catalog.filter((fact) => fact.kind === "table").map((fact) => fact.table),
+    );
+  }
   const admitted = descriptor.activeFragments
     ? descriptor
     : source.engine === "sqlite"
       ? inspectSqlitePortSchema(source.db, descriptor)
-      : selectFragments(
-          descriptor,
-          new Set(
-            readPostgresCatalog(
-              (await source.db.query(postgresCatalogQuery(source.namespace))).rows[0].catalog,
-            )
-              .filter((fact) => fact.kind === "table")
-              .map((fact) => fact.table),
-          ),
-        );
+      : selectFragments(descriptor, postgresTables!);
   if (
     requiredFragments &&
     !isDeepStrictEqual(requiredFragments.toSorted(), admitted.activeFragments!.toSorted())

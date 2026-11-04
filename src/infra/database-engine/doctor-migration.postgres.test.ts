@@ -47,6 +47,7 @@ import { createUpdateDatabaseBackupWithFixtureTransport } from "./backup-capture
 import { installDatabaseEngineSelection } from "./context.js";
 import { resetDatabaseEngineSelectionForTest } from "./context.test-support.js";
 import type { StoreSchema } from "./contract.js";
+import { registerDoctorSessionRepairPostgresTests } from "./doctor-session-repair.postgres.test-support.js";
 import { openEngineStore } from "./open.js";
 import { getPostgresPhysicalFacts } from "./physical-facts.js";
 import type { PortDescriptor } from "./port-descriptor.js";
@@ -302,6 +303,19 @@ describe.skipIf(!connection)("Doctor PostgreSQL version migration", () => {
       await lock!.release();
     }
   }
+
+  registerDoctorSessionRepairPostgresTests(() => ({
+    client,
+    connection: connection!,
+    env,
+    pathname,
+    namespace,
+    target,
+    originalMigrations,
+    prepareSource,
+    namespaces,
+    config,
+  }));
 
   it.each([24, 25, 26, 27, 28, 31, 33, 34, 35])(
     "backs up and restores the real version %s before the registered migration",

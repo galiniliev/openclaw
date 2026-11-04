@@ -888,10 +888,79 @@ separate signed-Mac/Parallels proof. See the
 [qualification cells and run IDs](/gateway/postgresql#published-stable-upgrade-qualification).
 See [Update admission](/cli/update#candidate-owned-admission).
 
-Database porting runs migration and SQL against a private local working
+## Prepare an expected shared-state namespace
+
+When an existing PostgreSQL anchor names a namespace that has not been created,
+prepare that exact store while the Gateway is stopped:
+
+```bash
+openclaw database prepare-state --expected-store-id <uuid> --expected-namespace <namespace> --json
+```
+
+The command requires valid PostgreSQL configuration, exclusive local schema
+custody, and an anchor matching both expected values. It initializes only an absent
+namespace. An existing namespace must already pass current-version admission;
+missing metadata, another identity, or schema drift is refused rather than repaired.
+The result reports `prepared` or `ready`. Use Doctor or the existing port recovery
+workflow for a store that requires migration or repair.
+
+## Exact migration captures
+
+An offline capture combines a verified filesystem archive with the selected
+SQLite images and configuration files:
+
+```bash
+openclaw database migration-capture create --base-archive <archive> --output <new-directory> --json
+openclaw database migration-capture restore <capture-directory> --target <new-staging-directory> --manifest-sha256 <producer-digest> --json
+```
+
+The source must use SQLite, and the capture directory must be outside its state
+and configuration roots. Restore verifies the producer's manifest digest and every
+artifact before creating staging. It requires the same logical source paths and
+never imports PostgreSQL namespaces or replaces live state.
+
+A controller that already holds a ready Gateway suspension can instead supply
+`--externally-quiesced --request-id <id> --suspension-id <id>` without a base archive.
+Capture renews and revalidates that exact suspension; it does not resume it.
+Blocking filesystem traversal and archive verification run in a joined child so
+renewal remains responsive. The child has a separate 30-minute deadline, and a
+lost or changed suspension cancels capture without publishing a successful result.
+
+Database porting likewise runs migration and SQL against a private local working
 copy, while its verified durable image and journal remain the recovery authority.
 Legal first-use SQLite tables are completed only in that copy before PostgreSQL
 materialization. Historical recovery envelopes remain in the verified original.
+
+## Restore selected session dependencies
+
+Use an operator-prepared recovery bundle to restore one profile-owned skill and
+repository workspace under exclusive offline ownership:
+
+```bash
+openclaw database restore-session-dependencies --input <bundle-directory> --sha256 <request-digest> --json
+```
+
+The fixed layout contains `request.json`, its checksum-bound original
+`shared.sqlite`, the pinned `skill-revision/` tree, and `workspace.git` when the
+selected workspace has an accepted checkpoint. The request selects exact source
+and current profile IDs, an Enterprise GitHub provider/subject, skill ID/revision,
+workspace ID, agent, and session key. The original and current profiles must prove
+the same selected identity; conflicting existing rows or content are refused.
+The historical profile does not contribute role or GitHub-account grants.
+
+Version 1 restores the selected dependencies. Version 2 with
+`action: "repair-retained-owner"` requires those dependencies to be present and
+parks the exact invalid retained owner. Version 3 with
+`action: "restore-missing-bindings"` additionally verifies the original stopped
+disk, current session, configured retention policy, and explicit provider route
+before restoring absent ownership bindings. These repairs do not start a worker
+or declare it ready for execution. Its next use still requires current provider
+and session authority.
+
+Immutable artifacts publish before their database pointers. A refused operation
+can leave verified, unreachable artifacts for recovery; it never overwrites a
+different accepted dependency or restores an entire old database over current
+state.
 
 ## Limits and recovery
 

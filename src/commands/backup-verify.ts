@@ -24,6 +24,11 @@ import { assertSqliteIntegrity } from "../infra/sqlite-integrity.js";
 import { type RuntimeEnv, writeRuntimeJson } from "../runtime.js";
 import { assertOpenClawAgentDatabaseOwner } from "../state/openclaw-agent-db-maintenance.js";
 import { readOpenClawAgentDatabaseRegistryRows } from "../state/openclaw-agent-db-registry.read.js";
+import {
+  assertSqliteSnapshotFileShape,
+  verifyLocalCompanionAnchors,
+  LOCAL_COMPANION_WARNING,
+} from "./backup-local-companion.js";
 import { resolveBackupRecoveryConfig } from "./backup-recovery-config.js";
 import type { BackupSqliteSnapshotFact } from "./backup-resource-inventory.js";
 import { BACKUP_MAX_DECOMPRESSION_RATIO, resolveBackupArchivePath } from "./backup-shared.js";
@@ -124,6 +129,7 @@ function listSqliteSnapshotEntries(
   entries: NormalizedArchiveEntry[],
   owners: SqliteSnapshotOwner[],
   postgresAnchors: ReadonlySet<string>,
+  companionAnchors: ReadonlySet<string>,
 ): SqliteSnapshotEntry[] {
   const ownersByPath = new Map(
     owners.map((owner) => [resolvePortableArchivePathKey(owner.archivePath), owner]),
@@ -151,6 +157,9 @@ function listSqliteSnapshotEntries(
     }
     if (!isRegularArchiveFile(entry.type)) {
       throw new Error(`SQLite snapshot must be a regular archive file: ${entry.normalized}`);
+    }
+    if (companionAnchors.has(entry.normalized)) {
+      continue;
     }
     const exportPath = `${entry.normalized}.postgres`;
     const image = postgresAnchors.has(entry.normalized)
@@ -239,41 +248,6 @@ function assertExpectedSqliteRole(
   }
 }
 
-async function assertSqliteSnapshotFileShape(
-  extractedPath: string,
-  archivePath: string,
-  expectedSize: number,
-): Promise<void> {
-  const header = Buffer.alloc(100);
-  const handle = await fs.open(extractedPath, "r");
-  try {
-    const { bytesRead } = await handle.read(header, 0, header.byteLength, 0);
-    if (
-      bytesRead !== header.byteLength ||
-      header.subarray(0, 16).toString("utf8") !== "SQLite format 3\u0000"
-    ) {
-      throw new Error(`SQLite snapshot ${archivePath} has an invalid database header.`);
-    }
-  } finally {
-    await handle.close();
-  }
-
-  const encodedPageSize = header.readUInt16BE(16);
-  const pageSize = encodedPageSize === 1 ? 65_536 : encodedPageSize;
-  const validPageSize = pageSize >= 512 && pageSize <= 65_536 && (pageSize & (pageSize - 1)) === 0;
-  if (!validPageSize || expectedSize % pageSize !== 0) {
-    throw new Error(`SQLite snapshot ${archivePath} has an invalid page layout.`);
-  }
-
-  const changeCounter = header.readUInt32BE(24);
-  const declaredPageCount = header.readUInt32BE(28);
-  const versionValidFor = header.readUInt32BE(92);
-  const hasAuthoritativePageCount = declaredPageCount !== 0 && changeCounter === versionValidFor;
-  if (hasAuthoritativePageCount && declaredPageCount !== expectedSize / pageSize) {
-    throw new Error(`SQLite snapshot ${archivePath} has an invalid page layout.`);
-  }
-}
-
 async function prepareDatabaseArtifacts(
   archivePath: string,
   spool: BackupArchiveSpool,
@@ -357,6 +331,7 @@ async function verifySqliteSnapshots(params: {
   manifest: BackupManifest;
   postgresAnchors: ReadonlySet<string>;
   spool: BackupArchiveSpool;
+  companionAnchors: ReadonlySet<string>;
 }): Promise<SqliteSnapshotOwner[]> {
   const verifiedOwners: SqliteSnapshotOwner[] = [];
   const stateDir =
@@ -393,6 +368,7 @@ async function verifySqliteSnapshots(params: {
     params.entries,
     declaredOwners,
     params.postgresAnchors,
+    params.companionAnchors,
   );
   if (initialEntries.length === 0) {
     return verifiedOwners;
@@ -465,6 +441,7 @@ async function verifySqliteSnapshots(params: {
             params.entries,
             agentOwners,
             params.postgresAnchors,
+            params.companionAnchors,
           ).filter(
             (candidate) => !extractedEntries.some((extracted) => extracted.raw === candidate.raw),
           );
@@ -666,14 +643,34 @@ async function verifyResolvedBackupArchive(
     manifest,
   );
   await verifyPostgresSnapshots(archivePath, entries, databaseRestoreCandidates, spool);
+  const companionAnchors = await verifyLocalCompanionAnchors(
+    entries,
+    manifest,
+    async (artifacts) => {
+      await assertSnapshotExtractionBudget({
+        entries: artifacts,
+        tempRoot: spool.tempRoot,
+        postgres: false,
+        spool,
+      });
+      return prepareDatabaseArtifacts(archivePath, spool, artifacts);
+    },
+  );
   const verifiedSnapshots = await verifySqliteSnapshots({
     archivePath,
     entries,
     manifest,
     spool,
     postgresAnchors: new Set(databaseRestoreCandidates.map(({ anchorPath }) => anchorPath)),
+    companionAnchors: companionAnchors.paths,
   });
-  verifyBackupSqliteCoverage(manifest, requiredSnapshots, verifiedSnapshots);
+  verifyBackupSqliteCoverage(manifest, requiredSnapshots, [
+    ...verifiedSnapshots,
+    ...companionAnchors.owners,
+  ]);
+  if (manifest.profile === "local-companion") {
+    warnings.push(LOCAL_COMPANION_WARNING);
+  }
 
   const result = {
     ok: true as const,
@@ -685,6 +682,7 @@ async function verifyResolvedBackupArchive(
     entryCount: entries.length,
     symlinkCount: symbolicLinks.length,
     sqliteInventoryVerified: manifest.sqliteSnapshots !== undefined,
+    ...(manifest.profile ? { profile: manifest.profile } : {}),
     ...(warnings.length ? { warnings } : {}),
     ...(externalSymbolicLinks.length ? { externalSymbolicLinks } : {}),
   };

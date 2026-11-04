@@ -26,6 +26,9 @@ import {
 import {
   withLegacyWorkerRetention,
   WORKER_RETENTION_COLUMNS,
+  stateWorkerRetentionLayouts,
+  stateWorkerRetentionCatalog,
+  withStateWorkerRetentionLayout,
 } from "../../state/openclaw-state-db-schema-v37-worker-retention.js";
 import { listOpenClawStateFeatureSchemas } from "../../state/openclaw-state-feature-schema.js";
 import { RETAINED_STATE_TABLES } from "../../state/openclaw-state-schema-compatibility.js";
@@ -65,6 +68,7 @@ function legacyTemplateCatalogValue(value: unknown): unknown {
 
 export async function loadStatePortDescriptor(
   sourceVersion = OPENCLAW_STATE_SCHEMA_VERSION,
+  sourceCatalog?: readonly PostgresCatalogFact[],
 ): Promise<PortDescriptor> {
   if (sourceVersion !== OPENCLAW_STATE_SCHEMA_VERSION) {
     const backup = stateEngineSchema.postgresMigrations?.find(
@@ -94,12 +98,14 @@ export async function loadStatePortDescriptor(
   const legacyWorkspace = sourceVersion < 31;
   const legacyCas = sourceVersion < 35;
   const legacyTemplates = sourceVersion < 36;
+  const retentionLayouts = stateWorkerRetentionLayouts(sourceVersion, sourceCatalog ?? []);
   const currentCatalog: PostgresCatalogFact[] = [
     ...statePostgresRuntime.expectedCatalog,
     ...(source?.expectedCatalog ?? []),
   ].filter(
     (fact) =>
       (sourceVersion >= 37 ||
+        retentionLayouts.has(fact.table) ||
         !isColumn(fact) ||
         !WORKER_RETENTION_COLUMNS.some(
           ([table, column]) => fact.table === table && fact.value.name === column,
@@ -123,13 +129,26 @@ export async function loadStatePortDescriptor(
           "github_repository_publication_requests",
         ].includes(fact.table)),
   );
-  const catalog = legacyTemplates
+  const namedCatalog = legacyTemplates
     ? currentCatalog.map((fact) => ({
         ...fact,
         table: legacyTemplateStateIdentifier(fact.table),
         value: legacyTemplateCatalogValue(fact.value),
       }))
     : currentCatalog;
+  // Filtering an additive predecessor column also shifts every subsequent ordinal.
+  const positions = new Map<string, number>();
+  const catalog = stateWorkerRetentionCatalog(namedCatalog, retentionLayouts).map((fact) => {
+    if (!isColumn(fact)) {
+      return fact;
+    }
+    if (retentionLayouts.has(fact.table)) {
+      return fact;
+    }
+    const position = (positions.get(fact.table) ?? 0) + 1;
+    positions.set(fact.table, position);
+    return Object.assign({}, fact, { value: Object.assign({}, fact.value, { position }) });
+  });
   const columns = catalog.filter(isColumn);
   const keys = catalog.filter(
     (fact): fact is typeof fact & { value: string[] } => fact.kind === "primaryKey",
@@ -140,13 +159,18 @@ export async function loadStatePortDescriptor(
     const cas = legacyCas ? withLegacyLocalWorkspaceCas(template) : template;
     const workspace = legacyWorkspace ? withLegacyLocalWorkspaceManifests(cas) : cas;
     const publication = historical ? withLegacyPublicationDraft(workspace) : workspace;
-    return sourceVersion < 33
-      ? withLegacyPostgresIndexOrdering(
-          publication,
-          sourceVersion < 32 ? "sqlite" : "schema-nullability",
-          legacyTemplates ? withLegacyTemplateStateSchema(schemaSql) : schemaSql,
-        )
-      : publication;
+    const historicalSql =
+      sourceVersion < 33
+        ? withLegacyPostgresIndexOrdering(
+            publication,
+            sourceVersion < 32 ? "sqlite" : "schema-nullability",
+            legacyTemplates ? withLegacyTemplateStateSchema(schemaSql) : schemaSql,
+          )
+        : publication;
+    const retained = withStateWorkerRetentionLayout(historicalSql, retentionLayouts);
+    return sourceVersion === 33 && retentionLayouts.size
+      ? withLegacyPostgresIndexOrdering(retained)
+      : retained;
   };
   const schema = (
     entry: Omit<typeof metadata, "fragments" | "sqliteRanges">,
@@ -203,6 +227,12 @@ export async function loadStatePortDescriptor(
     id: "state",
     version: sourceVersion,
     minimumPostgresVersion: manifest.minimumPostgresVersion,
+    ...(!sourceCatalog
+      ? {
+          postgresSourceSchema: (capturedCatalog: readonly PostgresCatalogFact[]) =>
+            loadStatePortDescriptor(sourceVersion, capturedCatalog),
+        }
+      : {}),
     retainedSqliteTables: RETAINED_STATE_TABLES,
     ...eager,
     fragments: metadata.fragments.map((fragment) => {

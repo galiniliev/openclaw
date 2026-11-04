@@ -51,6 +51,10 @@ import {
 import {
   withLegacyWorkerRetention,
   WORKER_RETENTION_COLUMNS,
+  stateWorkerRetentionLayouts,
+  stateWorkerRetentionCatalog,
+  statePostgresRetentionSchema,
+  withStateWorkerRetentionLayout,
 } from "./openclaw-state-db-schema-v37-worker-retention.js";
 import {
   admitStateSchemaFacts,
@@ -123,7 +127,10 @@ export function admitStatePostgres(db: PostgresSqlConnection, fresh: boolean): v
       facts.catalog.filter(
         (fact) => !fact.kind.endsWith("Definition") && fact.table !== "openclaw_schema_meta",
       ),
-      runtime.expectedCatalog.filter((fact) => !absent.has(fact.table)),
+      stateWorkerRetentionCatalog(
+        runtime.expectedCatalog.filter((fact) => !absent.has(fact.table)),
+        stateWorkerRetentionLayouts(facts.version, facts.catalog),
+      ),
     );
   }
   if (fresh) {
@@ -365,6 +372,19 @@ function createStatePostgresMigrations(): StoreSchema["postgresMigrations"] {
       schema: statePostgresSchemaV33,
       // The state owner's beforeMigrate hook binds identity before this atomic version advance.
       sql: statePostgresVersionSql(34),
+      sqlForCatalog: (catalog) => {
+        const qualified = stateWorkerRetentionLayouts(33, catalog).size > 0;
+        return `${
+          qualified
+            ? postgresIndexOrderingMigration(
+                [
+                  statePostgresSchemaV33.postgres,
+                  ...statePostgresSchemaV33.postgresFragments.map((fragment) => fragment.sql),
+                ].join("\n"),
+              )
+            : ""
+        }\n${statePostgresVersionSql(34)}`;
+      },
     },
     {
       version: 35,
@@ -386,6 +406,19 @@ function createStatePostgresMigrations(): StoreSchema["postgresMigrations"] {
         ([table, column]) =>
           `ALTER TABLE IF EXISTS ${table} ADD COLUMN ${column} text COLLATE "C";`,
       ).join("\n")}\n${statePostgresVersionSql(37)}`,
+      sqlForCatalog: (catalog) => {
+        // The adapter has already checked the entire predecessor catalog. The qualified
+        // v33 fields remain untouched; absent first-use tables need no ALTER either.
+        const qualified = stateWorkerRetentionLayouts(36, catalog).size > 0;
+        return `${
+          qualified
+            ? ""
+            : WORKER_RETENTION_COLUMNS.map(
+                ([table, column]) =>
+                  `ALTER TABLE IF EXISTS ${table} ADD COLUMN ${column} text COLLATE "C";`,
+              ).join("\n")
+        }\n${statePostgresVersionSql(37)}`;
+      },
     },
   ];
 }
@@ -395,6 +428,7 @@ export const stateEngineSchema: StoreSchema = {
   version: OPENCLAW_STATE_SCHEMA_VERSION,
   sqlite: "",
   ...statePostgresSchema,
+  postgresSchemaForCatalog: statePostgresRetentionSchema,
   get postgresMigrations() {
     // SQLite workers never need historical PostgreSQL schemas. Materialize once on first use.
     const value = createStatePostgresMigrations();
@@ -456,14 +490,18 @@ export function ensureStatePostgresFragment(db: PostgresSqlConnection, table: st
   const retentionSql = facts.version < 37 ? withLegacyWorkerRetention(fragment.sql) : fragment.sql;
   const templateSql =
     facts.version < 36 ? withLegacyTemplateStateSchema(retentionSql) : retentionSql;
-  const fragmentSql = facts.version < 35 ? withLegacyLocalWorkspaceCas(templateSql) : templateSql;
+  const retentionLayouts = stateWorkerRetentionLayouts(facts.version, facts.catalog);
+  const fragmentSql = withStateWorkerRetentionLayout(
+    facts.version < 35 ? withLegacyLocalWorkspaceCas(templateSql) : templateSql,
+    retentionLayouts,
+  );
   // Lazy fragments can be created before Doctor upgrades a predecessor's index ordering.
   // sqlite-allow-raw: The schema owner installs a verified fragment under its transaction.
   db.exec(
-    facts.version < 33
+    facts.version < 33 || (facts.version === 33 && retentionLayouts.size > 0)
       ? withLegacyPostgresIndexOrdering(
           fragmentSql,
-          facts.version < 32 ? "sqlite" : "schema-nullability",
+          facts.version < 32 || retentionLayouts.size > 0 ? "sqlite" : "schema-nullability",
         )
       : fragmentSql,
   );

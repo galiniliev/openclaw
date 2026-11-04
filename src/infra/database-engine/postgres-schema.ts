@@ -43,7 +43,11 @@ export const getAdmittedPostgresSchema = (db: PostgresSqlConnection) =>
   getSqliteDatabaseAdmission(db, admittedSchemaKey);
 export const retainPostgresSchema = (db: PostgresSqlConnection, schema: StoreSchema) => {
   // Upgrade recipes can contain backup callbacks; workers only need the current definition.
-  const { postgresMigrations: _migrations, ...definition } = schema;
+  const {
+    postgresMigrations: _migrations,
+    postgresSchemaForCatalog: _resolver,
+    ...definition
+  } = schema;
   publishSqliteDatabaseAdmission(db, admittedSchemaKey, definition);
 };
 
@@ -129,11 +133,14 @@ export function postgresSchemaSql(
   namespace: string,
   catalog?: readonly PostgresCatalogFact[],
 ): string {
+  const resolvedSchema = catalog
+    ? (schema.postgresSchemaForCatalog?.(schema, catalog) ?? schema)
+    : schema;
   const tables = new Set(
     catalog?.filter((fact) => fact.kind === "table").map((fact) => fact.table),
   );
   const active =
-    schema.postgresFragments?.filter((fragment) =>
+    resolvedSchema.postgresFragments?.filter((fragment) =>
       catalog
         ? fragment.tables.some((table) => tables.has(table))
         : fragment.activation === "version-additive",
@@ -144,7 +151,7 @@ export function postgresSchemaSql(
       return;
     }
     for (const id of fragment.dependencies) {
-      const dependency = schema.postgresFragments?.find((item) => item.id === id);
+      const dependency = resolvedSchema.postgresFragments?.find((item) => item.id === id);
       if (!dependency) {
         throw new Error(`Missing PostgreSQL fragment dependency ${id}`);
       }
@@ -153,25 +160,26 @@ export function postgresSchemaSql(
     ordered.set(fragment.id, fragment.sql);
   };
   active.forEach(add);
-  const search = [schema.search, ...Object.values(schema.searchExtensions ?? {})].filter(
-    (item) => item !== undefined,
-  );
+  const search = [
+    resolvedSchema.search,
+    ...Object.values(resolvedSchema.searchExtensions ?? {}),
+  ].filter((item) => item !== undefined);
   const shared = { text: false, vector: false };
   const searchSql = search.map((definition) => {
     const ddl = postgresSearchSql(
       definition,
       namespace,
       shared,
-      schema.postgresVectorDecoderVersion,
-      schema.postgresVectorSearchVersion,
-      schema.postgresTextSearchVersion,
+      resolvedSchema.postgresVectorDecoderVersion,
+      resolvedSchema.postgresVectorSearchVersion,
+      resolvedSchema.postgresTextSearchVersion,
     );
     shared.text ||= Object.keys(definition.text ?? {}).length > 0;
     shared.vector ||=
       definition.mode !== "keyword-only" && Object.keys(definition.vector ?? {}).length > 0;
     return `;\n${ddl}`;
   });
-  return [schema.postgres ?? "", ...ordered.values(), ...searchSql].join("\n");
+  return [resolvedSchema.postgres ?? "", ...ordered.values(), ...searchSql].join("\n");
 }
 
 export function recordPostgresSchema(

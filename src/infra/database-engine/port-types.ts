@@ -29,6 +29,8 @@ export type PortDescriptor = PortSchema & {
   fragments?: readonly (PortSchema & { id: string; dependencies: readonly string[] })[];
   /** Populated from the admitted source, never from the configured feature set. */
   activeFragments?: readonly string[];
+  /** Owner-declared source variants are selected before exact port-schema verification. */
+  postgresSourceSchema?: (catalog: readonly PostgresCatalogFact[]) => Promise<PortDescriptor>;
   /** Retired source tables may be omitted only when empty. */
   retainedSqliteTables?: readonly string[];
   /** Inspection notes bound to this admitted source. */

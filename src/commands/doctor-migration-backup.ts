@@ -157,6 +157,8 @@ export async function backupDoctorMigrationDatabases(params: {
   versionMigrationsOnly?: boolean;
   check?: "quick" | "full";
   repair?: { key: string; validate?: (database: DatabaseSync) => void };
+  /** Same-schema repair callers retain their narrower target/owner assertions. */
+  authority?: DoctorSqliteMaintenanceAuthority;
 }): Promise<
   MigrationMessages & {
     versionMigrations?: NonNullable<OpenClawDatabaseSchemaPreflight["pendingMigrations"]>;
@@ -179,6 +181,11 @@ export async function backupDoctorMigrationDatabases(params: {
   if (!maintenance?.ownsSchemaMaintenance) {
     throw new Error("Pre-migration SQLite backups require Doctor maintenance ownership.");
   }
+  const assertCurrent = () => {
+    maintenance.assertAdmission();
+    params.authority?.assertCurrent();
+  };
+  assertCurrent();
   // Archive-only coverage cannot serve a fresh credential capture inside its transaction.
   const verifiedSnapshots =
     !hasUpdateDoctorMigrationCapture() &&
@@ -227,7 +234,9 @@ export async function backupDoctorMigrationDatabases(params: {
     const changes: string[] = [];
     const postgresGenerations: Record<string, string> = {};
     for (const [pathname, input] of postgresPaths) {
-      const backup = await backupDoctorPostgresMigration(pathname, input, maintenance);
+      const backup = await backupDoctorPostgresMigration(pathname, input, {
+        assertAdmission: assertCurrent,
+      });
       changes.push(...backup.changes);
       if (backup.generation !== undefined) {
         postgresGenerations[pathname] = backup.generation;
@@ -242,7 +251,7 @@ export async function backupDoctorMigrationDatabases(params: {
       verifiedSnapshots,
       pendingDatabasePaths: nativePaths,
       databasePaths: params.databasePaths.filter((pathname) => !postgresPaths.has(pathname)),
-      authority: { assertCurrent: () => maintenance.assertAdmission() },
+      authority: { assertCurrent },
       stateFamilyBackedUp: postgresPaths.has(sharedPath) ? true : undefined,
       integrityChecks,
     });
@@ -274,34 +283,26 @@ export async function backupDoctorMigrationDatabases(params: {
     if (migrationTables.size > 0) {
       // Admit the whole group before capture: orphan recovery must preserve its
       // original history before any declared version migration can commit.
-      await withSqliteIntegrityWorkerScope(
-        () => maintenance.assertAdmission(),
-        async () => {
-          const signal = resolveSqliteInspectionSignal() ?? new AbortController().signal;
-          for (const pathname of migrationTables.keys()) {
-            using database = openNodeSqliteDatabase(pathname, { readOnly: true });
-            await runSqliteIntegrityOperationInWorker(
-              sqliteIntegrityCheckSteps(
-                database,
-                pathname,
-                undefined,
-                integrityChecks.get(pathname),
-              ),
-              {
-                busyTimeoutMs: OPENCLAW_SQLITE_BUSY_TIMEOUT_MS,
-                signal,
-                beforeResume: () => maintenance.assertAdmission(),
-              },
-            );
-          }
-        },
-      );
+      await withSqliteIntegrityWorkerScope(assertCurrent, async () => {
+        const signal = resolveSqliteInspectionSignal() ?? new AbortController().signal;
+        for (const pathname of migrationTables.keys()) {
+          using database = openNodeSqliteDatabase(pathname, { readOnly: true });
+          await runSqliteIntegrityOperationInWorker(
+            sqliteIntegrityCheckSteps(database, pathname, undefined, integrityChecks.get(pathname)),
+            {
+              busyTimeoutMs: OPENCLAW_SQLITE_BUSY_TIMEOUT_MS,
+              signal,
+              beforeResume: assertCurrent,
+            },
+          );
+        }
+      });
     }
     return backupDoctorSqliteDatabases({
       ...params,
       verifiedSnapshots,
       pendingDatabasePaths: [...pending],
-      authority: { assertCurrent: () => maintenance.assertAdmission() },
+      authority: { assertCurrent },
       migrationTables: migrationTables.size > 0 ? migrationTables : undefined,
       integrityChecks,
     });
