@@ -1,10 +1,20 @@
-import { describe, expect, it, vi } from "vitest";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { requireGit } from "../../agents/worktrees/git.js";
+import { NodeWorkerPreparedWorkspaceRuntime } from "../../node-host/node-worker-prepared-workspace.js";
+import { closeOpenClawStateDatabaseByPathAsync } from "../../state/openclaw-state-db-cache.js";
 import { createWorkerPreparationIdentity } from "./preparation-identity.js";
 import { readWorkerPreparation } from "./preparation-identity.schema.js";
 import { PRESENCE_REPOSITORY, usePreparedPoolFixture } from "./prepared-pool.test-support.js";
+import { readWorkerProjectEnvironmentRecipe } from "./project-preparation.js";
+import {
+  createProjectPreparationFixture,
+  runProjectScriptWithGitProbe,
+} from "./project-preparation.test-support.js";
 import { createWorkerProviderIntent } from "./provider-intent.js";
 import { prepareWorkerProviderProject } from "./provider-project-preparation.js";
-import { workerProjectSeedKey } from "./workspace-git-base.js";
+import { prepareWorkerProjectSnapshot, workerProjectSeedKey } from "./workspace-git-base.js";
 
 const sourceAdmission = vi.hoisted(() =>
   vi.fn<typeof import("./repository-project-admission.js").prepareRepositoryWorkerProjectSource>(),
@@ -15,6 +25,144 @@ vi.mock("./repository-project-admission.js", () => ({
 
 describe("prepared project retention compatibility", () => {
   const fixture = usePreparedPoolFixture();
+
+  it("starts admitted B on selected snapshot A and binds the actual prepared base without refreshing content", async () => {
+    const f = await createProjectPreparationFixture(
+      await fs.mkdtemp(path.join(fixture.root, "snapshot-start-")),
+      '#!/bin/sh\nprintf "setup\\n" >> "$HOME/setup-count"\n',
+    );
+    const initialOperation = await f.preparedOperation();
+    const initial = await initialOperation.project.prepare(f);
+    initialOperation.close();
+    const workspace = initial.preparedWorkspace!;
+    await requireGit(workspace.workspaceDir, [
+      "remote",
+      "add",
+      "origin",
+      "https://github.com/acme/project.git",
+    ]);
+    await fs.writeFile(path.join(f.repository, "input.txt"), "latest main B\n");
+    await requireGit(f.repository, ["commit", "--quiet", "-am", "main B"]);
+    const latest = (await prepareWorkerProjectSnapshot({
+      localPath: f.repository,
+      namespace: "gateway",
+    }))!;
+    const revalidate = vi.fn(async () => {});
+    const pack = vi.fn(async () => {
+      throw new Error("snapshot start must not pack latest main");
+    });
+    const recipe = await readWorkerProjectEnvironmentRecipe(latest);
+    const project: Parameters<typeof prepareWorkerProviderProject>[0]["project"] = {
+      key: latest.key,
+      baseCommit: latest.baseCommit,
+      source: {
+        kind: "repository",
+        url: "https://github.com/acme/project.git",
+        repositoryId: "R_fixture",
+        owner: {
+          agent: { agentId: "main", provenance: null },
+          identity: { source: "anonymous" },
+        },
+      },
+    };
+    const repositorySource: NonNullable<
+      Parameters<typeof prepareWorkerProviderProject>[0]["repositorySource"]
+    > = {
+      project,
+      snapshotStart: true,
+      setupRecipe: recipe.identity,
+      recipe,
+      recoverySource: undefined,
+      assertCurrent() {},
+      revalidate,
+      prepareGitPack: pack,
+    };
+    const inputs: Parameters<typeof prepareWorkerProviderProject>[0] = {
+      project,
+      namespace: "gateway",
+      preparation: {
+        ...readWorkerPreparation(fixture.profile())!,
+        key: "b".repeat(64),
+        cacheKey: "c".repeat(64),
+        setupRecipe: recipe.identity,
+        recipe,
+      },
+      record: { preparation: null, createdAtMs: 2000, profileSnapshot: { settings: {} } },
+      getConfig: () => fixture.config,
+      repositorySource,
+      requireCurrent() {},
+    };
+    const operation = await prepareWorkerProviderProject(inputs);
+    onTestFinished(() => operation.close());
+    const gitCommands: string[][] = [];
+    const result = await operation.project.prepare({
+      ...f,
+      snapshotBaseCommit: f.project.baseCommit,
+      runScript: async (script) =>
+        await runProjectScriptWithGitProbe(script, f.home, (args) => {
+          gitCommands.push(args);
+          return undefined;
+        }),
+    });
+    expect(revalidate).toHaveBeenCalledOnce();
+    expect(pack).not.toHaveBeenCalled();
+    expect(result.captureRequired).toBeUndefined();
+    expect(
+      gitCommands.some(
+        (args) => args.includes("fsck") || args.includes("index-pack") || args.includes("checkout"),
+      ),
+    ).toBe(false);
+    expect(await requireGit(workspace.workspaceDir, ["rev-parse", "HEAD"])).toBe(
+      f.project.baseCommit,
+    );
+    expect(await fs.readFile(path.join(workspace.workspaceDir, "input.txt"), "utf8")).toBe(
+      "prepared base\n",
+    );
+    expect(await fs.readFile(path.join(workspace.homeDir, "setup-count"), "utf8")).toBe("setup\n");
+    const databasePath = path.join(f.home, "prepared-test.sqlite");
+    onTestFinished(async () => {
+      await closeOpenClawStateDatabaseByPathAsync(databasePath);
+    });
+    const runtime = new NodeWorkerPreparedWorkspaceRuntime(
+      f.home,
+      { path: databasePath },
+      new Map(),
+      true,
+    );
+    const identity = {
+      gatewayNamespace: "gateway",
+      environmentId: "new-session",
+      preparationKey: "b".repeat(64),
+      cacheKey: "c".repeat(64),
+    };
+    await runtime.prepare({ action: "register", ...identity, ...result.preparedWorkspace! });
+    const binding = {
+      action: "bind" as const,
+      ...identity,
+      sessionId: "session",
+      sessionKey: "agent:main:session",
+      ownerEpoch: 1,
+    };
+    expect(await runtime.prepare(binding)).toMatchObject({
+      baseCommit: f.project.baseCommit,
+      workspaceDir: workspace.workspaceDir,
+    });
+    await fs.writeFile(path.join(workspace.workspaceDir, "input.txt"), "private edit\n");
+    expect(await runtime.prepare(binding)).toMatchObject({ baseCommit: f.project.baseCommit });
+    const replay = await prepareWorkerProviderProject({
+      ...inputs,
+      repositorySource: { ...repositorySource, snapshotStart: undefined },
+    });
+    onTestFinished(() => replay.close());
+    await replay.project.inspectPreparedWorkspace!({
+      baseCommit: f.project.baseCommit,
+      runScript: async (script) =>
+        await runProjectScriptWithGitProbe(script, f.home, () => undefined),
+    });
+    expect(await fs.readFile(path.join(workspace.workspaceDir, "input.txt"), "utf8")).toBe(
+      "private edit\n",
+    );
+  });
 
   async function setup() {
     sourceAdmission

@@ -263,6 +263,36 @@ describe("repository project admission", () => {
     }
   });
 
+  it.each([
+    "default",
+    "main",
+    "refs/heads/main",
+    "HEAD",
+    "topic",
+    "refs/tags/main",
+    "pinned",
+    "replay",
+  ] as const)(
+    "allows snapshot-base startup only for fresh default-ref admission: %s",
+    async (intent) => {
+      const admitted = await prepareRepositoryWorkerProjectSource({
+        ...initial,
+        repository: {
+          ...initial.repository,
+          ...(!["default", "pinned", "replay"].includes(intent) ? { ref: intent } : {}),
+          ...(intent === "pinned" ? { baseCommit: commit } : {}),
+        },
+      });
+      const result =
+        intent === "replay"
+          ? await prepareRepositoryWorkerProjectSource({ ...admission, expected: admitted.project })
+          : admitted;
+      expect(result.snapshotStart === true).toBe(
+        ["default", "main", "refs/heads/main", "HEAD"].includes(intent),
+      );
+    },
+  );
+
   it("admits the declarative recipe before an executable fallback from immutable blobs", async () => {
     const blob = "e".repeat(40);
     rootEntries.push({ path: ".devcontainer.json", type: "blob", mode: "100644", sha: blob });

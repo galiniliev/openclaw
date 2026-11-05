@@ -1,5 +1,4 @@
 import type { WorkerEnvironmentStartStatus } from "../../../packages/gateway-protocol/src/schema/environments.js";
-import type { GitHubCredentialReader } from "../../agents/github-credential-reader.js";
 import { normalizeCloudRepo } from "../../config/cloud-worker-project-profiles.js";
 import type { OpenClawConfig } from "../../config/types.js";
 import { racePromiseWithAbortSignal } from "../../infra/abort-signal.js";
@@ -16,11 +15,11 @@ import { workerInferenceMetadata } from "./inference-placement.js";
 import type { WorkerNodeDesktopCarrier } from "./node-desktop-carrier.js";
 import type { NodeWorkerTunnelManager } from "./node-worker-tunnel.js";
 import type { WorkerSessionPlacementGate } from "./placement-worker-gate.js";
-import { readWorkerProjectPreparation } from "./preparation-identity.schema.js";
+import { createWorkerPreparedWorkspaceBinding } from "./prepared-workspace-binding.js";
 import { readWorkerProjectSnapshot } from "./project-preparation.js";
+import type { createWorkerProviderIntent } from "./provider-intent.js";
 import type { WorkerProviderLifecycleInputOptions } from "./provider-lifecycle.types.js";
 import { WorkerRuntimeRefreshPendingError } from "./provider-runtime-refresh.js";
-import { prepareRepositoryWorkerProjectSource } from "./repository-project-admission.js";
 import { createRetainedWorkspaceRecoveryAssertion } from "./retained-workspace.js";
 import type { WorkerDesktopLaunchResult, WorkerDesktopObserveResult } from "./service-contract.js";
 import { requireWorkerProfile } from "./service-validation.js";
@@ -103,6 +102,9 @@ export function createWorkerEnvironmentTransportLifecycle(options: {
 }
 
 type WorkerEnvironmentAccessOptions = {
+  preparedRepositorySource?: ReturnType<
+    typeof createWorkerProviderIntent
+  >["preparedRepositorySource"];
   readStartStatus: (record: WorkerEnvironmentRecord) => WorkerEnvironmentStartStatus | undefined;
   store: WorkerEnvironmentStore;
   placementStore?: Pick<WorkerSessionPlacementGate, "validateWorkspaceRecovery">;
@@ -273,71 +275,10 @@ export function createWorkerEnvironmentAccess(options: WorkerEnvironmentAccessOp
     });
   };
 
-  const bindPreparedWorkspace = async (
-    request: Parameters<NonNullable<WorkerEnvironmentAccessOptions["bindPreparedWorkspace"]>>[0] & {
-      readNativeCredential?: GitHubCredentialReader;
-      retainCredentialCleanup?: (revoke: () => Promise<void>) => void;
-    },
-  ) => {
-    // Repository admission belongs to this host owner, not the node transport payload.
-    const { readNativeCredential, retainCredentialCleanup, ...binding } = request;
-    const bind = options.bindPreparedWorkspace;
-    const assertCurrent = () => {
-      request.signal?.throwIfAborted();
-      request.assertCurrent();
-      const record = requireCurrentRecord(request.environmentId);
-      const preparation = readWorkerProjectPreparation(record.profileSnapshot.project);
-      if (
-        record.state !== "attached" ||
-        record.ownerEpoch !== request.ownerEpoch ||
-        record.attachedSessionIds.length !== 1 ||
-        record.attachedSessionIds[0] !== request.sessionId ||
-        record.destroyRequestedAtMs !== null ||
-        record.sharedHost !== false ||
-        preparation?.key !== request.preparationKey ||
-        preparation.cacheKey !== request.cacheKey
-      ) {
-        throw new Error("Prepared workspace lost its exact attached environment owner");
-      }
-      return { record, preparation };
-    };
-    const { record, preparation } = assertCurrent();
-    if (!bind) {
-      throw new Error("Prepared workspace node transport is unavailable");
-    }
-    const projectSnapshot = readWorkerProjectSnapshot(record.profileSnapshot.project);
-    let repository: Awaited<ReturnType<typeof prepareRepositoryWorkerProjectSource>> | undefined;
-    if (projectSnapshot && "source" in projectSnapshot) {
-      if (!options.projectNamespace) {
-        throw new Error("Prepared repository namespace is unavailable");
-      }
-      // A ready hit and resumed initial binding must prove current source access too;
-      // a snapshot is reusable content, never a substitute for repository authority.
-      repository = await prepareRepositoryWorkerProjectSource({
-        expected: projectSnapshot,
-        readNativeCredential,
-        retainCredentialCleanup,
-        namespace: options.projectNamespace,
-        getConfig: options.getConfig,
-        assertCurrent,
-        signal: request.signal,
-        knownRecipe: () => ({
-          setupRecipe: preparation.setupRecipe,
-          recipe: preparation.recipe,
-        }),
-      });
-    }
-    const assertBindingCurrent = () => {
-      assertCurrent();
-      repository?.assertCurrent();
-    };
-    assertBindingCurrent();
-    const prepared = await bind({ ...binding, assertCurrent: assertBindingCurrent });
-    assertBindingCurrent();
-    await repository?.revalidate(request.signal);
-    assertBindingCurrent();
-    return { ...prepared, assertCurrent: assertBindingCurrent };
-  };
+  const bindPreparedWorkspace = createWorkerPreparedWorkspaceBinding({
+    ...options,
+    requireCurrentRecord,
+  });
 
   const startTunnel = async (request: WorkerTunnelRequest): Promise<WorkerTunnelHandle> => {
     if (options.isStopping()) {

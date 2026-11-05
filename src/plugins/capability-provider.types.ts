@@ -446,6 +446,8 @@ export type WorkerProvider = {
         /** Verify an already enrolled allocation without transferring, running setup, or capturing it. */
         inspectPreparedWorkspace?: (transport: {
           runScript: (script: string, signal: AbortSignal) => Promise<string>;
+          /** Completed base recorded by this allocation before enrollment. */
+          baseCommit?: string;
           /** Verify the complete selected cache inventory before reusable image capture. */
           snapshot?: true;
           /** Current producer identity for snapshot-only machine bundle inspection. */
@@ -467,6 +469,8 @@ export type WorkerProvider = {
         }>;
         /** Bound to this provision attempt; retained callbacks reject after it closes. */
         prepare: (transport: {
+          /** Actual base of the selected compatible snapshot; host admission decides reuse. */
+          snapshotBaseCommit?: string;
           /** Operator-owned worker initializer; its bounded environment never returns to the host. */
           setupInitializer?: { command: string[]; envKeys: string[] };
           runScript: (script: string, signal: AbortSignal) => Promise<string>;
@@ -481,6 +485,8 @@ export type WorkerProvider = {
         }) => Promise<{
           seedKey: string;
           cacheHit: boolean;
+          /** Actual completed base, which can precede the admitted default branch. */
+          baseCommit?: string;
           /** New completed setup must enter the reusable image before enrollment. */
           captureRequired?: true;
           /** Detected setup is best effort; this allocation must remain cold on failure. */

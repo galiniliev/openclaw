@@ -383,8 +383,8 @@ it.each([
 
     const failed = context("cbx_failed");
     await expect(owner.allocate(failed)).rejects.toThrow("not found");
-    expect(record()?.operation).toEqual(
-      retired ? { type: "retire", checkpointId: CHECKPOINT_ID } : undefined,
+    expect(record()?.retirements).toEqual(
+      retired ? [{ type: "retire", checkpointId: CHECKPOINT_ID }] : undefined,
     );
 
     if (!retired) {
@@ -484,13 +484,13 @@ it("keeps one predecessor and retires the older previous only after its borrower
   expect(openWarmImageStore().entries()).toHaveLength(1);
   expect(record()).toMatchObject({
     image: { checkpointId: `${CHECKPOINT_ID}_3` },
-    operation: { type: "retire", checkpointId: CHECKPOINT_ID },
+    retirements: [{ type: "retire", checkpointId: CHECKPOINT_ID }],
   });
   expect(calls.some((argv) => argv[2] === "delete")).toBe(false);
   await owner.release(borrower);
   const deleted = calls.filter((argv) => argv[2] === "delete").map((argv) => argv[3]);
   expect(deleted).toEqual([CHECKPOINT_ID]);
-  expect(record()?.operation).toBeUndefined();
+  expect(record()?.retirements).toBeUndefined();
   expect(record()?.previous?.checkpointId).toBe(`${CHECKPOINT_ID}_2`);
 });
 
@@ -519,7 +519,10 @@ it("preserves exact preparation replay and cache compatibility across reopen", a
     id: "cbx_compatible",
     preparation: { ...source.preparation, key: "c".repeat(64), purpose: "session" as const },
   };
-  expect(await restarted.allocate(compatible)).toEqual(checkpointChoice);
+  expect(await restarted.allocate(compatible)).toEqual({
+    ...checkpointChoice,
+    baseCommit: "a".repeat(40),
+  });
   expect(
     await restarted.allocate({
       ...compatible,

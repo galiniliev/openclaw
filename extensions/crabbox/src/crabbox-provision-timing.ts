@@ -23,10 +23,53 @@ const RUNNER_PHASES = new Set([
   "bootstrap.verification",
   "bootstrap.verification.identity",
   "bootstrap.worker.verification",
+  "bootstrap.worker.expansion",
   "bootstrap.activation",
 ]);
 const duration = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value) && value >= 0;
+
+function logTiming(message: string, fields: Record<string, unknown>): void {
+  try {
+    // ACA consumes plain console lines; retain the bounded, safe fields there too.
+    log.info(message, { ...fields, consoleMessage: `${message} ${JSON.stringify(fields)}` });
+  } catch {
+    // Observability must not change result, cancellation, or cleanup custody.
+  }
+}
+
+export function reportCrabboxProvisionPhase(
+  identity: { operationId: string; environmentId?: string } | undefined,
+  phase: "project.preparation" | "node.enrollment.command" | "node.readiness",
+  observation: { durationMs: number; outcome: "success" | "failed" },
+): void {
+  if (identity) {
+    logTiming("Crabbox provisioning phase", { ...identity, phase, ...observation });
+  }
+}
+
+/** Times the whole owner operation, including transport and preparation outside the guest. */
+export async function measureCrabboxProvisionPhase<T>(
+  identity: { operationId: string; environmentId?: string } | undefined,
+  phase: "project.preparation" | "node.enrollment.command" | "node.readiness",
+  run: () => Promise<T>,
+): Promise<T> {
+  if (!identity) {
+    return run();
+  }
+  const started = performance.now();
+  let outcome: "success" | "failed" = "failed";
+  try {
+    const result = await run();
+    outcome = "success";
+    return result;
+  } finally {
+    reportCrabboxProvisionPhase(identity, phase, {
+      durationMs: performance.now() - started,
+      outcome,
+    });
+  }
+}
 
 export type CrabboxSnapshotPhase =
   | "snapshot.capture.source"
@@ -51,11 +94,7 @@ export function reportCrabboxSnapshotPhase(
     nonAdditive?: boolean;
   },
 ): void {
-  try {
-    log.info("Crabbox snapshot timing", { ...identity, phase, ...observation });
-  } catch {
-    // Timing cannot change image publication or retain/release an operation.
-  }
+  logTiming("Crabbox snapshot timing", { ...identity, phase, ...observation });
 }
 
 /** Consume only timing observations, never allocation receipts or raw diagnostic fields. */
@@ -112,16 +151,12 @@ export function reportCrabboxProvisionTiming(
               : [],
           )
       : [];
-    try {
-      log.info("Crabbox provisioning timing", {
-        ...identity,
-        outcome,
-        runnerPhases: phases,
-        creationEvents: counts,
-      });
-    } catch {
-      // Observability must not change allocation, cancellation, or cleanup custody.
-    }
+    logTiming("Crabbox provisioning timing", {
+      ...identity,
+      outcome,
+      runnerPhases: phases,
+      creationEvents: counts,
+    });
     return;
   }
 }

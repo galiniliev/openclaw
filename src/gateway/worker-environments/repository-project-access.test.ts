@@ -22,6 +22,8 @@ it.each([
   "caller revoked",
   "identity replaced",
   "access lost after binding",
+  "admitted intent",
+  "admitted intent access lost after binding",
 ] as const)("revalidates source access during %s binding", async (scenario) => {
   const project = structuredClone(PRESENCE_REPOSITORY);
   const record = await fixture.attachSeed("repository", { repository: project });
@@ -32,9 +34,20 @@ it.each([
   let identityCurrent = true;
   const revalidate = async () =>
     assert(
-      scenario !== "access lost after binding",
+      !scenario.endsWith("access lost after binding"),
       new Error("Repository access is no longer available"),
     );
+  const source = () => ({
+    project,
+    recoverySource: undefined,
+    setupRecipe: undefined,
+    recipe: { source: "none" as const, inputs: {}, env: {} },
+    assertCurrent: () => assert(identityCurrent, new Error("Repository identity changed")),
+    revalidate: vi.fn(revalidate),
+  });
+  const admittedSource = source();
+  const reused = scenario.startsWith("admitted intent");
+  const intent = { providerId: "fixture", profileSnapshot: record.profileSnapshot };
   admit.mockReset().mockImplementation(async (params) => {
     params.assertCurrent();
     assert(
@@ -42,14 +55,7 @@ it.each([
       new Error("Repository access is no longer available"),
     );
     callerCurrent = scenario !== "caller revoked";
-    return {
-      project,
-      recoverySource: undefined,
-      setupRecipe: undefined,
-      recipe: { source: "none", inputs: {}, env: {} },
-      assertCurrent: () => assert(identityCurrent, new Error("Repository identity changed")),
-      revalidate,
-    };
+    return source();
   });
   const bindingIdentity = {
     environmentId: record.environmentId,
@@ -79,6 +85,7 @@ it.each([
     readStartStatus: () => undefined,
     getConfig: () => fixture.config,
     projectNamespace: "gateway",
+    preparedRepositorySource: () => admittedSource,
     bindPreparedWorkspace: bind,
     prepareCurrentBundle: async () => {
       throw new Error("No tunnel should start during source admission");
@@ -100,9 +107,10 @@ it.each([
     signal: fixture.abort.signal,
     readNativeCredential: async () => "synthetic-host-only-credential",
     retainCredentialCleanup: () => {},
+    ...(reused ? { admittedIntent: intent } : {}),
     assertCurrent: () => assert(callerCurrent, new Error("Dispatch caller retired")),
   });
-  if (scenario === "reopened store") {
+  if (scenario === "reopened store" || scenario === "admitted intent") {
     const binding = await result;
     expect(binding).toMatchObject(prepared);
     binding.assertCurrent();
@@ -117,4 +125,8 @@ it.each([
     scenario === "source unavailable" || scenario === "caller revoked" ? 0 : 1,
   );
   expect(fixture.store.get(record.environmentId)).toEqual(record);
+  if (reused) {
+    expect(admit).not.toHaveBeenCalled();
+    expect(admittedSource.revalidate).toHaveBeenCalledOnce();
+  }
 });

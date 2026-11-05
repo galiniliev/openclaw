@@ -67,7 +67,10 @@ export function createCrabboxOfflineRuntimeSetup(params: CrabboxOfflineRuntimeSe
 
 /** Verify the retained cache without repairing, publishing or enrolling it. */
 export function createCrabboxRuntimeCacheVerification(
-  params: CrabboxRuntimeInstallationIdentity & { target?: CrabboxOperatingSystem },
+  params: CrabboxRuntimeInstallationIdentity & {
+    target?: CrabboxOperatingSystem;
+    workerBundle: { bundleHash?: string; protocolFeatures?: readonly string[] };
+  },
 ): { command: string; forwardedEnv: Record<string, string> } {
   for (const artifact of [params.nodeBootstrap, params.workerBundle]) {
     if (
@@ -95,7 +98,12 @@ function createCrabboxNodeSetup(
     target?: CrabboxOperatingSystem;
   } & (
     | ({ offline: true; leaseId?: never; verifyOnly?: false } & CrabboxOfflineRuntimeSetupOptions)
-    | ({ offline: true; leaseId?: never; verifyOnly: true } & CrabboxRuntimeInstallationIdentity)
+    | ({
+        offline: true;
+        leaseId?: never;
+        verifyOnly: true;
+        workerBundle: { bundleHash?: string; protocolFeatures?: readonly string[] };
+      } & CrabboxRuntimeInstallationIdentity)
     | {
         offline?: false;
         verifyOnly?: false;
@@ -446,6 +454,7 @@ setPhase("preparation");
   if (${Boolean(params.verifyOnly)}) {
     await timed("bootstrap.verification", () => verifyRuntime(runtimeDir));
     if (!await timed("bootstrap.worker.verification", () => verifyWorkerArchive(runtimeDir))) throw new Error("Cloud worker prepared archive is missing");
+    await timed("bootstrap.worker.expansion", () => prepareExpandedWorker(true));
     reportRuntimeInstallation("existing-verified");
     setPhase("complete");
     return;
@@ -631,6 +640,7 @@ setPhase("preparation");
     if (!existingRuntime) fs.renameSync(installDir, runtimeDir);
   } finally { fs.rmSync(stage, { recursive: true, force: true }); }
   }
+  if (!mode) await timed("bootstrap.worker.expansion", () => prepareExpandedWorker());
   installRuntimePrefetch();
   // Runtime-only capture receives the existing immutable-artifact verification receipt.
   if (!mode && workerBundle && bootstrap.install !== "npm") reportRuntimeInstallation(reusedRuntime ? "existing-verified" : "installed");

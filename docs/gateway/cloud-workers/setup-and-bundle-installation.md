@@ -123,6 +123,24 @@ For source builds, run `pnpm build` and restart the Gateway before dispatching. 
 
 OpenClaw worker turns install the matching worker bundle, reusing a verified archive retained in a prepared image when available. Codex remote execution starts its managed exec-server directly. Node-command allowlists and invocation approval still apply. See [runtime support](/gateway/cloud-workers/dispatching-a-session#runtime-support) and [the security model](/gateway/cloud-workers/security-model).
 
+Snapshot runtime preparation also expands the admitted worker bundle into the owning
+node package's `worker-artifacts/expanded/<bundleHash>` directory. Fresh leases
+validate that build and its existing complete bundle manifest, then create a
+lease-local alias to that exact package path. Matching forks avoid archive
+extraction. Missing, mismatched, or damaged expanded code uses the existing
+verified archive installation path; arbitrary alias targets remain forbidden.
+Retention removes lease aliases without deleting the package's source code.
+Node identity, credentials, journals, claims, and workspaces stay under their
+existing owners and lease boundaries. Each new node process still performs its
+own requested prewarm; disk preparation does not establish process readiness.
+
+Provisioning logs include whole project preparation, enrollment preparation,
+the complete remote enrollment command, node readiness, workspace registration,
+and worker prewarm durations. Their bounded artifact identities and numeric
+timings also appear in plain console output for external log collectors.
+These intervals can overlap; they do not establish that an archive was
+downloaded or attribute otherwise unmeasured startup time.
+
 Cross-platform Gateway installations prepare additional dependency inputs under `node-runtime-dependencies/<platform>-<arch>/` inside the immutable package (for example, `linux-x64`). Each input contains the exact root `package.json`, its complete installed production `node_modules`, linked workspace packages, and selected plugins' installed dependency directories under `extensions/`, and a `runtime-input.json` receipt with `platform`, `arch`, `packageJsonSha256`, and `lockfileSha256`. The hashes must match the Gateway's `package.json` and `pnpm-lock.yaml`. Build/install dependencies and native addons on the target platform using the frozen lockfile; copy compiled workspace distributions from the same source build. Keep all links within that input. The canonical producer materializes regular archive files from these installed dependencies; it never resolves or downloads packages. Qualify the resulting runtime with a real cold launch on each target. A macOS dependency tree alone does not qualify Linux.
 
 Offline Linux image composition records verified relative-import edges in the

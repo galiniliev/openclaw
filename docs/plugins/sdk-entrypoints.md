@@ -156,12 +156,22 @@ the local archives before installing them and returns no forwarded credentials.
 It does not allocate a machine, enroll a node, create a logical lease, or grant
 execution authority. Node and archive extraction tools must already be present.
 
+To prepare reusable expanded worker code, include the exported worker artifact's
+`bundleHash` and `protocolFeatures` in `workerBundle`. The native installer
+validates this build identity and the archive, then publishes code under the
+owning package's `worker-artifacts/expanded/<bundleHash>`. Archive-only inputs
+retain their existing behavior. This optional input metadata does not change the
+installation receipt or grant enrollment or session authority.
+
 For a retained cache, `createCrabboxRuntimeCacheVerification` takes the same
 artifact identity without local archive paths and returns a credential-free
 command. It rejects missing or corrupt caches without installing, pruning
 archives, binding runtime Node, or creating enrollment state. It checks the
 package/build/manifest identity, CLI version, and retained worker archive digest;
 it does not hash every installed runtime file or grant live execution authority.
+When supplied with the same worker build metadata, verification also checks the
+expanded worker bundle using its existing receipt and complete manifest validator;
+it never repairs a missing or damaged expanded cache.
 
 After a successful bundle install or verification command, pass its stdout and expected
 identity to `readCrabboxRuntimeInstallation`. It accepts exactly one

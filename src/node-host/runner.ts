@@ -270,6 +270,7 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
       cloudflareAccessByCandidate.set(candidate, credentials);
     }
   });
+  const runtimeStarted = performance.now();
   const preparedRuntime = await prepareNodeHostRuntime({
     config: cfg,
     env: process.env,
@@ -280,6 +281,11 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
     desktopSharingEnabled: opts.desktopSharingEnabled,
     commands: config.commands,
   });
+  if (opts.ephemeral) {
+    logInfo(
+      `node-host: startup phase ${JSON.stringify({ phase: "runtime.prepare", durationMs: Math.round(performance.now() - runtimeStarted) })}`,
+    );
+  }
   logInfo(`node-host: advertised commands: ${preparedRuntime.manifest.commands.join(", ")}`);
   const deviceIdentity = await loadOrCreateDeviceIdentityAsync();
   const { token, password } =

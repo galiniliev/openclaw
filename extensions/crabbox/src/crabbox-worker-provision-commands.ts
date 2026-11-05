@@ -7,7 +7,10 @@ import {
   type WorkerProfile,
   type WorkerSessionDiskRetention,
 } from "openclaw/plugin-sdk/plugin-entry";
-import { reportCrabboxProvisionTiming } from "./crabbox-provision-timing.js";
+import {
+  reportCrabboxProvisionPhase,
+  reportCrabboxProvisionTiming,
+} from "./crabbox-provision-timing.js";
 import {
   crabboxCommandError,
   crabboxCommandOutput,
@@ -333,6 +336,8 @@ export async function runProvisionSetup(
     assertCurrent?: () => void;
   },
 ): Promise<string> {
+  const started = performance.now();
+  let outcome: "success" | "failed" = "failed";
   let output: string;
   try {
     const run =
@@ -388,9 +393,17 @@ export async function runProvisionSetup(
         `Cloud worker ${params.inspect.id}: using unlocked runtime install (${match[1]})`,
       );
     }
+    outcome = "success";
   } catch (error) {
     params.signal?.throwIfAborted();
     return await failProvisionAfterCleanup({ ...params, id: params.inspect.id }, error);
+  } finally {
+    if (params.phase === "node enrollment setup") {
+      reportCrabboxProvisionPhase(params.timingIdentity, "node.enrollment.command", {
+        durationMs: performance.now() - started,
+        outcome,
+      });
+    }
   }
   params.signal?.throwIfAborted();
   return output;

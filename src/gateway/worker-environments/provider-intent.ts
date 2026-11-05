@@ -711,7 +711,7 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
     prepareRetention,
     assertPreparedIntentCurrent,
     createWithProfile,
-    preparedRepositorySource(profileId: string, intent: WorkerProviderPreparedIntent) {
+    preparedRepositorySource(this: void, profileId: string, intent: WorkerProviderPreparedIntent) {
       assertPreparedIntentCurrent(profileId, intent);
       return preparedIntents.get(intent)?.repository;
     },

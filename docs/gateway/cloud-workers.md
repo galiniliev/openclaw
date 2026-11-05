@@ -25,7 +25,7 @@ A repository-only GitHub session needs no Gateway checkout. A session started fr
 
 ### Later sessions
 
-A later session adopts a matching ready worker or forks a compatible snapshot. Forks refresh the checkout and top up the current runtime before enrollment. Runtime updates alone do not invalidate repository snapshots; changed setup recipes or machine settings can require a cold build. [Warm images](/gateway/cloud-workers/warm-images) explains reuse, refresh, reserves, storage charges, and recovery.
+A later session adopts a matching ready worker or forks a compatible snapshot. A new repository-only session on its default branch starts on the snapshot's prepared checkout and fetches main in the background. Managed publication integrates against latest main. Other refs and Gateway checkouts still prepare the requested commit before enrollment. Runtime updates alone do not invalidate repository snapshots; changed setup recipes or machine settings can require a cold build. [Warm images](/gateway/cloud-workers/warm-images) explains reuse, refresh, reserves, storage charges, and recovery.
 
 ### Customize preparation and startup
 

@@ -407,6 +407,7 @@ export function createWorkerPlacementDispatchService(options: WorkerPlacementDis
             beforeProvision: assertCurrent,
           });
       return await startup.continueProvisionedDispatch({
+        admittedIntent: preparedIntent,
         markPhase: diagnostics?.mark,
         request: { ...request, readNativeCredential },
         retainCredentialCleanup,

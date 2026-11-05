@@ -60,6 +60,7 @@ export async function prepareWorkerProviderProject(params: {
         }
       : undefined,
     setupAuthorized: true,
+    snapshotStart: repository?.snapshotStart,
     runSetupScript: record.profileSnapshot.runSetupScript === false ? false : undefined,
     signal: params.signal,
     requireCurrent: () => {

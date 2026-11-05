@@ -1,8 +1,10 @@
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import path from "node:path";
 import type { TimerOptions } from "node:timers";
 import { deserialize } from "node:v8";
 import { Worker } from "node:worker_threads";
+import { Command } from "commander";
 import { afterEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import {
   WORKER_EXECUTION_AUTHORITY_PROTOCOL_FEATURE,
@@ -15,7 +17,11 @@ import {
   createDeferred,
   withinTest,
 } from "../../test/helpers/promise.js";
+import { resolveCliStartupPolicy } from "../cli/command-startup-policy.js";
+import { registerNodeCli } from "../cli/node-cli/register.js";
+import { loadOrCreateDeviceIdentity } from "../infra/device-identity.js";
 import { NODE_WORKER_CAPACITY_EXHAUSTED_ERROR_CODE } from "../infra/node-commands.js";
+import * as openclawRoot from "../infra/openclaw-root.js";
 import type {
   SqliteWorkerCommand,
   SqliteWorkerReply,
@@ -26,6 +32,9 @@ import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import type { OpenClawStateWorkerOperations } from "../state/openclaw-state-worker-contract.js";
 import { useStateDatabaseTempDirs } from "../test-utils/state-database-temp-dirs.js";
 import { mockProcessPlatform } from "../test-utils/vitest-spies.js";
+import { NodeWorkerBundleInstaller } from "./node-worker-bundle-installer.js";
+import { buildBundleFixture } from "./node-worker-bundle-installer.test-support.js";
+import { resolveNodeWorkerBundleDirectory } from "./node-worker-bundle-paths.js";
 import { NodeWorkerCapacity } from "./node-worker-capacity.js";
 import { NodeWorkerJournalWorker } from "./node-worker-journal-worker.js";
 import { NodeWorkerLaunchStore } from "./node-worker-launch-store.js";
@@ -35,6 +44,7 @@ import { createNodeWorkerLaunchRecovery } from "./node-worker-supervisor-recover
 import {
   createObservedNodeWorkerSupervisorFixture,
   observeNodeWorkerAdapters,
+  waitForNodeWorkerTerminal,
 } from "./node-worker-supervisor.fixture.test-support.js";
 import { createNodeWorkerSupervisor } from "./node-worker-supervisor.js";
 import {
@@ -644,3 +654,102 @@ it.skipIf(process.platform === "win32")(
   },
   20_000,
 );
+
+it("reuses snapshot-produced code for fresh leases with private state and process-local prewarm", async () => {
+  const root = fs.realpathSync.native(tempDirs.make("snapshot-worker-reuse-"));
+  const marker = path.join(root, "prewarm-count");
+  const bundle = await buildBundleFixture(root, {
+    workerSource: `if (process.argv[2] === "--internal-worker-prewarm") { (await import("node:fs")).appendFileSync(${JSON.stringify(marker)}, ${JSON.stringify("ready\n")}); process.exit(0); }
+${TEST_WORKER_SOURCE}`,
+    bundlePrewarm: 1,
+  });
+  const packageRoot = path.join(root, "runtime-package");
+  const archivePath = path.join(
+    packageRoot,
+    "worker-artifacts",
+    `${bundle.input.archive.sha256}.tgz`,
+  );
+  await fsp.mkdir(path.dirname(archivePath), { recursive: true });
+  await fsp.writeFile(archivePath, bundle.archive);
+  vi.spyOn(openclawRoot, "resolveOpenClawPackageRootSync").mockReturnValue(packageRoot);
+  expect(
+    resolveCliStartupPolicy({
+      commandPath: ["node", "prepare-worker-bundle"],
+      jsonOutputMode: false,
+    }),
+  ).toMatchObject({ skipConfigGuard: true, loadPlugins: false, hideBanner: true });
+  bundle.input.build.protocolFeatures = testWorkerLaunchInput(
+    root,
+    "build",
+  ).descriptor.admission.handshake.protocolFeatures;
+  const program = new Command();
+  registerNodeCli(program);
+  await program.parseAsync(
+    [
+      "node",
+      "prepare-worker-bundle",
+      "--input",
+      JSON.stringify({
+        build: bundle.input.build,
+        archive: { sha256: bundle.input.archive.sha256, bytes: bundle.input.archive.bytes },
+      }),
+    ],
+    { from: "user" },
+  );
+  const prepared = path.join(path.dirname(archivePath), "expanded", bundle.input.build.bundleHash);
+  expect(fs.existsSync(marker)).toBe(false);
+  const leases = [];
+  for (const lease of ["first", "second"]) {
+    const state = path.join(root, lease);
+    const identity = loadOrCreateDeviceIdentity({
+      env: { ...process.env, OPENCLAW_STATE_DIR: state },
+    });
+    const installer = new NodeWorkerBundleInstaller({
+      env: { ...process.env, OPENCLAW_STATE_DIR: state },
+    });
+    await expect(
+      installer.ensure({ input: bundle.input, gatewayUrl: "ws://127.0.0.1:1" }),
+    ).resolves.toEqual(bundle.input.build);
+    const alias = path.join(
+      state,
+      "node-host",
+      bundle.input.gatewayNamespace,
+      "bundles",
+      bundle.input.build.bundleHash,
+    );
+    expect(await fsp.readlink(alias)).toBe(prepared);
+    expect(resolveNodeWorkerBundleDirectory(alias, bundle.input.build.bundleHash)).toBe(prepared);
+    const workspace = path.join(state, "workspace");
+    await fsp.mkdir(workspace);
+    const supervisor = createNodeWorkerSupervisor({
+      env: { ...process.env, OPENCLAW_STATE_DIR: state },
+    });
+    try {
+      expect(await supervisor.status(lease === "first" ? "second" : "first")).toBeUndefined();
+      const input = testWorkerLaunchInput(workspace, lease);
+      input.gatewayNamespace = bundle.input.gatewayNamespace;
+      input.expectedBundleHash = bundle.input.build.bundleHash;
+      input.descriptor.admission.handshake = bundle.input.build;
+      await supervisor.launch(input, TEST_WORKER_ENDPOINT);
+      expect((await waitForNodeWorkerTerminal(supervisor, lease)).state).toBe("completed");
+    } finally {
+      await supervisor.close();
+    }
+    leases.push({ installer, alias, identity });
+  }
+  expect(leases[0]!.identity.deviceId).not.toBe(leases[1]!.identity.deviceId);
+  expect(await fsp.readFile(marker, "utf8")).toBe("ready\nready\n");
+  await leases[0]!.installer.retain({
+    gatewayNamespace: bundle.input.gatewayNamespace,
+    bundleHashes: [],
+  });
+  expect(fs.existsSync(leases[0]!.alias)).toBe(false);
+  expect(fs.existsSync(leases[1]!.alias)).toBe(true);
+  await expect(
+    leases[1]!.installer.inspect({
+      gatewayNamespace: bundle.input.gatewayNamespace,
+      bundleHash: bundle.input.build.bundleHash,
+    }),
+  ).resolves.toEqual({ bundleHash: bundle.input.build.bundleHash, status: "installed" });
+  expect(await fsp.readdir(prepared)).not.toContain("identity");
+});

@@ -5,6 +5,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
+import { requireGit } from "../../agents/worktrees/git.js";
 import { readWorkerBundleDirectoryManifest } from "../../shared/worker-bundle-archive.js";
 import {
   hashWorkerBundleManifest,
@@ -15,6 +16,7 @@ import {
   createProjectPreparationFixture,
   runProjectScriptWithGitProbe,
 } from "./project-preparation.test-support.js";
+import { prepareWorkerProjectSnapshot, workerProjectSeedKey } from "./workspace-git-base.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const version = "24.21.0";
@@ -88,6 +90,10 @@ async function fixture(setup?: string) {
 describe("native snapshot machine cache admission", () => {
   it.each([
     "complete",
+    "retained-commit",
+    "retained-unknown-manifest",
+    "retained-seed-link",
+    "retained-prepared-extra",
     "extra-file",
     "extra-directory",
     "escaping-link",
@@ -95,7 +101,42 @@ describe("native snapshot machine cache admission", () => {
     "missing-archive",
   ] as const)("inspects real repository Node installation before snapshot: %s", async (change) => {
     const f = await fixture();
+    let currentProject = f.project;
     try {
+      if (change.startsWith("retained-")) {
+        f.owner.close();
+        await fs.writeFile(path.join(f.repository, "input.txt"), "prepared revision B\n");
+        await requireGit(f.repository, ["add", "input.txt"]);
+        await requireGit(f.repository, ["commit", "--quiet", "-m", "revision B"]);
+        currentProject = (await prepareWorkerProjectSnapshot({
+          localPath: f.repository,
+          namespace: "gateway",
+        }))!;
+        f.owner = await f.preparedOperation(undefined, {
+          project: currentProject,
+          key: "b".repeat(64),
+        });
+        f.prepared = (
+          await f.owner.project.prepare({ ...f, runScript: f.runScript })
+        ).preparedWorkspace!;
+        expect(await fs.readdir(path.dirname(f.seed))).toEqual(
+          expect.arrayContaining([path.basename(f.seed), workerProjectSeedKey(currentProject)]),
+        );
+        if (change === "retained-unknown-manifest") {
+          await fs.writeFile(
+            path.join(f.home, ".openclaw-worker/manifests/unknown.json"),
+            "unknown",
+          );
+        }
+        if (change === "retained-seed-link") {
+          const outside = path.join(f.root, "outside-seed");
+          await fs.rename(f.seed, outside);
+          await fs.symlink(outside, f.seed);
+        }
+        if (change === "retained-prepared-extra") {
+          await fs.writeFile(path.join(path.dirname(f.prepared.homeDir), "unknown"), "unknown");
+        }
+      }
       if (change === "extra-file") {
         await fs.writeFile(path.join(f.cache, "unknown.txt"), "unapproved\n");
       }
@@ -116,8 +157,21 @@ describe("native snapshot machine cache admission", () => {
         snapshot: true,
         runScript: f.runScript,
       });
-      if (change === "complete") {
+      if (change === "complete" || change === "retained-commit") {
         const result = await inspect;
+        if (change === "retained-commit") {
+          expect(await fs.readdir(path.dirname(f.seed))).toEqual([
+            workerProjectSeedKey(currentProject),
+          ]);
+          expect(await fs.readdir(path.join(f.home, ".openclaw-worker/manifests"))).toEqual(
+            [...new Set([f.prepared.sourceManifestRef, f.prepared.preparedManifestRef])]
+              .map((ref) => ref.slice(7) + ".json")
+              .toSorted(),
+          );
+          expect(await fs.readFile(path.join(f.prepared.workspaceDir, "input.txt"), "utf8")).toBe(
+            "prepared revision B\n",
+          );
+        }
         expect(result).toMatchObject({
           sourceManifestRef: f.prepared.sourceManifestRef,
           preparedManifestRef: f.prepared.preparedManifestRef,
@@ -132,7 +186,10 @@ describe("native snapshot machine cache admission", () => {
           },
         });
         // The existing completion owner reads its new envelope on a fresh operation, too.
-        const replay = await f.preparedOperation();
+        const replay = await f.preparedOperation(undefined, {
+          project: currentProject,
+          key: f.prepared.preparationKey,
+        });
         try {
           await replay.project.prepare({ ...f, runScript: f.runScript });
           await expect(
@@ -143,8 +200,15 @@ describe("native snapshot machine cache admission", () => {
         }
         const factoryModule = process.env.OPENCLAW_TEST_FACTORY_SNAPSHOT_VERIFIER;
         if (factoryModule) {
+          if (change === "retained-commit") {
+            console.log("PAIRED_REFRESH_NATIVE_ADMITTED", {
+              seeds: await fs.readdir(path.dirname(f.seed)),
+              manifests: await fs.readdir(path.join(f.home, ".openclaw-worker", "manifests")),
+            });
+          }
           const factory: Record<string, unknown> = await import(pathToFileURL(factoryModule).href);
-          if (typeof factory.verifyPreEnrollmentState !== "function") {
+          const verifyPreEnrollmentState = factory.verifyPreEnrollmentState;
+          if (typeof verifyPreEnrollmentState !== "function") {
             throw new Error("Factory snapshot verifier entrypoint missing");
           }
           const workspace = path.join(f.root, "empty-provider-workspace");
@@ -173,14 +237,18 @@ describe("native snapshot machine cache admission", () => {
               },
             },
           };
-          expect(
-            factory.verifyPreEnrollmentState({
+          const verify = () =>
+            verifyPreEnrollmentState({
               home: f.home,
               workspace,
               env: {},
               snapshotInput: input,
-            }),
-          ).toMatchObject({ workerStateLimitedToPreparedCaches: true });
+            });
+          expect(verify()).toMatchObject({ workerStateLimitedToPreparedCaches: true });
+          if (change === "complete") {
+            await fs.mkdir(path.join(f.home, ".azure"));
+            expect(verify).toThrow("credential, pairing or session state");
+          }
           console.log(
             "FACTORY_CACHE_ADMISSION_PAIRED_PASS",
             createHash("sha256")
@@ -190,6 +258,12 @@ describe("native snapshot machine cache admission", () => {
         }
       } else {
         await expect(inspect).rejects.toThrow();
+        if (change.startsWith("retained-")) {
+          // A late unknown root must not partially reclaim the earlier seed plan.
+          expect(await fs.readdir(path.dirname(f.seed))).toEqual(
+            expect.arrayContaining([path.basename(f.seed), workerProjectSeedKey(currentProject)]),
+          );
+        }
       }
     } finally {
       f.owner.close();

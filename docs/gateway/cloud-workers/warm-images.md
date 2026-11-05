@@ -77,13 +77,13 @@ ownership; a lost response never triggers another capture automatically.
 
 ### Later sessions and refresh
 
-A matching ready worker skips provisioning. Otherwise, a compatible snapshot starts a new machine and New Session shows **Starting from snapshot…**. New forks update their checkout to the requested commit and install the current runtime when needed before enrollment. Profile setup is already captured; post-create/start commands run after session binding.
+A matching ready worker skips provisioning. Otherwise, a compatible snapshot starts a new machine and New Session shows **Starting from snapshot…**. A new repository-only session on its default branch uses that snapshot's completed checkout, even when the branch has advanced. Omitted refs, `HEAD`, and the default branch's bare or `refs/heads/` name all select this behavior. After activation, OpenClaw fetches main in the background without changing the active working files. Managed publication refreshes and integrates against latest main. Current repository access is still required. Profile setup is already captured; post-create/start commands run after session binding.
 
 Shared clean project snapshots do not bind the moving repository commit. A new
-session-private retained fork uses the same canonical project preparation as other
-new forks: a completed checkout at the requested revision needs no source upload
-or setup; a different revision verifies the captured baseline, advances the
-checkout, and runs the existing content-update setup before enrollment. Recipe,
+fork with another branch, tag, pinned commit, or Gateway checkout uses canonical project preparation:
+a completed checkout at the requested revision needs no source upload or setup;
+a different revision verifies the captured baseline, advances the checkout, and
+runs the existing content-update setup before enrollment. Recipe,
 setup, machine, ABI, and source-access compatibility still apply. Ready workers
 continue to bind the exact requested commit and runtime.
 

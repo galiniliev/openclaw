@@ -1,7 +1,10 @@
 import type { SpawnResult } from "openclaw/plugin-sdk/process-runtime";
 import { afterEach, expect, it, vi } from "vitest";
 import * as processRunner from "./crabbox-process.js";
-import { reportCrabboxProvisionTiming } from "./crabbox-provision-timing.js";
+import {
+  measureCrabboxProvisionPhase,
+  reportCrabboxProvisionTiming,
+} from "./crabbox-provision-timing.js";
 import { parseCrabboxProfile, resolveCrabboxProvisionProfile } from "./crabbox-worker-profile.js";
 import { runProvisionSetup, runProvisionWarmup } from "./crabbox-worker-provision-commands.js";
 
@@ -52,7 +55,20 @@ afterEach(() => {
 
 it.each([0, 1])("emits only bounded timing fields for warmup exit %s", (code) => {
   reportCrabboxProvisionTiming({ ...result, code }, identity);
-  expect(info).toHaveBeenCalledExactlyOnceWith("Crabbox provisioning timing", {
+  expect(info).toHaveBeenCalledExactlyOnceWith(
+    "Crabbox provisioning timing",
+    expect.objectContaining({
+      ...identity,
+      outcome: code === 0 ? "success" : "failed",
+      runnerPhases: [
+        { phase: "provider.sandbox.create", durationMs: 250, opaque: true },
+        { phase: "bootstrap.runtime.transfer", durationMs: 120, overlapping: true },
+      ],
+      creationEvents: [{ phase: "provider.sandbox.create", durationMs: 250, count: 2 }],
+    }),
+  );
+  const consoleLine = info.mock.calls[0]![1].consoleMessage;
+  expect(JSON.parse(consoleLine.slice("Crabbox provisioning timing ".length))).toEqual({
     ...identity,
     outcome: code === 0 ? "success" : "failed",
     runnerPhases: [
@@ -122,7 +138,7 @@ it.each([0, 1])("reports correlated bootstrap timing through setup exit %s", asy
       ttl: "60m",
       idleTimeout: "30m",
     }),
-    phase: "node runtime preparation",
+    phase: "node enrollment setup",
     setup: "synthetic setup",
     stopLease,
     timingIdentity: identity,
@@ -135,6 +151,14 @@ it.each([0, 1])("reports correlated bootstrap timing through setup exit %s", asy
     expect(stopLease).toHaveBeenCalledOnce();
   }
   expect(info).toHaveBeenCalledWith(
+    "Crabbox provisioning phase",
+    expect.objectContaining({
+      phase: "node.enrollment.command",
+      outcome: code === 0 ? "success" : "failed",
+      durationMs: expect.any(Number),
+    }),
+  );
+  expect(info).toHaveBeenCalledWith(
     "Crabbox provisioning timing",
     expect.objectContaining({
       ...identity,
@@ -144,4 +168,21 @@ it.each([0, 1])("reports correlated bootstrap timing through setup exit %s", asy
       ]),
     }),
   );
+});
+
+it("records the complete failed phase without exposing command errors", async () => {
+  const failure = new Error("private command and credential");
+  await expect(
+    measureCrabboxProvisionPhase(identity, "node.enrollment.command", async () => {
+      throw failure;
+    }),
+  ).rejects.toBe(failure);
+  const fields = info.mock.calls[0]![1];
+  expect(JSON.parse(fields.consoleMessage.slice("Crabbox provisioning phase ".length))).toEqual({
+    ...identity,
+    phase: "node.enrollment.command",
+    outcome: "failed",
+    durationMs: expect.any(Number),
+  });
+  expect(JSON.stringify(info.mock.calls)).not.toContain(failure.message);
 });

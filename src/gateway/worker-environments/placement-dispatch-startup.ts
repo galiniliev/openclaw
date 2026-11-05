@@ -212,6 +212,7 @@ export function createWorkerPlacementDispatchStartup(options: {
     admittedNode?: WorkerNodePlacementAdmission;
     markPhase?: (phase: string) => void;
     retainCredentialCleanup?: (revoke: () => Promise<void>) => void;
+    admittedIntent?: WorkerProviderPreparedIntent;
   }): Promise<WorkerActiveDispatchPlacement> => {
     if (params.placement.state !== "provisioning") {
       throw new Error("Worker dispatch continuation requires a provisioning placement");
@@ -434,6 +435,7 @@ export function createWorkerPlacementDispatchStartup(options: {
           cacheKey: preparation.cacheKey,
           readNativeCredential: request.readNativeCredential,
           retainCredentialCleanup: params.retainCredentialCleanup,
+          admittedIntent: params.admittedIntent,
           signal: params.signal,
           assertCurrent: assertSyncOwner,
         });
@@ -448,7 +450,7 @@ export function createWorkerPlacementDispatchStartup(options: {
             throw new Error("Prepared repository does not match this session's source");
           }
           preparedRepository = {
-            baseCommit: project.baseCommit,
+            baseCommit: prepared.baseCommit ?? project.baseCommit,
             workspaceDir: prepared.workspaceDir,
             sourceManifestRef: prepared.sourceManifestRef,
             preparedManifestRef: prepared.preparedManifestRef,

@@ -280,6 +280,38 @@ const manifestEntries = (bytes, baseCommit) => {
   }
   return value.entries;
 };
+// Only the claimed disposable snapshot builder reaches this path. Ordinary
+// inspection retains its cache history; publication exports only the current roots.
+const snapshotCacheRemovals = (workerRoot, sourceManifestRef, preparedManifestRef) => {
+  const removals = [];
+  const namespace = (kind) => {
+    const root = ownedDirectory(workerRoot, kind);
+    const entries = fs.readdirSync(root);
+    if (entries.length !== 1 || entries[0] !== input.namespace) throw new Error("Snapshot project cache contains unknown namespace");
+    return ownedDirectory(root, input.namespace);
+  };
+  const seeds = namespace("git-seeds");
+  for (const name of fs.readdirSync(seeds)) {
+    if (!/^[a-f0-9]{64}$/.test(name)) throw new Error("Snapshot project seed cache contains unknown state");
+    const directory = ownedDirectory(seeds, name);
+    if (name !== input.seedKey) removals.push(directory);
+  }
+  const prepared = namespace("prepared");
+  const keys = fs.readdirSync(prepared);
+  if (keys.length !== 1 || keys[0] !== input.cacheKey) throw new Error("Snapshot prepared cache contains unknown state");
+  const current = ownedDirectory(prepared, input.cacheKey);
+  if (fs.readdirSync(current).sort().join("\\0") !== "home\\0workspace") throw new Error("Snapshot prepared cache contains unknown state");
+  const manifests = ownedDirectory(workerRoot, "manifests");
+  const selected = new Set([sourceManifestRef, preparedManifestRef].map(ref => ref.slice(7) + ".json"));
+  for (const name of fs.readdirSync(manifests)) {
+    if (!/^[a-f0-9]{64}[.]json$/.test(name)) throw new Error("Snapshot project manifest cache contains unknown state");
+    const file = path.join(manifests, name);
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.nlink !== 1 || fs.realpathSync(file) !== file) throw new Error("Snapshot project manifest escaped its owner");
+    if (!selected.has(name)) removals.push(file);
+  }
+  return removals;
+};
 const removeSetupOutputs = (workspaceDir, previous) => {
   const baseline = manifestEntries(previous.sourceBytes, previous.baseCommit);
   const prepared = manifestEntries(previous.preparedBytes, previous.baseCommit);
@@ -371,6 +403,12 @@ const runSetup = (command, workspaceDir, homeDir, phase) => {
         readManifest(path.join(machineManifests, preparedManifestRef.slice(7) + ".json"), preparedManifestRef);
       }
       const validatedMachineCaches = input.snapshot ? await (${INSPECT_PROJECT_MACHINE_CACHES_JS})(machineHome, homeDir, envelope?.nodeToolchain, input.snapshotWorkerBundle) : undefined;
+      if (input.snapshot) {
+        // Current artifacts and the complete removal plan are verified before any
+        // deletion. Obsolete owned cache bytes need no additional Git/content scan.
+        const removals = snapshotCacheRemovals(workerRoot, sourceManifestRef, preparedManifestRef);
+        for (const target of removals) fs.rmSync(target, { recursive: true });
+      }
       return { workspaceDir, homeDir, sourceManifestRef, preparedManifestRef, completionManifestRef, baseCommit, ...(validatedMachineCaches ? { validatedMachineCaches } : {}) };
     }
   }

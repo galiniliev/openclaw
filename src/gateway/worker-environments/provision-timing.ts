@@ -17,12 +17,16 @@ export async function measureWorkerProvisionPhase<T>(
     return result;
   } finally {
     try {
-      log.info("Worker provisioning phase", {
+      const fields = {
         environmentId: record.environmentId,
         operationId: record.provisionOperationId,
         phase,
         outcome,
         durationMs: Math.round(performance.now() - started),
+      };
+      log.info("Worker provisioning phase", {
+        ...fields,
+        consoleMessage: `Worker provisioning phase ${JSON.stringify(fields)}`,
       });
     } catch {
       // Logging cannot replace the operation's result or its original failure.

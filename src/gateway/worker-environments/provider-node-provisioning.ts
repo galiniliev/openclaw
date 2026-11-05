@@ -274,7 +274,9 @@ export function createWorkerNodeProvisioning(options: WorkerNodeProvisioningOpti
           options.closeNodeRuntime?.(runtime);
           runtime = undefined;
         }
-        pending ??= prepareNodeEnrollment(record, controller.signal).then((prepared) => {
+        pending ??= measureWorkerProvisionPhase(record, "node.enrollment.prepare", () =>
+          prepareNodeEnrollment(record, controller.signal),
+        ).then((prepared) => {
           // A provider timeout can close this operation during artifact preparation.
           try {
             assertCurrent();
@@ -387,21 +389,24 @@ export function createWorkerNodeProvisioning(options: WorkerNodeProvisioningOpti
         throw new Error("Prepared worker requires a dedicated environment");
       }
       if (projectPreparation) {
+        const registerPreparedWorkspace = options.registerPreparedWorkspace;
         if (
           !preparedWorkspace ||
           preparedWorkspace.preparationKey !== projectPreparation.key ||
           preparedWorkspace.cacheKey !== projectPreparation.cacheKey ||
-          !options.registerPreparedWorkspace
+          !registerPreparedWorkspace
         ) {
           throw new Error("Prepared worker requires its dedicated registered workspace");
         }
-        await options.registerPreparedWorkspace({
-          record: options.store.get(record.environmentId)!,
-          deviceId: lease.node.deviceId,
-          workspace: preparedWorkspace,
-          assertCurrent,
-          signal: workSignal,
-        });
+        await measureWorkerProvisionPhase(record, "workspace.registration", () =>
+          registerPreparedWorkspace({
+            record: options.store.get(record.environmentId)!,
+            deviceId: lease.node.deviceId,
+            workspace: preparedWorkspace,
+            assertCurrent,
+            signal: workSignal,
+          }),
+        );
         assertCurrent();
       }
     } catch (error) {

@@ -1,0 +1,2 @@
+74
+# Paired Native/Factory A-to-B snapshot publication and refusal without partial cache deletion; normal retention remains covered.

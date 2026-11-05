@@ -1,5 +1,6 @@
 import type { WorkerProvider } from "openclaw/plugin-sdk/plugin-entry";
 import type { SecretRef } from "openclaw/plugin-sdk/secret-ref-runtime";
+import { measureCrabboxProvisionPhase } from "./crabbox-provision-timing.js";
 import {
   crabboxCommandOutput,
   leaseRunArgs,
@@ -123,9 +124,11 @@ export async function prepareCrabboxWorkerRuntime(params: {
 export async function prepareCrabboxProjectFiles(
   params: LeaseCommandContext & {
     project: ProjectPreparation;
+    snapshotBaseCommit?: string;
     timeoutMs: () => number;
     signal?: AbortSignal;
-    inspectPrepared?: true;
+    inspectPrepared?: { baseCommit?: string };
+    timingIdentity?: { operationId: string; environmentId?: string };
     recordRecipePreparation?: (metadata: RecipePreparation) => Promise<void>;
     setupSecrets?: Readonly<Record<string, SecretRef>>;
     setupInitializer?: Parameters<ProjectPreparation["prepare"]>[0]["setupInitializer"];
@@ -167,36 +170,41 @@ export async function prepareCrabboxProjectFiles(
     params.project.assertCurrent();
     return crabboxCommandOutput("project preparation", result);
   };
-  if (params.inspectPrepared) {
-    if (!params.project.inspectPreparedWorkspace) {
-      throw new Error("Enrolled project cannot verify its completed workspace");
+  return measureCrabboxProvisionPhase(params.timingIdentity, "project.preparation", async () => {
+    if (params.inspectPrepared) {
+      if (!params.project.inspectPreparedWorkspace) {
+        throw new Error("Enrolled project cannot verify its completed workspace");
+      }
+      await params.project.inspectPreparedWorkspace({
+        baseCommit: params.inspectPrepared.baseCommit,
+        runScript: (input, signal) => run(leaseRunArgs(params), signal, () => input),
+      });
+      return undefined;
     }
-    await params.project.inspectPreparedWorkspace({
+    return await params.project.prepare({
+      snapshotBaseCommit: params.snapshotBaseCommit,
+      setupInitializer: params.setupInitializer,
+      ...(params.recordRecipePreparation
+        ? { recordRecipePreparation: params.recordRecipePreparation }
+        : {}),
       runScript: (input, signal) => run(leaseRunArgs(params), signal, () => input),
+      runScriptWithBudget: (createScript, signal) =>
+        run(leaseRunArgs(params), signal, createScript),
+      upload: async (localPath, remotePath, signal) => {
+        await run(
+          [
+            "cp",
+            "--provider",
+            params.provider,
+            "--id",
+            params.id,
+            localPath,
+            `SANDBOX:${remotePath}`,
+          ],
+          signal,
+        );
+      },
     });
-    return undefined;
-  }
-  return await params.project.prepare({
-    setupInitializer: params.setupInitializer,
-    ...(params.recordRecipePreparation
-      ? { recordRecipePreparation: params.recordRecipePreparation }
-      : {}),
-    runScript: (input, signal) => run(leaseRunArgs(params), signal, () => input),
-    runScriptWithBudget: (createScript, signal) => run(leaseRunArgs(params), signal, createScript),
-    upload: async (localPath, remotePath, signal) => {
-      await run(
-        [
-          "cp",
-          "--provider",
-          params.provider,
-          "--id",
-          params.id,
-          localPath,
-          `SANDBOX:${remotePath}`,
-        ],
-        signal,
-      );
-    },
   });
 }
 

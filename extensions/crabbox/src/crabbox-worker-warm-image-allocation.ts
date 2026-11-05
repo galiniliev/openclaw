@@ -85,7 +85,9 @@ export function createCrabboxWarmImageAllocation({
   snapshotDirectory: string;
   releaseRejectedSnapshot: (context: AllocationContext) => Promise<boolean>;
 }) {
-  return async (context: AllocationContext): Promise<WarmAllocationRecord["choice"]> => {
+  return async (
+    context: AllocationContext,
+  ): Promise<WarmAllocationRecord["choice"] & { baseCommit?: string }> => {
     assertCurrent(context);
     let startStatus: WarmStartStatus = {
       mode: "cold",
@@ -290,7 +292,7 @@ export function createCrabboxWarmImageAllocation({
                 : Math.max(generation.lastDemandAtMs ?? 0, owner.demandAtMs),
           }));
         });
-        return owner.choice;
+        return { ...owner.choice, ...(image?.baseCommit ? { baseCommit: image.baseCommit } : {}) };
       }
     }
     if (!context.profile.warmImage) {

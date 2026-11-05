@@ -116,7 +116,11 @@ export async function prepareCrabboxAzureSnapshotCapture(
       packageRelativePath: current.workerBundle.packageRelativePath,
     },
   };
-  const verification = createCrabboxRuntimeCacheVerification({ ...expected, target: "linux" });
+  const verification = createCrabboxRuntimeCacheVerification({
+    ...expected,
+    workerBundle: current.workerBundle,
+    target: "linux",
+  });
   context.signal?.throwIfAborted();
   let cacheResult;
   try {

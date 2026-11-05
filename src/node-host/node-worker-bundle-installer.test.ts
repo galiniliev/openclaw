@@ -15,6 +15,7 @@ import { withinTest } from "../../test/helpers/promise.js";
 import * as openclawRoot from "../infra/openclaw-root.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { NodeWorkerBundleInstallError } from "../worker/node-bundle-install-protocol.js";
+import { preparePackagedNodeWorkerBundle } from "./node-worker-bundle-cache.js";
 import { NodeWorkerBundleInstaller } from "./node-worker-bundle-installer.js";
 import {
   buildBundleFixture,
@@ -22,6 +23,7 @@ import {
   type BundleFixture,
   type BundleFixtureOptions,
 } from "./node-worker-bundle-installer.test-support.js";
+import { resolveNodeWorkerBundleDirectory } from "./node-worker-bundle-paths.js";
 import { listen } from "./node-worker-transfer-client.test-support.js";
 
 const bundleWarnings = vi.hoisted(() => vi.fn());
@@ -356,6 +358,29 @@ describe("node worker bundle installer", () => {
     return archivePath;
   }
 
+  it("repairs corrupt expanded code through the existing archive path and refuses foreign aliases", async () => {
+    const { fixture, archivePath, served } = await localSetup();
+    await preparePackagedNodeWorkerBundle(fixture.input);
+    const prepared = path.join(
+      path.dirname(archivePath),
+      "expanded",
+      fixture.input.build.bundleHash,
+    );
+    await fs.writeFile(path.join(prepared, "worker.mjs"), "corrupt bytes");
+    await expect(preparePackagedNodeWorkerBundle(fixture.input, true)).rejects.toThrow(
+      "missing or invalid",
+    );
+    const installer = new NodeWorkerBundleInstaller({ root });
+    await installer.ensure({ input: fixture.input, gatewayUrl: served.gatewayUrl });
+    expect((await fs.lstat(bundleDirectory(fixture))).isSymbolicLink()).toBe(false);
+    expect(served.requests).not.toHaveBeenCalled();
+    const foreign = path.join(root, "foreign-alias");
+    await fs.symlink(bundleDirectory(fixture), foreign, "dir");
+    expect(() => resolveNodeWorkerBundleDirectory(foreign, fixture.input.build.bundleHash)).toThrow(
+      "owning package artifact",
+    );
+  });
+
   async function localSetup() {
     const fixture = await bundleFixture();
     const archivePath = await prepareLocalArchive(fixture);
@@ -448,6 +473,7 @@ describe("node worker bundle installer", () => {
   it("uses authenticated HTTP for a different archive without modifying prepared bytes", async () => {
     const prepared = await bundleFixture();
     const archivePath = await prepareLocalArchive(prepared);
+    await preparePackagedNodeWorkerBundle(prepared.input);
     const requested = await bundleFixture({
       fixtureName: "new-build",
       workerSource: "export const changed = true;\n",
@@ -460,9 +486,9 @@ describe("node worker bundle installer", () => {
     ).resolves.toEqual(requested.input.build);
 
     expect(served.requests).toHaveBeenCalledOnce();
-    await expect(fs.readdir(path.dirname(archivePath))).resolves.toEqual([
-      path.basename(archivePath),
-    ]);
+    expect((await fs.readdir(path.dirname(archivePath))).toSorted()).toEqual(
+      [path.basename(archivePath), "expanded"].toSorted(),
+    );
     await expect(fs.readFile(archivePath)).resolves.toEqual(prepared.archive);
   });
 

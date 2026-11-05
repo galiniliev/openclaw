@@ -190,6 +190,25 @@ function manifestPath(homeDir: string, manifestRef: string) {
 }
 
 describe("prepared node workspace ownership", () => {
+  it.each([false, true])(
+    "inventories contents once at first claim (setup writes: %s)",
+    async (setupWrites) => {
+      const f = await fixture(setupWrites);
+      if (!setupWrites) {
+        f.registration.sourceManifestRef = f.registration.preparedManifestRef;
+      }
+      const capture = vi.spyOn(workspaceCommands, "captureManifest");
+      const read = vi.spyOn(workspaceCommands, "readWorkspaceManifest");
+      await f.runtime.prepare(f.registration);
+      expect(capture).not.toHaveBeenCalled();
+      expect(read).toHaveBeenCalledTimes(setupWrites ? 2 : 1);
+      await expect(f.runtime.exec(f.command)).rejects.toThrow("does not own");
+      await f.runtime.prepare(binding);
+      expect(capture).toHaveBeenCalledOnce();
+      expect(read).toHaveBeenCalledTimes(setupWrites ? 4 : 2);
+    },
+  );
+
   it("verifies completed setup at first bind and preserves later session edits on replay and restart", async () => {
     const f = await fixture(true);
     expect(f.registration.preparedManifestRef).not.toBe(f.registration.sourceManifestRef);
@@ -203,6 +222,7 @@ describe("prepared node workspace ownership", () => {
     await fsp.writeFile(path.join(f.workspaceDir, "source.txt"), "setup changed source\n");
     const bound = await f.runtime.prepare(binding);
     expect(bound).toMatchObject({
+      baseCommit: f.baseCommit,
       sourceManifestRef: f.registration.sourceManifestRef,
       preparedManifestRef: f.registration.preparedManifestRef,
     });
@@ -347,13 +367,15 @@ describe("prepared node workspace ownership", () => {
     const controller = new AbortController();
     const captured = createDeferred();
     const released = createDeferred();
-    const capture = workspaceCommands.captureManifest;
-    vi.spyOn(workspaceCommands, "captureManifest").mockImplementationOnce(async (params) => {
-      const result = await capture(params);
-      captured.resolve();
-      await released.promise;
-      return result;
-    });
+    const read = workspaceCommands.readWorkspaceManifest;
+    vi.spyOn(workspaceCommands, "readWorkspaceManifest").mockImplementationOnce(
+      async (...params) => {
+        const result = await read(...params);
+        captured.resolve();
+        await released.promise;
+        return result;
+      },
+    );
     const registration = f.runtime.prepare(f.registration, controller.signal);
     const registrationResult = registration.then(
       () => "registered",

@@ -7,7 +7,7 @@ import { throwIfSettledRejected } from "../infra/error-graph-internal.js";
 import { assertCurrentUsageAuthorization } from "../infra/exec-approvals-authorization.kernel.js";
 import { prepareExecApprovalsCurrentRead } from "../infra/exec-approvals-store.js";
 import { createExecApprovalPolicySnapshot } from "../infra/exec-approvals.js";
-import { logDebug } from "../logger.js";
+import { logDebug, logInfo } from "../logger.js";
 import {
   parseComputerUseCapabilityDescriptor,
   type ComputerUseCapabilityDescriptor,
@@ -46,6 +46,7 @@ export async function ensureNodeHostPluginRegistry(params: {
   onlyPluginIds?: string[];
   logger?: PluginLogger;
 }): Promise<void> {
+  const started = performance.now();
   const registry = (await loadPluginRegistryLoaderModule()).loadPluginRegistryHandle({
     config: params.config,
     activationSourceConfig: params.config,
@@ -70,6 +71,9 @@ export async function ensureNodeHostPluginRegistry(params: {
     );
   });
   nodeHostPluginRegistry = registry;
+  logInfo(
+    `node-host: startup phase ${JSON.stringify({ phase: "plugins.prepare", durationMs: Math.round(performance.now() - started) })}`,
+  );
 }
 
 /** List registered node-host capabilities and command ids in deterministic order. */

@@ -4,7 +4,10 @@ import {
   type WorkerProfile,
   type WorkerProvider,
 } from "openclaw/plugin-sdk/plugin-entry";
-import { reportCrabboxSnapshotPhase } from "./crabbox-provision-timing.js";
+import {
+  measureCrabboxProvisionPhase,
+  reportCrabboxSnapshotPhase,
+} from "./crabbox-provision-timing.js";
 import {
   prepareCrabboxAzureSnapshotContext,
   type AzureSandboxSnapshotContext,
@@ -395,8 +398,8 @@ export function createCrabboxWorkerProvider(
           prepareBeforeEnrollment: Boolean(project),
         });
         const enrolled = project && (await warmImages.lookupLease(leaseId))?.phase === "enrolled";
-        // New clean forks use canonical preparation to reconcile the requested
-        // revision. An enrolled replay must only inspect its existing workspace.
+        // The host chooses whether a new fork starts on its prepared base or
+        // reconciles an explicit revision. Enrolled replays only inspect their disk.
         const inspectPrepared = project?.preparation && enrolled;
         if (project && inspectPrepared) {
           // Enrolled replays verify completion without setup, upload, or private capture.
@@ -405,7 +408,7 @@ export function createCrabboxWorkerProvider(
               ...context,
               id: leaseId,
               project,
-              inspectPrepared: true,
+              inspectPrepared: { baseCommit: priorAllocation?.baseCommit },
               signal: preparationSignal,
               timeoutMs: () => remainingProvisionTimeout(setupDeadline, CRABBOX_SETUP_TIMEOUT_MS),
             });
@@ -451,6 +454,7 @@ export function createCrabboxWorkerProvider(
               ...context,
               id: leaseId,
               project,
+              snapshotBaseCommit: isFork ? allocationChoice.baseCommit : undefined,
               signal: preparationSignal,
               timeoutMs: () => remainingProvisionTimeout(setupDeadline, CRABBOX_SETUP_TIMEOUT_MS),
               recordRecipePreparation: (metadata) =>
@@ -462,10 +466,9 @@ export function createCrabboxWorkerProvider(
               setupInitializer: parsed.setupInitializer,
               assertCurrent,
             });
-            assertCurrent();
             await warmImages.markPrepared(
               leaseId,
-              project.baseCommit,
+              preparedProject?.baseCommit ?? project.baseCommit,
               () => {
                 preparationSignal?.throwIfAborted();
                 assertCurrent();
@@ -571,7 +574,11 @@ export function createCrabboxWorkerProvider(
         });
         let deviceId: string;
         try {
-          deviceId = await enrollment.waitForDeviceId();
+          deviceId = await measureCrabboxProvisionPhase(
+            context.timingIdentity,
+            "node.readiness",
+            () => enrollment.waitForDeviceId(),
+          );
           signal?.throwIfAborted();
         } catch (error) {
           signal?.throwIfAborted();

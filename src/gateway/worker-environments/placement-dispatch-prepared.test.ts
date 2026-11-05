@@ -84,6 +84,7 @@ async function preparedHarness(
     executionMode?: WorkerPlacementExecutionMode;
     emptyWorkspace?: boolean;
     repository?: SessionRepositoryWorkspaceRecord & { baseCommit: string };
+    projectBaseCommit?: string;
     recipe?: EnvironmentRecipe;
     lifecycleFailure?: boolean;
     runSetupScript?: false;
@@ -135,7 +136,7 @@ async function preparedHarness(
   const project: WorkerProjectSnapshot = options.repository
     ? {
         key: "d".repeat(64),
-        baseCommit: options.repository.baseCommit,
+        baseCommit: options.projectBaseCommit ?? options.repository.baseCommit,
         source: {
           kind: "repository",
           url: options.repository.url,
@@ -889,6 +890,7 @@ describe("prepared worker dispatch", () => {
       };
       const { harness, store, ready, request } = await preparedHarness({
         repository: { ...accepted, baseCommit },
+        projectBaseCommit: "b".repeat(40),
         ...(scenario === "profile optout" ? { runSetupScript: false } : {}),
         boundWorkspace,
         ...(runSetupScript ? { recipe: lifecycleRecipe } : {}),
@@ -916,11 +918,10 @@ describe("prepared worker dispatch", () => {
         }
       };
       const bind = vi.mocked(harness.environments.bindPreparedWorkspace);
-      const ordinaryBind = bind.getMockImplementation()!;
       bind.mockImplementation(async (input) => {
         assertRepositoryCurrent();
-        const prepared = await ordinaryBind(input);
-        await runtime.prepare({
+        input.assertCurrent();
+        const binding = await runtime.prepare({
           action: "bind",
           ...nodeIdentity,
           sessionId: input.sessionId,
@@ -929,7 +930,7 @@ describe("prepared worker dispatch", () => {
         });
         assertRepositoryCurrent();
         return {
-          ...prepared,
+          ...binding,
           assertCurrent: () => {
             input.assertCurrent();
             assertRepositoryCurrent();

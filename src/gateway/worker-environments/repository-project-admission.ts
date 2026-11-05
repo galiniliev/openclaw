@@ -571,6 +571,15 @@ export async function prepareRepositoryWorkerProjectSource(params: AdmissionRequ
   };
   return {
     project,
+    // Only a new default-ref session may begin at its selected snapshot's base.
+    // Pinned sources, other refs and recovery retain their exact admitted commit.
+    ...(!expected &&
+    !request.baseCommit &&
+    !recoverySource &&
+    typeof metadata.defaultBranch === "string" &&
+    [metadata.defaultBranch, `heads/${metadata.defaultBranch}`].includes(requestedRef)
+      ? { snapshotStart: true as const }
+      : {}),
     recoverySource,
     setupRecipe,
     recipe,
