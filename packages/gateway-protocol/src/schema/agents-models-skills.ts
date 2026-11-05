@@ -101,6 +101,8 @@ export const AgentSummarySchema = closedObject({
   thinkingDefault: Type.Optional(NonEmptyString),
   // Configured posture for display only, never an authorization decision.
   defaultPermissionMode: Type.Optional(SessionPermissionModeSchema),
+  // Attended creation default for this caller; existing session posture is separate.
+  newSessionPermissionMode: Type.Optional(SessionPermissionModeSchema),
 });
 
 export const AgentsListResultSchema = closedObject({

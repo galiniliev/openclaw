@@ -264,7 +264,7 @@ async function createFixture(
   };
 }
 
-test("new-session permission default persists Full only for an authorized attended creation", async () => {
+test("new-session permission default uses Workspace for writers and preserves Full authorization", async () => {
   await withOpenClawTestState({ layout: "state-only" }, async () => {
     const fixture = await createFixture("operator.admin", false, "human", "full");
     const send = async (method: string, params: Record<string, unknown>) => {
@@ -287,8 +287,18 @@ test("new-session permission default persists Full only for an authorized attend
 
     fixture.client.connect.scopes = ["operator.write"];
     fixture.role.scopes = ["operator.write"];
+    const workspaceKey = "agent:main:dashboard:permission-workspace";
+    expect((await send("sessions.create", { key: workspaceKey }))?.[0]).toBe(true);
+    expect(readMode(workspaceKey)).toBe("workspace");
+    expect((await send("sessions.create", { key: fixture.key }))?.[0]).toBe(true);
+    expect(readMode(fixture.key)).toBe("full");
+    expect((await send("agents.list", {}))?.[1]).toMatchObject({
+      agents: [expect.objectContaining({ id: "main", newSessionPermissionMode: "workspace" })],
+    });
     const deniedKey = "agent:main:dashboard:permission-denied";
-    expect((await send("sessions.create", { key: deniedKey }))?.slice(0, 3)).toEqual([
+    expect(
+      (await send("sessions.create", { key: deniedKey, permissionMode: "full" }))?.slice(0, 3),
+    ).toEqual([
       false,
       undefined,
       expect.objectContaining({ message: "missing scope: operator.admin" }),
@@ -302,8 +312,27 @@ test("new-session permission default persists Full only for an authorized attend
     ).toBe(true);
     expect(readMode(guardedKey)).toBe("guarded");
 
+    const configuredAgent = expectDefined(fixture.cfg.agents?.entries?.main, "configured agent");
+    configuredAgent.newSessionPermissionMode = "guarded";
+    const narrowerKey = "agent:main:dashboard:permission-narrower";
+    expect((await send("sessions.create", { key: narrowerKey }))?.[0]).toBe(true);
+    expect(readMode(narrowerKey)).toBe("guarded");
+    configuredAgent.newSessionPermissionMode = "full";
+    fixture.client.connect.scopes = ["operator.sessions.write"];
+    fixture.role.scopes = ["operator.sessions.write"];
+    const sessionOnlyKey = "agent:main:dashboard:permission-session-only";
+    expect((await send("sessions.create", { key: sessionOnlyKey }))?.[0]).toBe(false);
+    expect(readMode(sessionOnlyKey)).toBeUndefined();
     fixture.client.connect.scopes = ["operator.admin"];
     fixture.role.scopes = ["operator.admin"];
+    const explicitFullKey = "agent:main:dashboard:permission-explicit-full";
+    expect(
+      (await send("sessions.create", { key: explicitFullKey, permissionMode: "full" }))?.[0],
+    ).toBe(true);
+    expect(readMode(explicitFullKey)).toBe("full");
+    expect((await send("agents.list", {}))?.[1]).toMatchObject({
+      agents: [expect.objectContaining({ id: "main", newSessionPermissionMode: "full" })],
+    });
     expect(
       (await send("sessions.patch", { key: fixture.key, permissionMode: "guarded" }))?.[0],
     ).toBe(true);

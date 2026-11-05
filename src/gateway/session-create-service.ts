@@ -81,6 +81,7 @@ import {
   resolveSessionCreateModelInputError,
 } from "./session-create-model-selection.js";
 import { prepareSessionCreateParentLifecycle } from "./session-create-parent-lifecycle.js";
+import { resolveAttendedSessionPermissionDefault } from "./session-create-permission-default.js";
 import { tryResetGatewaySessionForCreation } from "./session-create-reset.js";
 import type {
   CreatedGatewaySession,
@@ -476,16 +477,14 @@ async function createGatewaySessionInScope(
       if (configuredMode) {
         const authority = operatorAuthority;
         authority.assertCurrent();
-        if (configuredMode === "full" && !authority.scopes.includes(ADMIN_SCOPE)) {
-          return {
-            ok: false,
-            error: missingScopeErrorShape({
-              missingScope: ADMIN_SCOPE,
-              requiredScopes: [ADMIN_SCOPE],
-            }),
-          };
+        const permissionDefault = resolveAttendedSessionPermissionDefault(
+          configuredMode,
+          authority.scopes,
+        );
+        if (!permissionDefault.ok) {
+          return { ok: false, error: permissionDefault.error };
         }
-        permissionMode = configuredMode;
+        permissionMode = permissionDefault.mode;
         assertPermissionDefaultCurrent = () => {
           authority.assertCurrent();
           const cfg = params.getCurrentConfig?.() ?? params.cfg;

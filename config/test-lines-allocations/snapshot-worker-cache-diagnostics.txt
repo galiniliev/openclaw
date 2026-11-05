@@ -1,0 +1,2 @@
+# Closed worker-cache enum details survive both process boundaries; reject unknown, private and out-of-stage values.
+52

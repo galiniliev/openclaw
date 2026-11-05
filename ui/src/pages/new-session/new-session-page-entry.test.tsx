@@ -4,6 +4,7 @@ import { createRoot, createSignal } from "solid-js";
 import { afterEach, expect, it, onTestFinished, vi } from "vitest";
 import { mountSolid } from "../../test-helpers/mount-solid.ts";
 import { waitForSolid } from "../../test-helpers/solid-settle.ts";
+import { DraftPlaceState } from "./draft-place-state.ts";
 import { createDraftFixture } from "./draft-submission-flow.test-support.ts";
 import {
   forgetInstantThreadPage,
@@ -146,4 +147,31 @@ it("restores owned DOM and replaces it when a later rollback supplies another ho
   await waitForSolid(() => expect(container.firstElementChild).toBe(second.page));
   expect(container.contains(first.input)).toBe(false);
   expect(container.contains(second.input)).toBe(true);
+});
+
+it("shows the caller's new-session default without changing inherited posture or unlocking Full", async () => {
+  const agent = {
+    id: "main",
+    defaultPermissionMode: "full",
+    newSessionPermissionMode: "workspace",
+  } as const;
+  const selected = vi.spyOn(DraftPlaceState.prototype, "selectedAgent").mockReturnValue(agent);
+  const isAdmin = vi.spyOn(DraftPlaceState.prototype, "isAdmin").mockReturnValue(false);
+  onTestFinished(() => {
+    selected.mockRestore();
+    isAdmin.mockRestore();
+  });
+  const { container } = mountRoute(routeData("main"));
+  await waitForSolid(() =>
+    expect(
+      container.querySelector("[data-chat-permission-select]")?.getAttribute("aria-label"),
+    ).toContain("Workspace"),
+  );
+  container.querySelector<HTMLButtonElement>("[data-chat-permission-select]")!.click();
+  await waitForSolid(() =>
+    expect(
+      container.querySelector('[data-chat-permission-option="full"]')?.matches(":disabled"),
+    ).toBe(true),
+  );
+  expect(agent.defaultPermissionMode).toBe("full");
 });

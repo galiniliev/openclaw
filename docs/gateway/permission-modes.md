@@ -45,10 +45,12 @@ To save an explicit mode on new attended sessions for one agent, set
 `workspace`, or `full`. This applies when an authenticated operator whose current
 Gateway authority includes a user profile creates a new session through
 `sessions.create`, including the Control UI and Gateway-backed TUI, and omits
-`permissionMode`. The Gateway saves the selected mode before the session runs;
-`full` still requires the requesting operator's
-current `operator.admin` authority. A write-only operator must select another
-mode when the configured default is `full`.
+`permissionMode`. The Gateway saves the selected mode before the session runs.
+An operator with `operator.write` but without `operator.admin` receives
+`workspace` when this configured default is `full`. The new-session picker shows
+that effective creation default. Administrators retain the configured `full`
+default, and an explicit `full` selection still requires current `operator.admin`
+authority.
 
 This setting has no global counterpart. Explicit creation choices, existing
 sessions, resets, forks, native catalog sessions, and autonomous or delegated

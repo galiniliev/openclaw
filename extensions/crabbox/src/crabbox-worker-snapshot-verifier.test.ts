@@ -189,3 +189,55 @@ describe("snapshot verifier private process boundary", () => {
     );
   });
 });
+
+it.each(["before-probes", "after-probes"])(
+  "keeps only closed worker-cache details through both boundaries (%s)",
+  (cleanCheck) => {
+    const diagnostic = {
+      schema: "teamclaw.snapshot-verifier-diagnostic.v1",
+      stage: "clean_state",
+      predicate: "worker_cache",
+      cacheCheck: "cache-inventory",
+      cacheKind: "manifests",
+      cleanCheck,
+      path: "/synthetic/private-cache",
+      entries: ["private-entry"],
+    };
+    const wire = run(
+      `process.stderr.write(${JSON.stringify(JSON.stringify(diagnostic))}); process.exitCode=1;`,
+    );
+    const result = readCrabboxSnapshotVerifierResult(wire);
+    expect(result.child.diagnostic).toEqual({
+      stage: "clean_state",
+      predicate: "worker_cache",
+      cacheCheck: "cache-inventory",
+      cacheKind: "manifests",
+      cleanCheck,
+    });
+    expect(wire).not.toContain("private-cache");
+    expect(wire).not.toContain("private-entry");
+    const hostile = JSON.parse(wire);
+    hostile.child.diagnostic = {
+      ...diagnostic,
+      cacheCheck: "/private/cache",
+      cacheKind: "unbounded",
+      cleanCheck: "unknown",
+    };
+    expect(readCrabboxSnapshotVerifierResult(JSON.stringify(hostile)).child.diagnostic).toEqual({
+      stage: "clean_state",
+      predicate: "worker_cache",
+    });
+    const rejected = run(
+      `process.stderr.write(${JSON.stringify(JSON.stringify({ ...diagnostic, cacheCheck: "unknown", cacheKind: "/private/cache", cleanCheck: "unknown" }))}); process.exitCode=1;`,
+    );
+    expect(readCrabboxSnapshotVerifierResult(rejected).child.diagnostic).toEqual({
+      stage: "clean_state",
+      predicate: "worker_cache",
+    });
+    hostile.child.diagnostic = { ...diagnostic, stage: "current_runtime" };
+    expect(readCrabboxSnapshotVerifierResult(JSON.stringify(hostile)).child.diagnostic).toEqual({
+      stage: "current_runtime",
+      predicate: "worker_cache",
+    });
+  },
+);

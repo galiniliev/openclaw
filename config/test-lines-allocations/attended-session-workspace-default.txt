@@ -1,0 +1,2 @@
+# Real operator creation/list authority and /new default projection; preserve Full, narrower and existing-session behavior.
+57

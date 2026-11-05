@@ -81,6 +81,23 @@ const CREDENTIAL_DETAILS = {
   cleanCheck: ["before-probes", "after-probes"],
 };
 
+const WORKER_CACHE_DETAILS = {
+  cacheCheck: ["cache-root", "cache-inventory", "cache-path", "unapproved-entry"],
+  cacheKind: [
+    "machine",
+    "git-seeds",
+    "prepared",
+    "manifests",
+    "toolchains",
+    "worker-bundle",
+    "node-runtimes",
+    "prepared-git-seeds",
+    "runtime-node",
+    "other",
+  ],
+  cleanCheck: CREDENTIAL_DETAILS.cleanCheck,
+};
+
 /** Keep verifier buffers inside the worker; only its closed result crosses the transport. */
 export function createCrabboxSnapshotVerifierScript(
   verifier: readonly string[],
@@ -96,7 +113,7 @@ const child = spawnSync(${JSON.stringify(verifier[0])}, ${JSON.stringify(verifie
 });
 const stages = ${JSON.stringify(STAGES)};
 const predicates = ${JSON.stringify(PREDICATES)};
-const credentialDetails = ${JSON.stringify(CREDENTIAL_DETAILS)};
+const cleanStateDetails = ${JSON.stringify({ credential_paths: CREDENTIAL_DETAILS, worker_cache: WORKER_CACHE_DETAILS })};
 let diagnostic;
 const stderr = child.stderr?.toString("utf8").trim() ?? "";
 if (Buffer.byteLength(stderr) <= 512) {
@@ -104,8 +121,8 @@ if (Buffer.byteLength(stderr) <= 512) {
     const value = JSON.parse(stderr);
     if (value?.schema === "teamclaw.snapshot-verifier-diagnostic.v1" && stages.includes(value.stage) && predicates.includes(value.predicate)) {
       diagnostic = { stage: value.stage, predicate: value.predicate };
-      if (value.stage === "clean_state" && value.predicate === "credential_paths") {
-        for (const [key, allowed] of Object.entries(credentialDetails)) {
+      if (value.stage === "clean_state") {
+        for (const [key, allowed] of Object.entries(cleanStateDetails[value.predicate] ?? {})) {
           if (allowed.includes(value[key])) diagnostic[key] = value[key];
         }
       }
@@ -180,20 +197,32 @@ export function readCrabboxSnapshotVerifierResult(output: string) {
     PREDICATES.includes(child.diagnostic.predicate)
       ? { stage: child.diagnostic.stage, predicate: child.diagnostic.predicate }
       : undefined;
-  const credentialDetails: {
+  const details: {
     credentialRoot?: string;
     credentialPath?: string;
+    cacheCheck?: string;
+    cacheKind?: string;
     cleanCheck?: string;
   } = {};
-  if (
-    diagnostic?.stage === "clean_state" &&
-    diagnostic.predicate === "credential_paths" &&
-    isRecord(child.diagnostic)
-  ) {
-    for (const key of ["credentialRoot", "credentialPath", "cleanCheck"] as const) {
+  const allowedDetails: Partial<Record<keyof typeof details, readonly string[]>> | undefined =
+    diagnostic?.stage !== "clean_state"
+      ? undefined
+      : diagnostic.predicate === "credential_paths"
+        ? CREDENTIAL_DETAILS
+        : diagnostic.predicate === "worker_cache"
+          ? WORKER_CACHE_DETAILS
+          : undefined;
+  if (allowedDetails && isRecord(child.diagnostic)) {
+    for (const key of [
+      "credentialRoot",
+      "credentialPath",
+      "cleanCheck",
+      "cacheCheck",
+      "cacheKind",
+    ] as const) {
       const detail = child.diagnostic[key];
-      if (typeof detail === "string" && CREDENTIAL_DETAILS[key].includes(detail)) {
-        credentialDetails[key] = detail;
+      if (typeof detail === "string" && allowedDetails[key]?.includes(detail)) {
+        details[key] = detail;
       }
     }
   }
@@ -204,7 +233,7 @@ export function readCrabboxSnapshotVerifierResult(output: string) {
       errorCode: child.errorCode,
       stdoutBytes: child.stdoutBytes,
       stderrBytes: child.stderrBytes,
-      ...(diagnostic ? { diagnostic: { ...diagnostic, ...credentialDetails } } : {}),
+      ...(diagnostic ? { diagnostic: { ...diagnostic, ...details } } : {}),
     },
     receipt: typeof value.receipt === "string" ? value.receipt : undefined,
   };
