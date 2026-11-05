@@ -1,0 +1,2 @@
+29
+# Exercise connect startup failure through the entry owner with root profile selection; preserve only the redacted top-level reason.

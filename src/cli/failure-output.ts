@@ -264,6 +264,7 @@ export function formatCliFailureLines(options: FormatCliFailureOptions): string[
   const isUpdateCommand = commandPath[0] === "update";
   const isPluginUpdateCommand = commandPath[0] === "plugins" && commandPath[1] === "update";
   const isNodeRunCommand = commandPath[0] === "node" && commandPath[1] === "run";
+  const isConnectCommand = commandPath[0] === "connect";
   // Update subprocesses use both marker values and retain captured reasons for recovery.
   const showUpdateDiagnostics = ["0", "1"].includes(env.OPENCLAW_UPDATE_IN_PROGRESS ?? "");
   if (
@@ -324,6 +325,7 @@ export function formatCliFailureLines(options: FormatCliFailureOptions): string[
       : isUpdateCommand ||
         isPluginUpdateCommand ||
         isNodeRunCommand ||
+        isConnectCommand ||
         isForegroundGatewayRunArgv(argv);
     return [
       `[openclaw] ${options.title}`,

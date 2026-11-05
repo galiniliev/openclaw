@@ -24,6 +24,7 @@ describe("entry run-main boundary", () => {
   });
   afterEach(async () => {
     vi.doUnmock("./cli/run-main.js");
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
     process.exitCode = previousExitCode;
     await instance?.dispose();
@@ -54,6 +55,34 @@ describe("entry run-main boundary", () => {
         expect.stringContaining(startup ? "The CLI command failed" : "Could not start the CLI"),
       );
     }
+  });
+
+  it("preserves the redacted connect startup reason before its action runs", async () => {
+    vi.stubEnv("OPENCLAW_DEBUG", "0");
+    vi.stubEnv("OPENCLAW_UPDATE_IN_PROGRESS", "");
+    const token = "sk-abcdefghijklmnopqrstuv";
+    // mock-isolation: Fail in CLI startup before the connect action can format its own error.
+    vi.doMock("./cli/run-main.js", async () => ({
+      runCli: async () => {
+        throw new Error(`Node startup failed. Authorization: Bearer ${token}`, {
+          cause: new Error("private nested diagnostic"),
+        });
+      },
+    }));
+    await runMainOrRootHelp([
+      "node",
+      "openclaw",
+      "--profile",
+      "diagnostic",
+      "connect",
+      "--ephemeral",
+      "--target-file",
+      "/fixture/setup-code",
+    ]);
+    expect(process.exitCode).toBe(1);
+    const output = errorSpy.mock.calls.map(([line]) => String(line)).join("\n");
+    expect(output).toContain("[openclaw] Reason: Node startup failed.");
+    expect(output).not.toMatch(/sk-abcdefghijklmnopqrstuv|private nested diagnostic|Stack:/u);
   });
 
   it.each([false, true])("reports plugin action failures (JSON: %s)", async (json) => {
