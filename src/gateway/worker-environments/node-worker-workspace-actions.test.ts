@@ -261,7 +261,8 @@ it.each(["next-turn", "reconnect", "gateway-restart"] as const)(
         temporaryRoot: path.join(root, `transfer-${epoch}`),
       });
       const server = await startNodeWorkspaceTransferTestServer(service);
-      const synced = [vi.spyOn(service, "prepareRepository"), vi.spyOn(service, "prepareSync")];
+      // Repository preparation restores transport custody; sync would read a Gateway mirror.
+      const sync = vi.spyOn(service, "prepareSync");
       const connect = () => {
         const owner = new AbortController();
         const commands = vi.fn(
@@ -284,7 +285,7 @@ it.each(["next-turn", "reconnect", "gateway-restart"] as const)(
         });
         return { owner, commands, actions };
       };
-      return { service, server, synced, connect };
+      return { service, server, sync, connect };
     };
     let gateway = await open(1);
     let connection = gateway.connect();
@@ -330,9 +331,7 @@ it.each(["next-turn", "reconnect", "gateway-restart"] as const)(
       expect(originals).toHaveLength(2);
       expect(originals).toEqual(expect.arrayContaining([pdf, image]));
       expect(await fs.readFile(path.join(remote, "disk-only.txt"), "utf8")).toBe("retained edit");
-      for (const operation of gateway.synced) {
-        expect(operation).not.toHaveBeenCalled();
-      }
+      expect(gateway.sync).not.toHaveBeenCalled();
       expect(
         connection.commands.mock.calls.every(
           ([command]) =>

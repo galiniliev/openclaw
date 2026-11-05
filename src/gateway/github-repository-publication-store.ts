@@ -34,7 +34,11 @@ export function retryableRepositoryGitHubPublication(
     row.owner_profile_id === null &&
     row.status === "failed" &&
     (row.error_code === "unavailable" ||
-      ((row.error_code === "push_rejected" || row.error_code === "identity_unavailable") &&
+      // Older transport failures could be recorded as workspace drift. A later observed
+      // exact input permits revalidation; it never substitutes for current execution authority.
+      ((row.error_code === "push_rejected" ||
+        row.error_code === "identity_unavailable" ||
+        row.error_code === "workspace_changed") &&
         managedInput !== undefined &&
         matchesRepositoryGitHubPublicationInput(row, managedInput))) &&
     row.checkpoint_ref !== null &&

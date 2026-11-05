@@ -1,0 +1,2 @@
+168
+# Two fetch-role regressions preserve private redacted diagnosis and unchanged public projection.

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { withTempWorkspace } from "@openclaw/fs-safe/temp";
 import { readGitHubRepositoryPublicationMetadata } from "../gateway/github-repository-publication-snapshot.js";
+import { boundedWorkerError } from "../gateway/worker-environments/worker-error.js";
 import { importWorkerWorkspaceHistory } from "../gateway/worker-environments/workspace-result-history.js";
 import type { WorkerWorkspaceGitHistory } from "../gateway/worker-environments/workspace-result-inventory.js";
 import { appendGitConfig, gitMaintenanceEnvironment } from "../infra/git-maintenance-env.js";
@@ -74,13 +75,48 @@ export async function integrateNodeRepositoryPublication(params: {
           maxOutputBytes: 64 * 1024 * 1024,
         });
       };
-      const git = async (args: string[], input?: string | Buffer, cwd = dir) => {
+      const git = async (
+        args: string[],
+        input?: string | Buffer,
+        cwd = dir,
+        fetchRole?: "source-base" | "target-main",
+      ) => {
         const result = await run(args, input, cwd);
         if (result.code !== 0 || result.error) {
-          // Never propagate Git output: it can contain credentials or source contents.
-          throw new Error(
-            `Publication integration ${args[0]} failed (${result.termination}; exit ${result.code}).`,
-          );
+          let message = `Publication integration ${args[0]} failed (${result.termination}; exit ${result.code}).`;
+          if (fetchRole) {
+            const basic = Buffer.from(`x-access-token:${params.token}`).toString("base64");
+            const secrets = [
+              params.token,
+              `x-access-token:${params.token}`,
+              basic,
+              `Basic ${basic}`,
+              `Authorization: Basic ${basic}`,
+              params.sourceUrl,
+              params.targetUrl,
+            ].flatMap((value) => [
+              value,
+              encodeURIComponent(value),
+              new URLSearchParams({ v: value }).toString().slice(2),
+            ]);
+            // Only private fetch diagnostics carry stderr. Scrub whole credentials before
+            // bounding so neither truncation nor node/Gateway registry differences leak them.
+            // Escape hex is case-insensitive in this private masking copy only.
+            let stderr = result.stderr
+              .toString("utf8")
+              .replace(/%[\da-f]{2}/giu, (escape) => escape.toUpperCase());
+            for (const secret of [...new Set(secrets)].toSorted((a, b) => b.length - a.length)) {
+              stderr = stderr.replaceAll(
+                secret.replace(/%[\da-f]{2}/giu, (escape) => escape.toUpperCase()),
+                "[redacted]",
+              );
+            }
+            stderr = stderr.replace(/\bhttps?(?::\/\/|%3a%2f%2f)[^\s"'<>]+/giu, "[redacted URL]");
+            // 4,000 UTF-16 units encode to at most 12,000 UTF-8 bytes, below 16 KiB.
+            message += ` fetch=${fetchRole}; private stderr: ${boundedWorkerError(stderr, 4_000)}`;
+          }
+          // Other commands may return source bytes; never retain stdout or the raw error.
+          throw new Error(message);
         }
         return result.stdout;
       };
@@ -100,20 +136,25 @@ export async function integrateNodeRepositoryPublication(params: {
       if ((await run(["cat-file", "-e", `${snapshot.baseCommit}^{commit}`])).code === 0) {
         await git(["update-ref", "refs/openclaw/input", snapshot.baseCommit]);
       }
-      for (const [url, commit] of [
-        [params.sourceUrl, snapshot.baseCommit],
-        [params.targetUrl, params.mainCommit],
-      ]) {
-        await git([
-          "fetch",
-          "--no-tags",
-          "--no-auto-maintenance",
-          "--no-write-fetch-head",
-          "--no-recurse-submodules",
-          "--",
-          url!,
-          commit!,
-        ]);
+      for (const [role, url, commit] of [
+        ["source-base", params.sourceUrl, snapshot.baseCommit],
+        ["target-main", params.targetUrl, params.mainCommit],
+      ] as const) {
+        await git(
+          [
+            "fetch",
+            "--no-tags",
+            "--no-auto-maintenance",
+            "--no-write-fetch-head",
+            "--no-recurse-submodules",
+            "--",
+            url,
+            commit,
+          ],
+          undefined,
+          dir,
+          role,
+        );
       }
       if ((await text(["rev-parse", `${snapshot.baseCommit}^{tree}`])) !== snapshot.baseTree) {
         throw new Error("Publication integration source base changed.");

@@ -1,14 +1,18 @@
+import { projectDiagnosticValue } from "@openclaw/ai/diagnostics";
 import {
   GatewayErrorDetailCodes,
   type GitHubPublicationSelectionRejectedErrorDetails,
 } from "../../packages/gateway-protocol/src/gateway-error-details.js";
 import type { SessionGitHubPublicationResult } from "../../packages/gateway-protocol/src/schema/session-github-publication.js";
+import { extractErrorCode } from "../infra/errors.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import { createCommandError } from "../process/command-error.js";
 import type { BufferedCommandResult } from "../process/exec.js";
 import {
   NodeWorkerPublicationConflictError,
   NodeWorkerWorkspaceTransferError,
 } from "../worker/node-workspace-transfer-protocol.js";
+import { boundedWorkerErrorWithCode } from "./worker-environments/worker-error.js";
 
 type PublicationFailure = Pick<
   Extract<SessionGitHubPublicationResult, { status: "failed" }>,
@@ -165,6 +169,47 @@ export class GitHubPublicationWorkflowChangesError extends GitHubPublicationKnow
   }
 }
 
+/** Preserve private execution diagnostics before projecting the existing public failure receipt. */
+export function recordGitHubPublicationFailure(
+  error: unknown,
+  context: { request_id: string; session_id: string },
+): PublicationFailure {
+  if (!(error instanceof GitHubPublicationKnownFailure)) {
+    try {
+      createSubsystemLogger("gateway/github-publication").warn(
+        "Repository GitHub publication execution failed",
+        {
+          requestId: context.request_id,
+          sessionId: context.session_id,
+          stage: "repository-publication",
+          error: boundedWorkerErrorWithCode(
+            projectDiagnosticValue(
+              // DOMException timeout metadata lives on the prototype, outside the descriptor walk.
+              error instanceof Error
+                ? {
+                    name: error.name,
+                    message: error.message,
+                    code: extractErrorCode(error),
+                    cause: error,
+                  }
+                : error,
+              {
+                maxNodes: 8,
+                maxKeys: 16,
+                omitField: (key) =>
+                  !/^(?:name|message|code|status|statusCode|signal|cause|errors|\d+)$/u.test(key),
+              },
+            ),
+          ),
+        },
+      );
+    } catch {
+      // A diagnostic sink cannot replace the original publication outcome.
+    }
+  }
+  return resolveGitHubPublicationFailure(error);
+}
+
 /**
  * Resolve the persisted failure code and guidance. A known failure's message is code-authored,
  * so it leads the guidance as the specific reason; other errors may carry raw command output
@@ -177,7 +222,7 @@ export function resolveGitHubPublicationFailure(error: unknown): PublicationFail
       nextAction: `${error.message} Resolve the conflicts in your saved work before publishing again.`,
     };
   }
-  if (error instanceof NodeWorkerWorkspaceTransferError && error.operation === "publication") {
+  if (error instanceof NodeWorkerWorkspaceTransferError) {
     // Extract fixed native facts only; transfer diagnostics can also contain private paths or output.
     const reason =
       /Publication integration [a-z-]+ failed \((?:exit|error|timeout|signal|no-output-timeout|output-limit); exit (?:null|-?\d+)\)\./u.exec(

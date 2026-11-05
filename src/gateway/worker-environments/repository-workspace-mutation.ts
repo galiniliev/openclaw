@@ -40,6 +40,7 @@ import {
   createWorkerWorkspaceReconcileRequest,
   type WorkerSessionWorkspace,
 } from "./session-workspace.js";
+import { WorkerTunnelOwnerDisconnectedError } from "./tunnel-contract.js";
 import { verifyReconciledWorkspaceFinal } from "./workspace-finalize.js";
 import type { WorkerWorkspaceOperationCoordinator } from "./workspace-operation-coordinator.js";
 import {
@@ -57,6 +58,7 @@ export function createRepositoryWorkspaceMutationService(options: {
   refreshPublicationRuntime?: (
     placement: Extract<WorkerSessionPlacementRecord, { state: "active" }>,
     assertCurrent: () => void,
+    readNativeCredential?: GitHubCredentialReader,
   ) => Promise<void>;
   preparePublicationWorker?: (
     identity: WorkerSessionPlacementIdentity,
@@ -203,12 +205,15 @@ export function createRepositoryWorkspaceMutationService(options: {
           throw new Error("Publication integration lost its worker placement.");
         }
       };
+      let openingTunnel = true;
       const integrate = async () => {
         const tunnel = await environments.startTunnel({
           environmentId: placement.environmentId,
           ownerEpoch: placement.activeOwnerEpoch,
           authorize: assertCurrent,
         });
+        // A disconnected open has no publication effects; transport failures cannot be replayed.
+        openingTunnel = false;
         assertCurrent();
         if (!tunnel.integratePublication) {
           throw new StaleWorkerBuildError(
@@ -223,13 +228,18 @@ export function createRepositoryWorkspaceMutationService(options: {
         if (
           !(
             error instanceof StaleWorkerBuildError ||
-            error instanceof WorkerRuntimeRefreshPendingError
+            error instanceof WorkerRuntimeRefreshPendingError ||
+            (openingTunnel && error instanceof WorkerTunnelOwnerDisconnectedError)
           ) ||
           !options.refreshPublicationRuntime
         ) {
           throw error;
         }
-        await options.refreshPublicationRuntime(placement, assertCurrent);
+        await options.refreshPublicationRuntime(
+          placement,
+          assertCurrent,
+          input.readNativeCredential,
+        );
         assertCurrent();
         try {
           return await integrate();

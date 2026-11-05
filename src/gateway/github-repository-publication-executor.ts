@@ -18,7 +18,7 @@ import {
   GitHubPublicationKnownFailure,
   GitHubPublicationRequesterUnavailableError,
   GitHubPublicationWorkspaceChangedError,
-  resolveGitHubPublicationFailure,
+  recordGitHubPublicationFailure,
 } from "./github-publication-failure.js";
 import { GitHubPublicationRecoveryPendingError } from "./github-publication-git-index.js";
 import {
@@ -700,6 +700,7 @@ export async function executeRepositoryGitHubPublication(params: {
     ) {
       throw error;
     }
+    const failure = recordGitHubPublicationFailure(error, row);
     if (dispatched && !(error instanceof GitHubPublicationKnownFailure)) {
       const interrupted = await execution.interrupt();
       if (error instanceof SessionMutationAuthorizationChangedError) {
@@ -707,7 +708,6 @@ export async function executeRepositoryGitHubPublication(params: {
       }
       return projectGitHubPublicationResult(interrupted);
     }
-    const failure = resolveGitHubPublicationFailure(error);
     return projectGitHubPublicationResult(
       await execution.complete({
         requestId: row.request_id,

@@ -300,7 +300,9 @@ export function createRepositoryGitHubPublicationCoordinator(params: {
       existing !== undefined &&
       retryableRepositoryGitHubPublication(
         existing,
-        existing.error_code === "push_rejected" || existing.error_code === "identity_unavailable"
+        existing.error_code === "push_rejected" ||
+          existing.error_code === "identity_unavailable" ||
+          existing.error_code === "workspace_changed"
           ? await readRepositoryGitHubPublicationInputAsync(existing)
           : undefined,
       );

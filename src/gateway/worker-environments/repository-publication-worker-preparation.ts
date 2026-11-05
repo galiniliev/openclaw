@@ -3,6 +3,7 @@ import { getRepositoryIntegration } from "../../plugins/repository-integration-r
 import { getGatewayRestartDrainSignal } from "../../process/gateway-work-admission.js";
 import { WORKER_ADMISSION_DEADLINE_MS } from "../../worker/worker-connection-contract.js";
 import { GitHubPublicationRecoveryPendingError } from "../github-publication-git-index.js";
+import { assertRepositoryDispatchAdmission } from "../repository-dispatch.js";
 import type { RepositoryPublicationIntegrationInput } from "../repository-publication-checkpoint.js";
 import { DEVICE_WORKER_PROVIDER_ID } from "./device-provider-identity.js";
 import type { coordinateWorkerPlacementDispatch } from "./placement-dispatch-coordinator.js";
@@ -110,6 +111,8 @@ async function refreshRepositoryPublicationRuntime(params: {
   placements: Pick<WorkerSessionPlacementStore, "get" | "prepareRuntimeRefresh">;
   environments: Pick<WorkerEnvironmentService, "get" | "inspectTurnLease">;
   assertCurrent: () => void;
+  readNativeCredential?: RepositoryPublicationIntegrationInput["readNativeCredential"];
+  getConfig: () => OpenClawConfig;
   waitForNode: (input: {
     placement: Extract<WorkerSessionPlacementRecord, { state: "active" }>;
     signal: AbortSignal;
@@ -117,9 +120,13 @@ async function refreshRepositoryPublicationRuntime(params: {
   }) => Promise<void>;
   reconcileActive: (environmentId: string) => Promise<unknown>;
 }): Promise<void> {
+  const assertRequesterCurrent = () => {
+    params.assertCurrent();
+    assertRepositoryDispatchAdmission(params.readNativeCredential, params.getConfig());
+  };
   const facts = await params.placements.prepareRuntimeRefresh(params.placement.sessionId);
   const assertCurrent = () => {
-    params.assertCurrent();
+    assertRequesterCurrent();
     facts.assertCurrent();
     const current = params.placements.get(params.placement.sessionId);
     if (
@@ -135,6 +142,8 @@ async function refreshRepositoryPublicationRuntime(params: {
     }
   };
   try {
+    assertCurrent();
+    await params.readNativeCredential?.admit?.();
     assertCurrent();
     const signal = AbortSignal.any([
       getGatewayRestartDrainSignal(),
@@ -166,9 +175,9 @@ async function refreshRepositoryPublicationRuntime(params: {
   } finally {
     facts.release();
   }
-  params.assertCurrent();
+  assertRequesterCurrent();
   await params.reconcileActive(params.placement.environmentId);
-  params.assertCurrent();
+  assertRequesterCurrent();
 }
 
 /** Bind publication to the existing placement and runtime owners without another lifecycle store. */
@@ -177,7 +186,10 @@ export function createRepositoryPublicationPreparation(
     Parameters<typeof prepareRepositoryPublicationWorker>[0],
     "identity" | "input"
   > &
-    Omit<Parameters<typeof refreshRepositoryPublicationRuntime>[0], "placement" | "assertCurrent">,
+    Omit<
+      Parameters<typeof refreshRepositoryPublicationRuntime>[0],
+      "placement" | "assertCurrent" | "readNativeCredential"
+    >,
 ) {
   return {
     preparePublicationWorker: (
@@ -187,6 +199,13 @@ export function createRepositoryPublicationPreparation(
     refreshPublicationRuntime: (
       placement: Extract<WorkerSessionPlacementRecord, { state: "active" }>,
       assertCurrent: () => void,
-    ) => refreshRepositoryPublicationRuntime({ ...dependencies, placement, assertCurrent }),
+      readNativeCredential?: RepositoryPublicationIntegrationInput["readNativeCredential"],
+    ) =>
+      refreshRepositoryPublicationRuntime({
+        ...dependencies,
+        placement,
+        assertCurrent,
+        readNativeCredential,
+      }),
   };
 }

@@ -152,7 +152,7 @@ export function createNodeWorkerWorkspaceActions(params: {
     if (restoredWorkspace.diskAuthority) {
       authorize?.();
       assertRetainedWorkspaceBinding(restoredWorkspace.diskAuthority, params, restoredWorkspace);
-      return;
+      // Reopen transport custody below without reading or synchronizing the private tree.
     }
     if (restoredWorkspace.source.kind === "repository") {
       await params.workspaceTransfer.prepareRepository({

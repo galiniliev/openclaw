@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, expect, it, onTestFinished, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+import { resolveGitHubPublicationFailure } from "../gateway/github-publication-failure.js";
 import {
   REMOTE_GITHUB_PUBLICATION_SNAPSHOT_JS,
   readGitHubRepositoryPublicationMetadata,
@@ -15,12 +16,179 @@ import {
   startNodeWorkspaceTransferTestServer,
   transferOwner,
 } from "../gateway/worker-environments/node-workspace-transfer.test-support.js";
-import { NODE_WORKSPACE_EMPTY_MANIFEST_REF } from "../worker/node-workspace-transfer-protocol.js";
+import { NODE_WORKER_WORKSPACE_EXEC_COMMAND } from "../infra/node-commands.js";
+import * as logger from "../logger.js";
+import * as command from "../process/exec.js";
+import {
+  NODE_WORKSPACE_EMPTY_MANIFEST_REF,
+  NodeWorkerWorkspaceTransferError,
+} from "../worker/node-workspace-transfer-protocol.js";
 import { integrateNodeRepositoryPublication } from "./node-worker-publication-integration.js";
+import { invokeNodeWorkerSupervisorCommand } from "./node-worker-supervisor-commands.js";
 import { runNodeWorkerWorkspaceTransfer } from "./node-worker-transfer-client.js";
+import { NodeWorkerWorkspaceRuntime } from "./node-worker-workspace.js";
 
 const temporary = useAutoCleanupTempDirTracker(afterEach);
 afterEach(() => vi.unstubAllEnvs());
+it.each(["source-base", "target-main"] as const)(
+  "preserves private %s fetch diagnosis without changing the public failure",
+  async (role) => {
+    const root = temporary.make("publication-fetch-diagnostic-");
+    const inputRoot = path.join(root, "input");
+    await fs.mkdir(inputRoot);
+    const git = (...args: string[]) =>
+      execFileSync("git", args, {
+        cwd: root,
+        env: { ...process.env, GIT_CONFIG_GLOBAL: os.devNull, GIT_CONFIG_SYSTEM: os.devNull },
+        encoding: "utf8",
+      }).trim();
+    git("init", "--quiet");
+    const tree = git("mktree");
+    const base = git(
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.test",
+      "commit-tree",
+      tree,
+    );
+    git("update-ref", "refs/heads/main", base);
+    const raw = JSON.stringify({
+      version: 1,
+      baseCommit: base,
+      baseTree: tree,
+      workspaceTree: tree,
+      entries: [],
+    });
+    await fs.writeFile(path.join(inputRoot, "snapshot.json"), raw);
+    const token =
+      role === "source-base" ? "node-private-value+/%=9081726354" : `ghs_${"A".repeat(36)}`;
+    const basic = Buffer.from(`x-access-token:${token}`).toString("base64");
+    const secrets = [
+      token,
+      `x-access-token:${token}`,
+      basic,
+      `Basic ${basic}`,
+      `Authorization: Basic ${basic}`,
+    ].flatMap((value) => [
+      value,
+      encodeURIComponent(value),
+      new URLSearchParams({ v: value }).toString().slice(2),
+    ]);
+    secrets.push(
+      encodeURIComponent(`Authorization: Basic ${basic}`).replace(/%[\dA-F]{2}/gu, (escape) =>
+        escape.toLowerCase(),
+      ),
+    );
+    const mixedEscapes = [token, `Authorization: Basic ${basic}`].map((value) =>
+      encodeURIComponent(value).replace(/%[\dA-F]{2}/gu, (escape, offset: number) =>
+        offset % 2 === 0 ? escape.toLowerCase() : escape,
+      ),
+    );
+    secrets.unshift(encodeURIComponent(basic).replace(/%3D$/u, "%3d"), ...mixedEscapes);
+    const bearer = "sk-abcdefghijklmnopqrstuvwxyz123456";
+    const stderr = `fatal: harmless remote rejection ${secrets.join(" ")} ${root} ${encodeURIComponent(root)} https://url-user:url-pass@remote.invalid/repo?unusual=query-secret Authorization: Bearer ${bearer} ${"🌊".repeat(10_000)} fatal: harmless remote rejection`;
+    const realRun = command.runCommandBuffered;
+    let fetches = 0;
+    const run = vi
+      .spyOn(command, "runCommandBuffered")
+      .mockImplementation(async (argv, options) => {
+        if (
+          argv[0] === "git" &&
+          argv[1] === "fetch" &&
+          ++fetches === (role === "source-base" ? 1 : 2)
+        ) {
+          return {
+            code: 128,
+            termination: "exit",
+            signal: null,
+            killed: false,
+            stdout: Buffer.from("STDOUT_MUST_NOT_LEAK"),
+            stderr: Buffer.from(stderr),
+            error: new Error("RAW_ERROR_MUST_NOT_LEAK"),
+          };
+        }
+        return realRun(argv, options);
+      });
+    onTestFinished(() => run.mockRestore());
+    const error = await integrateNodeRepositoryPublication({
+      workspaceDir: root,
+      inputRoot,
+      inputDigest: `sha256:${createHash("sha256").update(raw).digest("hex")}`,
+      outputRoot: path.join(root, "output"),
+      sourceUrl: root,
+      targetUrl: root,
+      mainCommit: base,
+      token,
+    }).then(
+      () => {
+        throw new Error("Expected a fetch failure");
+      },
+      (failure: unknown) => failure,
+    );
+    expect(error).toBeInstanceOf(Error);
+    const message = error instanceof Error ? error.message : "";
+    expect(message).toContain(`fetch=${role}`);
+    expect(message).toContain("fatal: harmless remote rejection");
+    expect(Buffer.byteLength(message)).toBeLessThanOrEqual(16 * 1024);
+    const warn = vi.spyOn(logger, "logWarn").mockImplementation(() => {});
+    onTestFinished(() => warn.mockRestore());
+    const workspace = new NodeWorkerWorkspaceRuntime({ root: path.join(root, "runtime") });
+    // The unchanged transfer wrapper carries the integration error into node serialization.
+    const exec = vi
+      .spyOn(workspace, "exec")
+      .mockRejectedValue(
+        new NodeWorkerWorkspaceTransferError(
+          "workspace-transfer-failed: transfer did not complete",
+          { cause: error, operation: "publication", stage: "replace" },
+        ),
+      );
+    onTestFinished(() => exec.mockRestore());
+    const result = await invokeNodeWorkerSupervisorCommand({
+      command: NODE_WORKER_WORKSPACE_EXEC_COMMAND,
+      paramsJSON: JSON.stringify({
+        gatewayNamespace: "gateway",
+        environmentId: "environment",
+        sessionId: "session",
+        generation: 1,
+        argv: ["openclaw-internal-workspace-transfer"],
+      }),
+      workspace,
+    });
+    expect(result).toMatchObject({ ok: false, code: "WORKSPACE_TRANSFER_FAILED" });
+    if (!result.handled || result.ok) {
+      throw new Error("Expected the private node diagnostic");
+    }
+    expect(result.message).toContain(`fetch=${role}`);
+    expect(result.message).toContain("fatal: harmless remote rejection");
+    expect(result.message.length).toBeLessThanOrEqual(1_024);
+    const diagnostics = [
+      message,
+      result.message,
+      ...warn.mock.calls.flat().filter((value) => typeof value === "string"),
+    ].join(" ");
+    for (const secret of [
+      ...secrets,
+      root,
+      encodeURIComponent(root),
+      bearer,
+      "url-user",
+      "url-pass",
+      "query-secret",
+      "STDOUT_MUST_NOT_LEAK",
+      "RAW_ERROR_MUST_NOT_LEAK",
+    ]) {
+      expect(diagnostics).not.toContain(secret);
+    }
+    expect(
+      resolveGitHubPublicationFailure(new NodeWorkerWorkspaceTransferError(result.message)),
+    ).toEqual({
+      code: "unavailable",
+      nextAction:
+        "Publication integration fetch failed (exit; exit 128). Worker publication transfer failed. Restore worker and repository connectivity, then retry the same request.",
+    });
+  },
+);
 it.each([false, true])(
   "integrates latest main without changing editing state (conflict: %s)",
   async (conflict) => {

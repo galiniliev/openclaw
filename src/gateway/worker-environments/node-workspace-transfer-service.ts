@@ -4,6 +4,7 @@ import path from "node:path";
 import { resolveStateDir } from "../../config/paths.js";
 import { generateSecureToken } from "../../infra/secure-random.js";
 import { KeyedAsyncQueue } from "../../plugin-sdk/keyed-async-queue.js";
+import { NodeWorkerWorkspaceTransferError } from "../../worker/node-workspace-transfer-protocol.js";
 import type { NodeWorkspaceTransferHttpRoute } from "./node-workspace-transfer-http-contract.js";
 import {
   isNodeWorkspaceTransferOwnerCurrent,
@@ -407,7 +408,12 @@ export function createNodeWorkspaceTransferService(options: {
       authorize?.();
       const context = contexts.get(environmentId);
       if (!context || !MANIFEST_REF_PATTERN.test(baseManifestRef) || !isCurrentContext(context)) {
-        throw new Error("Node workspace transfer context is unavailable");
+        throw new NodeWorkerWorkspaceTransferError(
+          "Node workspace transfer context is unavailable",
+          {
+            operation: "upload",
+          },
+        );
       }
       if (context.upload) {
         throw new Error("Node workspace transfer upload is already active");
@@ -469,7 +475,12 @@ export function createNodeWorkspaceTransferService(options: {
       authorize?.();
       const context = contexts.get(environmentId);
       if (!context || !isCurrentContext(context)) {
-        throw new Error("Node workspace transfer context is unavailable");
+        throw new NodeWorkerWorkspaceTransferError(
+          "Node workspace transfer context is unavailable",
+          {
+            operation: "download",
+          },
+        );
       }
       context.snapshots.set(snapshot.manifestRef, snapshot);
       if (advanceWorkspace) {

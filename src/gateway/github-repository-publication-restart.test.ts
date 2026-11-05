@@ -1,6 +1,12 @@
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, expect, it, vi } from "vitest";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
+import { afterEach, expect, it, onTestFinished, vi } from "vitest";
 import { GitHubIdentityError } from "../agents/github-read-identity.js";
+import {
+  onInternalDiagnosticEvent,
+  type DiagnosticEventPayload,
+} from "../infra/diagnostic-events.js";
+import { resetLogger, setLoggerOverride } from "../logging/logger.js";
 import { closeOpenClawAgentDatabasesAsync } from "../state/openclaw-agent-db.js";
 import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import { ensureCanonicalUserProfileForEmail } from "../state/user-profile-writes.js";
@@ -45,6 +51,110 @@ await import("../agents/embedded-agent.js");
 
 installGitHubPublicationTestHarness();
 afterEach(() => vi.unstubAllGlobals());
+
+it.each(["remote-validation", "worker-integration"] as const)(
+  "records a bounded private diagnostic for an ordinary %s failure without changing the receipt",
+  async (stage) => {
+    const f = await createRepositoryPublicationFixture(checkpoint);
+    const secret = "ghp_abcdefghijklmnopqrstuvwxyz123456"; // pragma: allowlist secret
+    const cause = Object.assign(
+      new Error(`bootstrap ${"x".repeat(2_000)} terminal download failure`),
+      {
+        code: "ECONNRESET",
+        status: 503,
+        signal: "SIGTERM",
+        headers: { authorization: "HEADER_MUST_NOT_LEAK" },
+        env: { PRIVATE_VALUE: "ENV_MUST_NOT_LEAK" },
+      },
+    );
+    const failure =
+      stage === "worker-integration"
+        ? Object.assign(
+            new DOMException(`Native preparation failed with ${secret}`, "TimeoutError"),
+            {
+              cause,
+            },
+          )
+        : new Error(`Native preparation failed with ${secret}`, { cause });
+    const identity = await mocks.prepareIdentity();
+    mocks.prepareIdentity.mockResolvedValue({
+      ...identity,
+      env: { ...identity.env, GH_TOKEN: "synthetic-integration-token" },
+    });
+    const transport = mocks.runCommand.getMockImplementation()!;
+    mocks.runCommand.mockImplementation(async (args, options) => {
+      if (
+        stage === "remote-validation" &&
+        args.includes("repos/owner/repository/git/commits/" + f.baseCommit)
+      ) {
+        throw failure;
+      }
+      return transport(args, options);
+    });
+    setLoggerOverride({ level: "warn", consoleLevel: "silent" });
+    onTestFinished(() => {
+      setLoggerOverride(null);
+      resetLogger();
+    });
+    const events: Array<Extract<DiagnosticEventPayload, { type: "log.record" }>> = [];
+    onTestFinished(
+      onInternalDiagnosticEvent((event) => {
+        if (
+          event.type === "log.record" &&
+          event.message === "Repository GitHub publication execution failed"
+        ) {
+          events.push(event);
+        }
+      }),
+    );
+    const coordinator = createTestGitHubPublicationCoordinator({
+      placements: f.placements,
+      prepareRepositoryIntegration: async () => {
+        throw failure;
+      },
+    });
+    const result = await coordinator.requestForSessionV2({
+      agentId: "main",
+      sessionKey: SESSION_KEY,
+      idempotencyKey: "diagnostic-" + stage,
+    });
+    await yieldToEventLoop();
+    expect(result).toMatchObject({
+      status: "failed",
+      code: "unavailable",
+      message: "GitHub publication failed.",
+    });
+    expect(readRepositoryGitHubPublication(result.requestId)).toMatchObject({
+      head_commit: null,
+      last_effect: null,
+    });
+    expect(f.runtime.effects).toEqual([]);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.attributes).toMatchObject({
+      requestId: result.requestId,
+      sessionId: SESSION_ID,
+      stage: "repository-publication",
+    });
+    const diagnostic = String(events[0]?.attributes?.error);
+    expect(diagnostic.length).toBeLessThanOrEqual(1_024);
+    for (const retained of [
+      "Native preparation failed",
+      "terminal download failure",
+      "ECONNRESET",
+      "503",
+      "SIGTERM",
+    ]) {
+      expect(diagnostic).toContain(retained);
+    }
+    for (const omitted of [secret, "HEADER_MUST_NOT_LEAK", "ENV_MUST_NOT_LEAK"]) {
+      expect(diagnostic).not.toContain(omitted);
+    }
+    if (stage === "worker-integration") {
+      expect(diagnostic).toContain("TimeoutError");
+    }
+  },
+);
+
 it("fences publication reservations when the Gateway owner restarts", async () => {
   await createRepositoryPublicationFixture(checkpoint);
   const person = await createPersonalPublicationFixture();
@@ -248,94 +358,108 @@ async function laterManagedPublicationFixture(mismatch?: "tree" | "requester") {
   return { f, original, failed, later, saved: readRepositoryGitHubPublication(failed.requestId)! };
 }
 
-it("retries the original rejected request after a pre-effect identity failure through its later owned PR", async () => {
-  const { f, original, failed, later, saved } = await laterManagedPublicationFixture();
-  const managedHead = f.runtime.head!;
-  const description = f.runtime.pr!.body;
-  f.git(["read-tree", f.baseTree]);
-  const upstream = f.git(["hash-object", "-w", "--stdin"], "latest upstream\n");
-  f.git(["update-index", "--add", "--cacheinfo", "100644", upstream, "main.txt"]);
-  f.runtime.baseHeadTree = f.git(["write-tree"]);
-  f.runtime.baseHead = f.git(
-    ["commit-tree", f.runtime.baseHeadTree, "-p", f.baseCommit],
-    "latest main\n",
-  );
-  const identity = await mocks.prepareIdentity();
-  mocks.prepareIdentity.mockResolvedValue({
-    ...identity,
-    env: { ...identity.env, GH_TOKEN: "synthetic-integration-token" },
-  });
-  let credentialReady = false;
-  const coordinator = createTestGitHubPublicationCoordinator({
-    placements: f.placements,
-    prepareRepositoryIntegration: async (_identity, input) => {
-      if (!credentialReady) {
-        throw new GitHubIdentityError("unverified");
-      }
-      expect(input.mainCommit).toBe(f.runtime.baseHead);
-      const { snapshot } = await readGitHubRepositoryPublicationMetadata(
-        input.snapshotRoot,
-        input.snapshotDigest,
-      );
-      f.git(["read-tree", f.runtime.baseHeadTree]);
-      const repair = snapshot.entries[0]!;
-      f.git(["update-index", "--add", "--cacheinfo", "100644", repair.sha!, repair.path]);
-      return {
-        snapshotRoot: input.snapshotRoot,
-        knownBlobs: [upstream],
-        release: async () => {},
-        snapshot: {
-          ...snapshot,
-          workspaceTree: f.git(["write-tree"]),
-          baseCommit: f.runtime.baseHead,
-          baseTree: f.runtime.baseHeadTree,
-        },
-      };
-    },
-  });
-  f.runtime.uploaded.clear();
-  expect(
-    await coordinator.requestForSessionV2({
+it.each(["identity", "transfer-context"] as const)(
+  "retries the original rejected request after a pre-effect %s failure through its later owned PR",
+  async (failure) => {
+    const { f, original, failed, later, saved } = await laterManagedPublicationFixture();
+    const managedHead = f.runtime.head!;
+    const description = f.runtime.pr!.body;
+    f.git(["read-tree", f.baseTree]);
+    const upstream = f.git(["hash-object", "-w", "--stdin"], "latest upstream\n");
+    f.git(["update-index", "--add", "--cacheinfo", "100644", upstream, "main.txt"]);
+    f.runtime.baseHeadTree = f.git(["write-tree"]);
+    f.runtime.baseHead = f.git(
+      ["commit-tree", f.runtime.baseHeadTree, "-p", f.baseCommit],
+      "latest main\n",
+    );
+    const identity = await mocks.prepareIdentity();
+    mocks.prepareIdentity.mockResolvedValue({
+      ...identity,
+      env: { ...identity.env, GH_TOKEN: "synthetic-integration-token" },
+    });
+    let credentialReady = false;
+    const coordinator = createTestGitHubPublicationCoordinator({
+      placements: f.placements,
+      prepareRepositoryIntegration: async (_identity, input) => {
+        if (!credentialReady) {
+          if (failure === "transfer-context") {
+            // Reproduce the historical ordinary error receipt from a replaced Gateway.
+            throw new Error("Node workspace transfer context is unavailable");
+          }
+          throw new GitHubIdentityError("unverified");
+        }
+        expect(input.mainCommit).toBe(f.runtime.baseHead);
+        const { snapshot } = await readGitHubRepositoryPublicationMetadata(
+          input.snapshotRoot,
+          input.snapshotDigest,
+        );
+        f.git(["read-tree", f.runtime.baseHeadTree]);
+        const repair = snapshot.entries[0]!;
+        f.git(["update-index", "--add", "--cacheinfo", "100644", repair.sha!, repair.path]);
+        return {
+          snapshotRoot: input.snapshotRoot,
+          knownBlobs: [upstream],
+          release: async () => {},
+          snapshot: {
+            ...snapshot,
+            workspaceTree: f.git(["write-tree"]),
+            baseCommit: f.runtime.baseHead,
+            baseTree: f.runtime.baseHeadTree,
+          },
+        };
+      },
+    });
+    f.runtime.uploaded.clear();
+    expect(
+      await coordinator.requestForSessionV2({
+        agentId: "main",
+        sessionKey: SESSION_KEY,
+        idempotencyKey: "older-managed-request",
+        ...original,
+      }),
+    ).toMatchObject({
+      requestId: failed.requestId,
+      status: "failed",
+      code: failure === "identity" ? "identity_unavailable" : "workspace_changed",
+    });
+    expect(f.runtime.effects).toEqual(["push", "pull_request"]);
+    credentialReady = true;
+    f.runtime.interruptPush = true;
+    const result = await coordinator.requestForSessionV2({
       agentId: "main",
       sessionKey: SESSION_KEY,
       idempotencyKey: "older-managed-request",
       ...original,
-    }),
-  ).toMatchObject({ requestId: failed.requestId, status: "failed", code: "identity_unavailable" });
-  expect(f.runtime.effects).toEqual(["push", "pull_request"]);
-  credentialReady = true;
-  f.runtime.interruptPush = true;
-  const result = await coordinator.requestForSessionV2({
-    agentId: "main",
-    sessionKey: SESSION_KEY,
-    idempotencyKey: "older-managed-request",
-    ...original,
-  });
-  expect(result).toMatchObject({ requestId: failed.requestId, status: "requested" });
-  await coordinator.resumeSessionRequests();
-  expect(await coordinator.readAsync(failed.requestId)).toMatchObject({ status: "published", url });
-  expect(f.git(["rev-parse", `${f.runtime.head}^1`])).toBe(managedHead);
-  expect(f.git(["rev-parse", `${f.runtime.head}^2`])).toBe(f.runtime.baseHead);
-  expect(f.git(["show", `${f.runtime.head}:counter.txt`])).toBe("accepted first");
-  expect(f.git(["show", `${f.runtime.head}:main.txt`])).toBe("latest upstream");
-  expect(f.casRequests[1]).toMatchObject({ beforeOid: managedHead, force: false });
-  expect(f.runtime.effects).toEqual(["push", "pull_request", "push"]);
-  expect(f.runtime.pr!.body).toBe(description);
-  expect(f.runtime.pr!.body).toContain(later.requestId);
-  expect(f.runtime.uploaded.size).toBe(0);
-  expect(readRepositoryGitHubPublication(failed.requestId)).toMatchObject({
-    request_digest: saved.request_digest,
-    previous_head_commit: null,
-    requester_authority_json: saved.requester_authority_json,
-    checkpoint_ref: saved.checkpoint_ref,
-    checkpoint_digest: saved.checkpoint_digest,
-    workspace_tree: saved.workspace_tree,
-    reported_at_ms: null,
-  });
-  expect(
-    listRepositoryGitHubPublicationsInDatabase(openOpenClawStateDatabase().db, {}),
-  ).toHaveLength(2);
-});
+    });
+    expect(result).toMatchObject({ requestId: failed.requestId, status: "requested" });
+    await coordinator.resumeSessionRequests();
+    expect(await coordinator.readAsync(failed.requestId)).toMatchObject({
+      status: "published",
+      url,
+    });
+    expect(f.git(["rev-parse", `${f.runtime.head}^1`])).toBe(managedHead);
+    expect(f.git(["rev-parse", `${f.runtime.head}^2`])).toBe(f.runtime.baseHead);
+    expect(f.git(["show", `${f.runtime.head}:counter.txt`])).toBe("accepted first");
+    expect(f.git(["show", `${f.runtime.head}:main.txt`])).toBe("latest upstream");
+    expect(f.casRequests[1]).toMatchObject({ beforeOid: managedHead, force: false });
+    expect(f.runtime.effects).toEqual(["push", "pull_request", "push"]);
+    expect(f.runtime.pr!.body).toBe(description);
+    expect(f.runtime.pr!.body).toContain(later.requestId);
+    expect(f.runtime.uploaded.size).toBe(0);
+    expect(readRepositoryGitHubPublication(failed.requestId)).toMatchObject({
+      request_digest: saved.request_digest,
+      previous_head_commit: null,
+      requester_authority_json: saved.requester_authority_json,
+      checkpoint_ref: saved.checkpoint_ref,
+      checkpoint_digest: saved.checkpoint_digest,
+      workspace_tree: saved.workspace_tree,
+      reported_at_ms: null,
+    });
+    expect(
+      listRepositoryGitHubPublicationsInDatabase(openOpenClawStateDatabase().db, {}),
+    ).toHaveLength(2);
+  },
+);
 
 it.each(["external head", "tree", "requester", "PR publisher"] as const)(
   "does not reconcile the original request with a mismatched %s",

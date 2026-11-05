@@ -318,7 +318,9 @@ export function claimRepositoryGitHubPublicationInDatabase(
     authority.assertCurrent();
     const current = readRepositoryGitHubPublicationInDatabase(db, row.request_id);
     const managedInput =
-      current?.error_code === "push_rejected" || current?.error_code === "identity_unavailable"
+      current?.error_code === "push_rejected" ||
+      current?.error_code === "identity_unavailable" ||
+      current?.error_code === "workspace_changed"
         ? listRepositoryGitHubPublicationsInDatabase(db, {
             workspaceId: current.workspace_id,
           }).findLast((published) => matchesRepositoryGitHubPublicationInput(current, published))

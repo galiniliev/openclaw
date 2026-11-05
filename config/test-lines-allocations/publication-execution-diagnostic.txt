@@ -1,0 +1,2 @@
+# One coordinator-boundary diagnostic regression covering pre-integration and worker failures, bounded redaction, and unchanged public failure/effect receipts.
+110
