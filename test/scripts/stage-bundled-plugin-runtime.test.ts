@@ -1,4 +1,5 @@
 // Stage Bundled Plugin Runtime tests cover stage bundled plugin runtime script behavior.
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -167,6 +168,38 @@ try {
   it("prepares both roots without mutation and publishes imports valid at their final paths", async () => {
     await withTempDir("openclaw-stage-runtime-", async (repoRoot) => {
       const { runtimeRoot, aliasRoot } = writeRuntimeFixture(repoRoot);
+      fs.appendFileSync(
+        path.join(repoRoot, "dist/plugin-sdk/demo.js"),
+        "export const singleton = {};\n",
+      );
+      const pluginRoot = path.join(repoRoot, "dist/extensions/demo");
+      fs.mkdirSync(path.join(pluginRoot, ".setup"));
+      fs.writeFileSync(
+        path.join(pluginRoot, ".setup/session-binding.mjs"),
+        'export * from "openclaw/plugin-sdk/demo";\n' +
+          'export const loadPrivate = () => import("openclaw/plugin-sdk/private");\n',
+      );
+      fs.writeFileSync(
+        path.join(pluginRoot, "catalog-page.worker.js"),
+        'export * from "openclaw/plugin-sdk/demo";\n',
+      );
+      const nativeImport = () =>
+        spawnSync(
+          resolveTestNodeExecPath(),
+          [
+            "--input-type=module",
+            "-e",
+            `import assert from "node:assert/strict";
+import * as canonical from "./dist/plugin-sdk/demo.js";
+import * as setup from "./dist/extensions/demo/.setup/session-binding.mjs";
+import * as catalog from "./dist/extensions/demo/catalog-page.worker.js";
+assert.equal(setup.singleton, canonical.singleton);
+assert.equal(catalog.singleton, canonical.singleton);
+await assert.rejects(setup.loadPrivate(), { code: "ERR_PACKAGE_PATH_NOT_EXPORTED" });`,
+          ],
+          { cwd: repoRoot, encoding: "utf8", env: { ...process.env, NODE_OPTIONS: "" } },
+        );
+      expect(nativeImport().stderr).toContain("ERR_MODULE_NOT_FOUND");
       const prepared = prepareBundledPluginRuntime({ repoRoot });
       expect(prepared.changed).toBe(true);
       expect(fs.existsSync(runtimeRoot)).toBe(false);
@@ -174,6 +207,8 @@ try {
       expect(fs.existsSync(path.dirname(aliasRoot))).toBe(false);
       await prepared.publish(() => undefined);
       await prepared.cleanup();
+      const imported = nativeImport();
+      expect(imported.status, imported.stderr).toBe(0);
 
       const runtime = await import(
         pathToFileURL(path.join(runtimeRoot, "extensions/demo/index.js")).href

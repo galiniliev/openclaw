@@ -673,7 +673,28 @@ describe("offline installed runtime composition", () => {
           "dist/build-info.json",
           "dist/entry.js",
           "dist/extensions/demo/package.json",
+          "dist/plugin-sdk/demo.js",
+          "dist/plugin-sdk/private.js",
+          "dist/extensions/demo/.setup/session-binding.mjs",
+          "dist/extensions/demo/catalog-page.worker.js",
         ]),
+      );
+      const manifestPath = path.join(app, "package.json");
+      const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+      manifest.exports = { "./plugin-sdk/demo": "./dist/plugin-sdk/demo.js" };
+      await fs.writeFile(manifestPath, JSON.stringify(manifest));
+      await write(app, "dist/plugin-sdk/demo.js", "export const singleton = {};\n");
+      await write(app, "dist/plugin-sdk/private.js", "export const privateValue = true;\n");
+      await write(
+        app,
+        "dist/extensions/demo/.setup/session-binding.mjs",
+        'export { singleton } from "openclaw/plugin-sdk/demo";\n' +
+          'export const loadPrivate = () => import("openclaw/plugin-sdk/private");\n',
+      );
+      await write(
+        app,
+        "dist/extensions/demo/catalog-page.worker.js",
+        'export { singleton } from "openclaw/plugin-sdk/demo";\n',
       );
       await write(app, "dist/stale.js", "obsolete");
       const finalize = () =>
@@ -696,6 +717,22 @@ describe("offline installed runtime composition", () => {
       }
       const finalized = finalize();
       expect(finalized.status, finalized.stderr).toBe(0);
+      const nativeImport = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `import assert from "node:assert/strict";
+import { singleton } from "./dist/plugin-sdk/demo.js";
+import * as setup from "./dist/extensions/demo/.setup/session-binding.mjs";
+import * as catalog from "./dist/extensions/demo/catalog-page.worker.js";
+assert.equal(setup.singleton, singleton);
+assert.equal(catalog.singleton, singleton);
+await assert.rejects(setup.loadPrivate(), { code: "ERR_PACKAGE_PATH_NOT_EXPORTED" });`,
+        ],
+        { cwd: app, encoding: "utf8" },
+      );
+      expect(nativeImport.status, nativeImport.stderr).toBe(0);
       await expect(fs.access(path.join(app, ".openclaw-lifecycle-pending"))).rejects.toThrow();
       await expect(fs.access(path.join(app, "dist/stale.js"))).rejects.toThrow();
       expect(

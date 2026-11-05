@@ -1,0 +1,2 @@
+72
+# Native setup/catalog imports retain one canonical public SDK after installed finalization; private subpaths stay unexported.
