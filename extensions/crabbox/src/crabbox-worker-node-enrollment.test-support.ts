@@ -197,7 +197,7 @@ export async function expectSetupPhases(
     }
     expect(phase).toEqual({
       name: expect.stringMatching(
-        /^bootstrap\.(?:runtime\.transfer|worker\.transfer|extraction|verification(?:\.identity)?|worker\.verification|activation)$/u,
+        /^bootstrap\.(?:runtime\.transfer|worker\.transfer|extraction|verification(?:\.identity)?|worker\.(?:verification|expansion)|activation)$/u,
       ),
       ms: expect.any(Number),
       ...(phase.overlapping === undefined ? {} : { overlapping: true }),

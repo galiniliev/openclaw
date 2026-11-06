@@ -2,6 +2,7 @@ import { sha256Hex } from "@openclaw/normalization-core/node-crypto";
 import { stableStringify } from "@openclaw/normalization-core/stable-stringify";
 import { NODE_WORKER_WORKSPACE_PREPARE_COMMAND } from "../../infra/node-commands.js";
 import type { WorkerProfile } from "../../plugins/types.js";
+import type { NodeWorkerInitialSnapshot } from "../../worker/node-workspace-prepared-protocol.js";
 import type { EnvironmentRecipe } from "./environment-recipe.js";
 import {
   WorkerPreparationTargetSchema,
@@ -10,6 +11,13 @@ import {
   type WorkerProjectPreparationIdentity,
 } from "./preparation-identity.schema.js";
 import type { WorkerProjectSnapshot } from "./workspace-git-base.js";
+
+export type WorkerInitialSnapshotCustody = {
+  environmentId: string;
+  provisionOperationId: string;
+  nodeDeviceId: string;
+  snapshot: NodeWorkerInitialSnapshot;
+};
 
 export type WorkerProviderPreparedIntent = {
   providerId: string;

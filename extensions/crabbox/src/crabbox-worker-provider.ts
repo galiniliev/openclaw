@@ -37,11 +37,11 @@ import {
   operationSlug,
   parseCrabboxProfile,
   parseCrabboxCleanupProfile,
-  resolveCrabboxProvisionProfile,
   resolveCrabboxProfileCommandEnv,
   resolveCrabboxPreparationTarget,
   resolveCrabboxPreparedIdleTimeoutMs,
   supportsCrabboxProjectPreparation,
+  supportsCrabboxRetainedProjectImages,
 } from "./crabbox-worker-profile.js";
 import {
   prepareCrabboxSnapshotVerifierInput,
@@ -398,8 +398,7 @@ export function createCrabboxWorkerProvider(
           prepareBeforeEnrollment: Boolean(project),
         });
         const enrolled = project && (await warmImages.lookupLease(leaseId))?.phase === "enrolled";
-        // The host chooses whether a new fork starts on its prepared base or
-        // reconciles an explicit revision. Enrolled replays only inspect their disk.
+        // Host preparation selects the revision; enrolled replays only inspect their private disk.
         const inspectPrepared = project?.preparation && enrolled;
         if (project && inspectPrepared) {
           // Enrolled replays verify completion without setup, upload, or private capture.
@@ -455,6 +454,8 @@ export function createCrabboxWorkerProvider(
               id: leaseId,
               project,
               snapshotBaseCommit: isFork ? allocationChoice.baseCommit : undefined,
+              initialSnapshotCheckpointId:
+                isFork && !priorAllocation ? allocationChoice.checkpointId : undefined,
               signal: preparationSignal,
               timeoutMs: () => remainingProvisionTimeout(setupDeadline, CRABBOX_SETUP_TIMEOUT_MS),
               recordRecipePreparation: (metadata) =>
@@ -520,8 +521,7 @@ export function createCrabboxWorkerProvider(
         }
         let enrollment: CrabboxWorkerNodeEnrollment;
         try {
-          // A fork of an image captured for this exact runtime already holds it. Enrollment still
-          // verifies the runtime, and the node fetches a missing worker bundle from the Gateway.
+          // Exact-runtime forks reuse installation; enrollment verifies it and fetches missing bundles.
           const forkHasRuntime =
             isFork &&
             isDeepStrictEqual(
@@ -690,12 +690,7 @@ export function createCrabboxWorkerProvider(
     requiresNodeEnrollment: true,
     retainedLease,
     supportsProjectPreparation: supportsCrabboxProjectPreparation,
-    supportsRetainedProjectImages: (profile, machineClass, os) => {
-      const { profile: resolved } = resolveCrabboxProvisionProfile(profile, machineClass, os);
-      return (
-        resolved.provider === "azure-sandbox" && Boolean(resolved.sdkPython) && resolved.warmImage
-      );
-    },
+    supportsRetainedProjectImages: supportsCrabboxRetainedProjectImages,
     resolvePreparedIdleTimeoutMs: resolveCrabboxPreparedIdleTimeoutMs,
     resolvePreparationTarget: resolveCrabboxPreparationTarget,
     runSetupCommand: createCrabboxSetupCommandRunner({

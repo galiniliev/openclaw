@@ -1,11 +1,8 @@
-import { execFile } from "node:child_process";
 import type { Dirent } from "node:fs";
 import fsp from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import type { CloudflareAccessCredentials } from "../../packages/gateway-client/src/cloudflare-access.js";
@@ -14,8 +11,6 @@ import { resolveStateDir } from "../config/paths.js";
 import { extractErrorCode, hasErrnoCode, isMissingPathError } from "../infra/errors.js";
 import { FsSafeError, root as fsSafeRoot } from "../infra/fs-safe.js";
 import { resolveOpenClawPackageRootSync } from "../infra/openclaw-root.js";
-import { resolveRuntimeDeployEntrypointUrl } from "../infra/runtime-process-url.js";
-import { resolveRuntimeArgs, resolveRuntimeWorkerEnv } from "../infra/runtime-worker-url.js";
 import { redactSensitiveText } from "../logging/redact.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { KeyedAsyncQueue } from "../plugin-sdk/keyed-async-queue.js";
@@ -34,6 +29,7 @@ import {
   publishExpandedBundle,
 } from "./node-worker-bundle-cache.js";
 import { packagedNodeWorkerBundleDirectory } from "./node-worker-bundle-paths.js";
+import { prewarmNodeWorkerBundle } from "./node-worker-bundle-prewarm.js";
 import { snapshotNodeWorkerEnv } from "./node-worker-environment.js";
 import {
   NodeWorkerTransferHttpError,
@@ -45,7 +41,6 @@ const BUNDLE_HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const STAGING_PATTERN = /^\.staging-[a-f0-9]{64}-/u;
 const PREVIOUS_PATTERN = /^[a-f0-9]{64}\.previous-/u;
 const BUNDLE_DELETE_BATCH = 16;
-const WORKER_PREWARM_TIMEOUT_MS = 10 * 60_000;
 const DOWNLOAD_TRANSIENT_CODES = new Set([
   "ARTIFACT_RANGE_MISMATCH",
   "ECONNRESET",
@@ -64,7 +59,6 @@ const DOWNLOAD_TRANSIENT_CODES = new Set([
   "HTTP_503",
   "HTTP_504",
 ]);
-const execFileAsync = promisify(execFile);
 const log = createSubsystemLogger("node/worker-bundle");
 
 async function readErrorResponseCode(response: IncomingMessage): Promise<string> {
@@ -449,43 +443,12 @@ export class NodeWorkerBundleInstaller {
         if (input.bundlePrewarm) {
           const prewarmSignal = params.signal;
           if (!this.#prewarmedBundles.has(destination)) {
-            const entry = resolveRuntimeDeployEntrypointUrl("worker", destination);
-            const prewarmStarted = performance.now();
-            let outcome = "failed";
-            try {
-              await execFileAsync(
-                process.execPath,
-                [...resolveRuntimeArgs(), fileURLToPath(entry), "--internal-worker-prewarm"],
-                {
-                  cwd: destination,
-                  env: resolveRuntimeWorkerEnv(entry, this.#workerEnv),
-                  timeout: WORKER_PREWARM_TIMEOUT_MS,
-                  windowsHide: true,
-                  ...(prewarmSignal ? { signal: prewarmSignal } : {}),
-                },
-              );
-              outcome = "success";
-            } catch (error) {
-              if (prewarmSignal?.aborted) {
-                throw prewarmSignal.reason ?? error;
-              }
-              throw error;
-            } finally {
-              const fields = {
-                bundleHash: input.build.bundleHash,
-                phase: "runtime.prewarm",
-                outcome,
-                durationMs: Math.round(performance.now() - prewarmStarted),
-              };
-              try {
-                log.info("Worker bundle prewarm", {
-                  ...fields,
-                  consoleMessage: `Worker bundle prewarm ${JSON.stringify(fields)}`,
-                });
-              } catch {
-                /* Diagnostics cannot change the child execution result. */
-              }
-            }
+            await prewarmNodeWorkerBundle({
+              directory: destination,
+              bundleHash: input.build.bundleHash,
+              env: this.#workerEnv,
+              signal: prewarmSignal,
+            });
             this.#prewarmedBundles.add(destination);
           }
         }

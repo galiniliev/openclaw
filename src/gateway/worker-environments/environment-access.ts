@@ -105,6 +105,7 @@ type WorkerEnvironmentAccessOptions = {
   preparedRepositorySource?: ReturnType<
     typeof createWorkerProviderIntent
   >["preparedRepositorySource"];
+  takeInitialSnapshot?: ReturnType<typeof createWorkerProviderIntent>["takeInitialSnapshot"];
   readStartStatus: (record: WorkerEnvironmentRecord) => WorkerEnvironmentStartStatus | undefined;
   store: WorkerEnvironmentStore;
   placementStore?: Pick<WorkerSessionPlacementGate, "validateWorkspaceRecovery">;

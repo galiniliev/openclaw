@@ -191,6 +191,32 @@ function manifestPath(homeDir: string, manifestRef: string) {
 
 describe("prepared node workspace ownership", () => {
   it.each([false, true])(
+    "consumes exact initial snapshot content facts without an inventory (mismatch: %s)",
+    async (mismatch) => {
+      const f = await fixture(true);
+      await f.runtime.prepare(f.registration);
+      const capture = vi.spyOn(workspaceCommands, "captureManifest");
+      const claim = {
+        ...binding,
+        initialSnapshot: {
+          checkpointId: "checkpoint-fresh",
+          baseCommit: f.baseCommit,
+          sourceManifestRef: f.registration.sourceManifestRef,
+          preparedManifestRef: mismatch
+            ? `sha256:${"f".repeat(64)}`
+            : f.registration.preparedManifestRef,
+        },
+      };
+      if (mismatch) {
+        await expect(f.runtime.prepare(claim)).rejects.toThrow("initial snapshot does not match");
+      } else {
+        await expect(f.runtime.prepare(claim)).resolves.toMatchObject({ baseCommit: f.baseCommit });
+      }
+      expect(capture).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
     "inventories contents once at first claim (setup writes: %s)",
     async (setupWrites) => {
       const f = await fixture(setupWrites);

@@ -471,6 +471,8 @@ export type WorkerProvider = {
         prepare: (transport: {
           /** Actual base of the selected compatible snapshot; host admission decides reuse. */
           snapshotBaseCommit?: string;
+          /** Only a newly allocated fork, before any session use or provider replay. */
+          initialSnapshotCheckpointId?: string;
           /** Operator-owned worker initializer; its bounded environment never returns to the host. */
           setupInitializer?: { command: string[]; envKeys: string[] };
           runScript: (script: string, signal: AbortSignal) => Promise<string>;

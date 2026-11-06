@@ -27,6 +27,8 @@ import {
   packagedNodeWorkerBundleDirectory,
   resolveNodeWorkerBundleDirectory,
 } from "./node-worker-bundle-paths.js";
+import { prewarmNodeWorkerBundle } from "./node-worker-bundle-prewarm.js";
+import { snapshotNodeWorkerEnv } from "./node-worker-environment.js";
 import { replaceNodeWorkerDirectory } from "./node-worker-workspace-replacement.js";
 
 const INSTALL_RECEIPT = "bootstrap-receipt.json";
@@ -77,6 +79,8 @@ export async function validateInstalledBundle(
   destination: string,
   expected: WorkerAdmissionHandshake,
 ): Promise<boolean> {
+  const started = performance.now();
+  let valid = false;
   try {
     const bundleDir = resolveNodeWorkerBundleDirectory(destination, expected.bundleHash);
     const rootStats = await fsp.lstat(bundleDir);
@@ -97,7 +101,8 @@ export async function validateInstalledBundle(
     }
     const root = await fsp.realpath(bundleDir);
     const entry = await fsp.realpath(path.join(root, WORKER_BUNDLE_ENTRY_PATH));
-    return isPathInside(root, entry) && (await fsp.stat(entry)).isFile();
+    valid = isPathInside(root, entry) && (await fsp.stat(entry)).isFile();
+    return valid;
   } catch (error) {
     // Invalid inventory is regenerable; filesystem failures still need a diagnostic.
     const errorCode = extractErrorCode(error);
@@ -108,6 +113,21 @@ export async function validateInstalledBundle(
       );
     }
     return false;
+  } finally {
+    const fields = {
+      bundleHash: expected.bundleHash,
+      phase: "runtime.validation",
+      outcome: valid ? "valid" : "invalid",
+      durationMs: Math.round(performance.now() - started),
+    };
+    try {
+      log.info("Worker bundle validation", {
+        ...fields,
+        consoleMessage: `Worker bundle validation ${JSON.stringify(fields)}`,
+      });
+    } catch {
+      /* Diagnostics do not own validation. */
+    }
   }
 }
 
@@ -149,6 +169,13 @@ export async function preparePackagedNodeWorkerBundle(
     throw new Error("Worker bundle package root is unavailable");
   }
   if (await validateInstalledBundle(destination, input.build)) {
+    if (!verifyOnly) {
+      await prewarmNodeWorkerBundle({
+        directory: destination,
+        bundleHash: input.build.bundleHash,
+        env: snapshotNodeWorkerEnv(process.env),
+      });
+    }
     return;
   }
   if (verifyOnly) {
@@ -176,4 +203,9 @@ export async function preparePackagedNodeWorkerBundle(
   } finally {
     await fsp.rm(operationRoot, { recursive: true, force: true });
   }
+  await prewarmNodeWorkerBundle({
+    directory: destination,
+    bundleHash: input.build.bundleHash,
+    env: snapshotNodeWorkerEnv(process.env),
+  });
 }

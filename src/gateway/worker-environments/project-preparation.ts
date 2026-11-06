@@ -130,12 +130,18 @@ export function createWorkerProjectPreparation(params: {
 }): {
   project: ProjectPreparation;
   getPreparedWorkspace: () => PreparationResult["preparedWorkspace"];
+  getInitialSnapshot: () =>
+    | import("../../worker/node-workspace-prepared-protocol.js").NodeWorkerInitialSnapshot
+    | undefined;
   close: () => void;
 } {
   if (!/^[A-Za-z0-9_-]{1,128}$/u.test(params.namespace)) {
     throw new Error("Worker project preparation namespace is invalid");
   }
   const preparation = params.preparation;
+  let initialSnapshot:
+    | import("../../worker/node-workspace-prepared-protocol.js").NodeWorkerInitialSnapshot
+    | undefined;
   const runSetupScript = params.runSetupScript === false ? false : preparation?.runSetupScript;
   if (preparation?.setupRecipe && runSetupScript !== false && !params.setupAuthorized) {
     throw new Error("Prepared project setup requires operator.admin authorization");
@@ -393,6 +399,19 @@ export function createWorkerProjectPreparation(params: {
     }
     if (result.preparedWorkspace) {
       preparedWorkspace = result.preparedWorkspace;
+      if (
+        params.snapshotStart &&
+        preparation?.purpose === "session" &&
+        transport.initialSnapshotCheckpointId &&
+        transport.snapshotBaseCommit
+      ) {
+        initialSnapshot = {
+          checkpointId: transport.initialSnapshotCheckpointId,
+          baseCommit: sourceInput.baseCommit,
+          sourceManifestRef: preparedWorkspace.sourceManifestRef,
+          preparedManifestRef: preparedWorkspace.preparedManifestRef,
+        };
+      }
       return { ...result, baseCommit: sourceInput.baseCommit };
     }
     // Seed transfer can outlive its caller. Repository code starts only under
@@ -439,6 +458,7 @@ export function createWorkerProjectPreparation(params: {
   };
   return {
     getPreparedWorkspace: () => preparedWorkspace,
+    getInitialSnapshot: () => initialSnapshot,
     project: {
       key: params.project.key,
       baseCommit: params.project.baseCommit,

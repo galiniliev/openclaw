@@ -5,7 +5,17 @@ import os from "node:os";
 import path from "node:path";
 import * as timers from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  onTestFinished,
+  vi,
+} from "vitest";
 import {
   fixtureReceiptClientSource,
   openFixtureReceiptChannel,
@@ -379,6 +389,24 @@ describe("node worker bundle installer", () => {
     expect(() => resolveNodeWorkerBundleDirectory(foreign, fixture.input.build.bundleHash)).toThrow(
       "owning package artifact",
     );
+  });
+
+  it("warms the existing worker compile cache before snapshot capture without executing during inspection", async () => {
+    const marker = path.join(root, "snapshot-worker-prewarmed");
+    const cache = path.join(root, "worker-compile-cache");
+    vi.stubEnv("NODE_COMPILE_CACHE", cache);
+    vi.stubEnv("NODE_DISABLE_COMPILE_CACHE", undefined);
+    onTestFinished(() => {
+      vi.unstubAllEnvs();
+    });
+    const fixture = await bundleFixture({ prewarmMarker: marker, compileCacheDisabled: false });
+    await prepareLocalArchive(fixture);
+    await preparePackagedNodeWorkerBundle(fixture.input);
+    await expectText(marker, "ready");
+    expect(await fs.readdir(cache)).not.toHaveLength(0);
+    await fs.unlink(marker);
+    await preparePackagedNodeWorkerBundle(fixture.input, true);
+    await expect(fs.access(marker)).rejects.toThrow();
   });
 
   async function localSetup() {

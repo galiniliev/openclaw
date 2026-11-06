@@ -150,7 +150,20 @@ export class NodeWorkerPreparedWorkspaceRuntime {
           // Exact bind replay belongs to the session and must preserve its later edits.
           const hashMemo: WorkspaceHashMemo = new Map();
           baseCommit = await readPreparedBase(registeredWorkspace);
+          const snapshot = input.initialSnapshot;
           if (
+            snapshot &&
+            (snapshot.baseCommit !== baseCommit ||
+              snapshot.sourceManifestRef !== registeredWorkspace.sourceManifestRef ||
+              snapshot.preparedManifestRef !== registeredWorkspace.preparedManifestRef)
+          ) {
+            throw new Error("INVALID_REQUEST: initial snapshot does not match registered contents");
+          }
+          // The fresh dispatch consumes its snapshot custody once. No available
+          // workspace command can write before this claim; idle/replayed claims
+          // carry no such fact and still inventory their current contents.
+          if (
+            !snapshot &&
             (await captureManifest({
               workspaceDir: registeredWorkspace.workspaceDir,
               manifestHome: registeredWorkspace.homeDir,

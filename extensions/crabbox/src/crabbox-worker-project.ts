@@ -125,6 +125,7 @@ export async function prepareCrabboxProjectFiles(
   params: LeaseCommandContext & {
     project: ProjectPreparation;
     snapshotBaseCommit?: string;
+    initialSnapshotCheckpointId?: string;
     timeoutMs: () => number;
     signal?: AbortSignal;
     inspectPrepared?: { baseCommit?: string };
@@ -183,6 +184,7 @@ export async function prepareCrabboxProjectFiles(
     }
     return await params.project.prepare({
       snapshotBaseCommit: params.snapshotBaseCommit,
+      initialSnapshotCheckpointId: params.initialSnapshotCheckpointId,
       setupInitializer: params.setupInitializer,
       ...(params.recordRecipePreparation
         ? { recordRecipePreparation: params.recordRecipePreparation }

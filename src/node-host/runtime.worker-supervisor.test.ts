@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { createServer } from "node:http";
 import path from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 import {
   NODE_WORKER_PRIVATE_COMMANDS,
@@ -10,9 +10,9 @@ import {
 } from "../infra/node-commands.js";
 import * as secretRegistry from "../logging/secret-redaction-registry.js";
 import { resetSecretRedactionRegistryForTest } from "../logging/secret-redaction-registry.test-support.js";
+import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import { reserveTestPortListener } from "../test-utils/port-claims.js";
 import { useStateDatabaseTempDirs } from "../test-utils/state-database-temp-dirs.js";
-import { mockProcessPlatform } from "../test-utils/vitest-spies.js";
 import type { NodeHostClient } from "./client.js";
 import { NodeWorkerJournalWorker } from "./node-worker-journal-worker.js";
 import { NodeWorkerLaunchStore } from "./node-worker-launch-store.js";
@@ -33,7 +33,10 @@ vi.mock("./mcp.js", () => ({
 
 // mock-isolation: the supervisor owns real workers here, but no plugin-host services are enabled.
 vi.mock("./plugin-node-host.js", () => ({
-  ensureNodeHostPluginRegistry: vi.fn(async () => undefined),
+  ensureNodeHostPluginRegistry: vi.fn(async () => ({
+    ready: Promise.resolve(),
+    isReady: () => true,
+  })),
   hasRegisteredNodeHostCommandActiveWork: vi.fn(() => false),
   isRegisteredNodeHostCommandDuplex: vi.fn(() => false),
   listRegisteredNodeHostCapsAndCommands: () => ({ caps: [], commands: [], nodePluginTools: [] }),
@@ -50,8 +53,6 @@ vi.mock("./skills.js", () => ({
 const tempDirs = useStateDatabaseTempDirs();
 
 it("keeps a claimed worker alive across invoke cancel and reconnect until runtime close", async () => {
-  const platform = mockProcessPlatform("linux");
-  onTestFinished(() => platform.mockRestore());
   const fixture = worker.writeNodeWorkerFixture(tempDirs.make("node-worker-runtime-"));
   fs.mkdirSync(fixture.stateDir, { recursive: true, mode: 0o700 });
   fs.chmodSync(fixture.stateDir, 0o700);
@@ -71,6 +72,8 @@ it("keeps a claimed worker alive across invoke cancel and reconnect until runtim
     }
     return {} as T;
   };
+  // Admit this fresh fixture database before asynchronous journal readers start.
+  openOpenClawStateDatabase({ env: fixture.env });
   const prepared = await prepareNodeHostRuntime({
     config: {
       nodeHost: { skills: { enabled: false }, workerRuns: { enabled: true, capacity: 2 } },
@@ -103,7 +106,10 @@ it("keeps a claimed worker alive across invoke cancel and reconnect until runtim
     const launching = invoke("invoke-launch", "worker.launch.v1", input);
     // Hold the completed launch response so cancellation exercises the admitted worker's lifetime.
     await launchResponseEntered.promise;
-    expect((await store.get(input.launchId))?.state).toBe("running");
+    const launched = await store.get(input.launchId);
+    expect(launched?.state, launched?.errorText ?? "worker launch has no failure diagnostic").toBe(
+      "running",
+    );
 
     runtime.cancel("invoke-launch");
     await runtime.cancelAll();

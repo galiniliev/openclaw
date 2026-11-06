@@ -193,6 +193,7 @@ export function createWorkerEnvironmentService(options: WorkerEnvironmentService
     getCleanupError: (record) => sessionAttachments.getCleanupError(record),
     readStartStatus: providerLifecycle.readStartStatus,
     preparedRepositorySource: providerLifecycle.preparedRepositorySource,
+    takeInitialSnapshot: providerLifecycle.takeInitialSnapshot,
     prepareCurrentBundle: async () => await prepareInstallation("bundle"),
     now,
     identityResolverFor: providerLifecycle.identityResolverFor,

@@ -562,9 +562,13 @@ export async function prepareRepositoryWorkerProjectSource(params: AdmissionRequ
     ) {
       sourceChanged();
     }
-    const after = await readRepository(current, assertSource, signal);
-    if (after.private !== metadata.private || after.repositoryId !== repositoryId) {
-      sourceChanged();
+    // The pinned query observes repository identity, visibility and object together.
+    // URL-keyed REST object reads still need their repository-instance sandwich.
+    if (!currentPinnedRepository) {
+      const after = await readRepository(current, assertSource, signal);
+      if (after.private !== metadata.private || after.repositoryId !== repositoryId) {
+        sourceChanged();
+      }
     }
     assertSource();
     identity = current;

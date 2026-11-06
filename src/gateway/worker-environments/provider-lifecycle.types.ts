@@ -15,6 +15,7 @@ import type { WorkerInstallationArtifact } from "./bundle.js";
 import type { WorkerCredentialBroker } from "./credential-broker.js";
 import type { GatewayNodeWorkerBundleInstall } from "./node-worker-bundle-installer.js";
 import type { WorkerSessionPlacementGate } from "./placement-worker-gate.js";
+import type { WorkerInitialSnapshotCustody } from "./preparation-identity.js";
 import type { WorkerPreparationArtifacts } from "./preparation-identity.schema.js";
 import type { createWorkerProjectPreparation } from "./project-preparation.js";
 import type { WorkerProviderRepositorySource } from "./provider-project-preparation.js";
@@ -35,6 +36,7 @@ export type WorkerProviderResumeProvision = (
   beforeProvision?: () => void,
   repositorySource?: WorkerProviderRepositorySource,
   originalDisk?: RetainedWorkspaceAuthority,
+  recordInitialSnapshot?: (custody: WorkerInitialSnapshotCustody) => void,
 ) => Promise<WorkerEnvironmentRecord>;
 
 export type WorkerProviderIntentOptions = Pick<
@@ -104,6 +106,7 @@ export type WorkerProviderLifecycleInputOptions = {
     sessionKey: string;
     preparationKey: string;
     cacheKey: string;
+    initialSnapshot?: import("../../worker/node-workspace-prepared-protocol.js").NodeWorkerInitialSnapshot;
     signal?: AbortSignal;
     assertCurrent: () => void;
   }) => Promise<NodeWorkerPreparedWorkspaceResult>;

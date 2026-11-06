@@ -17,6 +17,7 @@ type Options = Pick<
   preparedRepositorySource?: ReturnType<
     typeof createWorkerProviderIntent
   >["preparedRepositorySource"];
+  takeInitialSnapshot?: ReturnType<typeof createWorkerProviderIntent>["takeInitialSnapshot"];
 };
 
 /** Host admission and the node's one-session claim share this binding owner. */
@@ -90,17 +91,31 @@ export function createWorkerPreparedWorkspaceBinding(options: Options) {
       repository?.assertCurrent();
     };
     assertBindingCurrent();
-    const prepared = await measureWorkerProvisionPhase(record, "workspace.binding.node", () =>
-      bind({ ...binding, assertCurrent: assertBindingCurrent }),
-    );
-    assertBindingCurrent();
-    if (repository) {
-      await measureWorkerProvisionPhase(record, "workspace.binding.source", () =>
-        repository.revalidate(request.signal),
-      );
+    const initialSnapshot = admittedIntent && options.takeInitialSnapshot?.(admittedIntent, record);
+    // Both operations retain this attachment owner. Drain the node claim even
+    // when source access fails, before the caller can clean up or release it.
+    const [prepared, source] = await Promise.allSettled([
+      measureWorkerProvisionPhase(record, "workspace.binding.node", () =>
+        bind({
+          ...binding,
+          ...(initialSnapshot ? { initialSnapshot } : {}),
+          assertCurrent: assertBindingCurrent,
+        }),
+      ),
+      repository
+        ? measureWorkerProvisionPhase(record, "workspace.binding.source", () =>
+            repository.revalidate(request.signal),
+          )
+        : Promise.resolve(),
+    ]);
+    if (prepared.status === "rejected") {
+      throw prepared.reason;
+    }
+    if (source.status === "rejected") {
+      throw source.reason;
     }
     assertBindingCurrent();
-    return { ...prepared, assertCurrent: assertBindingCurrent };
+    return { ...prepared.value, assertCurrent: assertBindingCurrent };
   };
 
   return bindPreparedWorkspace;

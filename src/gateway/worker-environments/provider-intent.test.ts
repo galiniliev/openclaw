@@ -9,7 +9,10 @@ import * as support from "./service.test-support.js";
 describe("prepared worker intent admission", () => {
   support.setupWorkerEnvironmentServiceSuite();
 
-  async function fixture(setup = false) {
+  async function fixture(
+    setup = false,
+    resumeProvision?: Parameters<typeof createWorkerProviderIntent>[0]["resumeProvision"],
+  ) {
     const { root: projectPath } = await repository("project", {
       setup,
       disableSigning: true,
@@ -31,7 +34,7 @@ describe("prepared worker intent admission", () => {
       projectNamespace: "gateway-test",
       providerFor: () => provider,
       prepareNodeArtifacts,
-      resumeProvision: async (record) => record,
+      resumeProvision: resumeProvision ?? (async (record) => record),
       isStopping: () => false,
       withLock: async (_environmentId, task) => task(),
     });
@@ -44,6 +47,65 @@ describe("prepared worker intent admission", () => {
     ) => owner.createWithProfile("development", key, { projectPath, ...options }, admitted);
     return { owner, provider, projectPath, prepareNodeArtifacts, prepare, create };
   }
+
+  it.each(["exact", "other environment", "other node", "replay", "new session disk"] as const)(
+    "consumes fresh snapshot provenance once for %s",
+    async (mode) => {
+      const snapshot = {
+        checkpointId: "checkpoint-fresh",
+        baseCommit: "a".repeat(40),
+        sourceManifestRef: `sha256:${"b".repeat(64)}`,
+        preparedManifestRef: `sha256:${"c".repeat(64)}`,
+      };
+      const f = await fixture(
+        false,
+        async (record, _provider, _signal, _retain, before, _source, _disk, recordSnapshot) => {
+          before?.();
+          recordSnapshot?.({
+            environmentId: record.environmentId,
+            provisionOperationId: record.provisionOperationId,
+            nodeDeviceId: "node-fresh",
+            snapshot,
+          });
+          return {
+            ...record,
+            nodeDeviceId: "node-fresh",
+            ...(mode === "new session disk"
+              ? {
+                  retention: {
+                    policy: { mode: "session-disk" as const, computeWindowSeconds: 60 },
+                    owner: {
+                      sessionId: "session",
+                      sessionKey: "agent:main:session",
+                      agentId: "main",
+                    },
+                    ownerBinding: "e".repeat(64),
+                    desiredState: "running" as const,
+                    receipt: null,
+                    operation: null,
+                  },
+                }
+              : {}),
+          };
+        },
+      );
+      const intent = await f.prepare();
+      const record = await f.create("fresh-custody", {}, intent);
+      const selected = {
+        ...record,
+        ...(mode === "other environment" ? { environmentId: "other" } : {}),
+        ...(mode === "other node" ? { nodeDeviceId: "other" } : {}),
+      };
+      expect(f.owner.takeInitialSnapshot(intent, selected)).toEqual(
+        mode === "other environment" || mode === "other node" ? undefined : snapshot,
+      );
+      expect(f.owner.takeInitialSnapshot(intent, record)).toBeUndefined();
+      if (mode === "replay") {
+        const replay = await f.create("fresh-custody", {}, intent);
+        expect(f.owner.takeInitialSnapshot(intent, replay)).toBeUndefined();
+      }
+    },
+  );
 
   it("keeps empty workspaces cold on providers with only setup commands", async () => {
     const f = await fixture();

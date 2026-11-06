@@ -29,11 +29,11 @@ import {
   readWorkerProjectSnapshot,
   workerProjectReplayIdentity,
 } from "./project-preparation.js";
+import { createWorkerProviderIntentAdmission } from "./provider-intent-admission.js";
 import type {
   WorkerProviderIntentOptions,
   WorkerProviderLifecycleOptions,
 } from "./provider-lifecycle.types.js";
-import type { WorkerProviderRepositorySource } from "./provider-project-preparation.js";
 import { prepareRepositoryWorkerProjectSource } from "./repository-project-admission.js";
 import type { RepositoryWorkerProjectSnapshot } from "./repository-project-source.schema.js";
 import { createWorkerSessionDiskRetention } from "./retained-lease-lifecycle.js";
@@ -99,29 +99,14 @@ export async function failUnallocatedImageIntent(
 
 /** Admits one immutable allocation intent before the provider lifecycle can allocate a lease. */
 export function createWorkerProviderIntent(options: WorkerProviderIntentOptions) {
-  const preparedIntents = new WeakMap<
-    WorkerProviderPreparedIntent,
-    { profileId: string; assertCurrent: () => void; repository?: WorkerProviderRepositorySource }
-  >();
-  const assertPreparedIntentCurrent = (profileId: string, intent: WorkerProviderPreparedIntent) => {
-    const prepared = preparedIntents.get(intent);
-    if (!prepared || prepared.profileId !== profileId) {
-      throw serviceError("invalid_state", "Worker preparation is not owned by this lifecycle");
-    }
-    prepared.assertCurrent();
-  };
+  const {
+    preparedIntents,
+    assertPreparedIntentCurrent,
+    preparedRepositorySource,
+    takeInitialSnapshot,
+    requireProfileId,
+  } = createWorkerProviderIntentAdmission({ isStopping: options.isStopping });
   const { store, withLock, providerFor, resumeProvision } = options;
-  const requireProfileId = (profileId: string, signal?: AbortSignal) => {
-    signal?.throwIfAborted();
-    if (options.isStopping()) {
-      throw serviceError("invalid_state", "Worker environment service is stopping");
-    }
-    const normalizedProfileId = profileId.trim();
-    if (!normalizedProfileId || normalizedProfileId !== profileId) {
-      throw serviceError("invalid_profile", "Worker profile id must be non-empty and trimmed");
-    }
-    return normalizedProfileId;
-  };
   const resolveProfile = (
     profileId: string,
     createOptions: WorkerProviderIntentPreparationOptions,
@@ -703,6 +688,12 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
         undefined,
         beforeProvision(admitted),
         preparedIntents.get(admitted)?.repository,
+        undefined,
+        (custody) => {
+          assertPreparedIntentCurrent(profileId, admitted);
+          const prepared = preparedIntents.get(admitted)!;
+          prepared.initialSnapshot = custody;
+        },
       );
     });
   };
@@ -711,9 +702,7 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
     prepareRetention,
     assertPreparedIntentCurrent,
     createWithProfile,
-    preparedRepositorySource(this: void, profileId: string, intent: WorkerProviderPreparedIntent) {
-      assertPreparedIntentCurrent(profileId, intent);
-      return preparedIntents.get(intent)?.repository;
-    },
+    preparedRepositorySource,
+    takeInitialSnapshot,
   };
 }

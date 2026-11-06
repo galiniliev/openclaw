@@ -7,7 +7,10 @@ import { closeOpenClawStateDatabaseByPathAsync } from "../../state/openclaw-stat
 import { createWorkerPreparationIdentity } from "./preparation-identity.js";
 import { readWorkerPreparation } from "./preparation-identity.schema.js";
 import { PRESENCE_REPOSITORY, usePreparedPoolFixture } from "./prepared-pool.test-support.js";
-import { readWorkerProjectEnvironmentRecipe } from "./project-preparation.js";
+import {
+  createWorkerProjectPreparation,
+  readWorkerProjectEnvironmentRecipe,
+} from "./project-preparation.js";
 import {
   createProjectPreparationFixture,
   runProjectScriptWithGitProbe,
@@ -25,6 +28,56 @@ vi.mock("./repository-project-admission.js", () => ({
 
 describe("prepared project retention compatibility", () => {
   const fixture = usePreparedPoolFixture();
+
+  it("keeps reserve, pinned, cold and replayed preparation outside initial snapshot custody", async () => {
+    const f = await createProjectPreparationFixture(
+      await fs.mkdtemp(path.join(fixture.root, "custody-")),
+    );
+    const initial = await f.preparedOperation();
+    const installed = await initial.project.prepare(f);
+    await requireGit(installed.preparedWorkspace!.workspaceDir, [
+      "remote",
+      "add",
+      "origin",
+      PRESENCE_REPOSITORY.source.url,
+    ]);
+    initial.close();
+    const recipe = await readWorkerProjectEnvironmentRecipe(f.project);
+    const project = {
+      key: f.project.key,
+      baseCommit: f.project.baseCommit,
+      source: PRESENCE_REPOSITORY.source,
+    };
+    for (const mode of ["fresh", "reserve", "pinned", "cold", "replay"] as const) {
+      const operation = createWorkerProjectPreparation({
+        project,
+        namespace: "gateway",
+        requireCurrent() {},
+        revalidateRepositorySource: async () => {},
+        setupAuthorized: true,
+        snapshotStart: mode === "pinned" ? undefined : true,
+        preparation: {
+          key: "a".repeat(64),
+          cacheKey: "c".repeat(64),
+          purpose: mode === "reserve" ? "reserve" : "session",
+          demandAtMs: 1,
+          setupRecipe: recipe.identity,
+          recipe,
+        },
+      });
+      try {
+        await operation.project.prepare({
+          ...f,
+          snapshotBaseCommit: mode === "cold" ? undefined : f.project.baseCommit,
+          initialSnapshotCheckpointId:
+            mode === "cold" || mode === "replay" ? undefined : "checkpoint-fresh",
+        });
+        expect(operation.getInitialSnapshot() !== undefined).toBe(mode === "fresh");
+      } finally {
+        operation.close();
+      }
+    }
+  });
 
   it("starts admitted B on selected snapshot A and binds the actual prepared base without refreshing content", async () => {
     const f = await createProjectPreparationFixture(
@@ -98,6 +151,7 @@ describe("prepared project retention compatibility", () => {
     const result = await operation.project.prepare({
       ...f,
       snapshotBaseCommit: f.project.baseCommit,
+      initialSnapshotCheckpointId: "checkpoint-fresh-A",
       runScript: async (script) =>
         await runProjectScriptWithGitProbe(script, f.home, (args) => {
           gitCommands.push(args);
@@ -107,6 +161,12 @@ describe("prepared project retention compatibility", () => {
     expect(revalidate).toHaveBeenCalledOnce();
     expect(pack).not.toHaveBeenCalled();
     expect(result.captureRequired).toBeUndefined();
+    expect(operation.getInitialSnapshot()).toEqual({
+      checkpointId: "checkpoint-fresh-A",
+      baseCommit: f.project.baseCommit,
+      sourceManifestRef: workspace.sourceManifestRef,
+      preparedManifestRef: workspace.preparedManifestRef,
+    });
     expect(
       gitCommands.some(
         (args) => args.includes("fsck") || args.includes("index-pack") || args.includes("checkout"),

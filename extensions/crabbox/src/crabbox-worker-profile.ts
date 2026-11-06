@@ -493,6 +493,15 @@ export function supportsCrabboxProjectPreparation(
   return supportsResolvedCrabboxProjectPreparation(resolved);
 }
 
+export function supportsCrabboxRetainedProjectImages(
+  profile: WorkerProfile,
+  machineClass?: string,
+  os?: string,
+): boolean {
+  const { profile: resolved } = resolveCrabboxProvisionProfile(profile, machineClass, os);
+  return resolved.provider === "azure-sandbox" && Boolean(resolved.sdkPython) && resolved.warmImage;
+}
+
 function supportsResolvedCrabboxProjectPreparation(resolved: CrabboxProfile): boolean {
   return (
     Boolean(resolved.warmImage) ||

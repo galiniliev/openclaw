@@ -483,11 +483,17 @@ describe("repository project admission", () => {
     },
   );
 
+  it("revalidates the pinned repository and commit in one atomic remote observation", async () => {
+    const admitted = await prepareRepositoryWorkerProjectSource(initial);
+    fetchImpl.mockClear();
+    await admitted.revalidate();
+    expect(requestPaths()).toEqual(["/graphql"]);
+  });
+
   it.each(["repository", "visibility", "access"] as const)(
-    "rejects %s changes after the immutable-node read",
+    "rejects %s changes in the current immutable-node observation",
     async (change) => {
       const admitted = await prepareRepositoryWorkerProjectSource(initial);
-      const response = { data: { node: repositoryNode() } };
       fetchImpl.mockClear().mockImplementationOnce(async () => {
         if (change === "repository") {
           repositoryId = "R_recreated_project";
@@ -498,10 +504,12 @@ describe("repository project admission", () => {
         if (change === "access") {
           unavailable = true;
         }
-        return new Response(JSON.stringify(response));
+        return change === "access"
+          ? new Response("{}", { status: 404 })
+          : Response.json({ data: { node: repositoryNode() } });
       });
       await expect(admitted.revalidate()).rejects.toThrow();
-      expect(requestPaths()).toEqual(["/graphql", "/repos/acme/project"]);
+      expect(requestPaths()).toEqual(["/graphql"]);
     },
   );
 

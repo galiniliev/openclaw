@@ -88,6 +88,7 @@ type NodeHostPrivateInvokeRuntime = NodeHostInvokeRuntime & {
   workerSupervisor?: NodeWorkerSupervisorControl;
   workerWorkspace?: NodeWorkerWorkspaceRuntime;
   workerComputer?: NodeWorkerComputer;
+  workerPreparation?: Promise<void>;
 };
 
 type McpToolsCallParams = ReturnType<typeof decodeMcpToolsCallParams>;
@@ -294,6 +295,7 @@ export async function handleInvoke(
       gatewayTlsFingerprint: runtime.gatewayTlsFingerprint,
       gatewayCloudflareAccess: runtime.gatewayCloudflareAccess,
       signal: runtime.signal,
+      preparation: runtime.workerPreparation,
     });
     const result = workerSupervisorResult.handled
       ? workerSupervisorResult
@@ -512,12 +514,16 @@ export async function handleInvoke(
         { context, sessionKey: frame.sessionKey, signal: runtime.signal },
         async (invokeContext) =>
           command === NODE_WORKER_DESKTOP_COMPUTER_COMMAND
-            ? await invokeNodeWorkerComputerCommand({
-                paramsJSON: frame.paramsJSON,
-                computer: runtime.workerComputer!,
-                invoke: (innerCommand, paramsJSON) =>
-                  invokePlugin(innerCommand, paramsJSON, undefined, invokeContext),
-              })
+            ? await (async () => {
+                await runtime.workerPreparation;
+                runtime.signal?.throwIfAborted();
+                return await invokeNodeWorkerComputerCommand({
+                  paramsJSON: frame.paramsJSON,
+                  computer: runtime.workerComputer!,
+                  invoke: (innerCommand, paramsJSON) =>
+                    invokePlugin(innerCommand, paramsJSON, undefined, invokeContext),
+                });
+              })()
             : await invokePlugin(command, frame.paramsJSON, io, invokeContext),
       );
       if (pluginResult !== null) {

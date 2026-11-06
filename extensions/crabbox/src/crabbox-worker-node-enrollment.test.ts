@@ -713,12 +713,16 @@ exit ${testCase.status}`,
     fs.writeFileSync(path.join(stateDir, "setup-code"), setupCode);
     const scrubTmp = path.join(home, "scrub-tmp");
     fs.mkdirSync(scrubTmp);
+    const compileCache = path.join(scrubTmp, "openclaw/node-worker-compile-cache/worker-code");
+    fs.mkdirSync(path.dirname(compileCache), { recursive: true });
+    fs.writeFileSync(compileCache, "retained worker bytecode");
     // Redirect the guest's /tmp before executing the real scrub owner.
     execFileSync("sh", ["-c", SCRUB_WORKER_STATE.replace('"/tmp"', JSON.stringify(scrubTmp))], {
       cwd: home,
       env: { HOME: home, PATH: process.env.PATH, TMPDIR: scrubTmp },
     });
     expectAbsent(stateDir);
+    expect(fs.readFileSync(compileCache, "utf8")).toBe("retained worker bytecode");
     expect(fs.readdirSync(path.join(preparedPackage, "worker-artifacts"))).toEqual([
       `${workerBundle.sha256}.tgz`,
     ]);
@@ -735,6 +739,7 @@ exit ${testCase.status}`,
         "connect",
         "--target-file",
         path.join(stateDir, "setup-code"),
+        "--fresh-bootstrap",
         "--ephemeral",
         "--display-name",
         "Bootstrap test",
