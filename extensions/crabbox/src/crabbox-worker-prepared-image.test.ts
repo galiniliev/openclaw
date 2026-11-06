@@ -230,7 +230,8 @@ describe("Crabbox prepared image demand and custody", () => {
     current = projectOptions(events, undefined, { ...next, purpose: "session" });
     current.options.project.prepare.mockResolvedValueOnce(cachedPreparation);
     calls.length = 0;
-    await provider.provision(profile, "prepared-repeat", current.options);
+    const repeated = await provider.provision(profile, "prepared-repeat", current.options);
+    expect(repeated.node?.preparedRuntime).toEqual(current.options.nodeRuntimeIdentity);
     expect(captures).toBe(2);
     expect(calls.find(({ argv }) => argv[2] === "fork")?.argv[3]).toBe("chk_commit_b");
     expect(
@@ -258,6 +259,7 @@ describe("Crabbox prepared image demand and custody", () => {
           : undefined;
       });
       const source = await provider.provision(PROFILE, "runtime-source", current.options);
+      expect(source.node?.preparedRuntime).toBeUndefined();
       await stop(provider, source);
       const image = structuredClone(openWarmImageStore().entries()[0]!.value.image);
       if (scenario === "aged session") {
@@ -271,7 +273,8 @@ describe("Crabbox prepared image demand and custody", () => {
       current.options.nodeRuntimeIdentity.nodeBootstrapSha256 = "f".repeat(64);
       events.length = 0;
       calls.length = 0;
-      await provider.provision(PROFILE, "runtime-next", current.options);
+      const next = await provider.provision(PROFILE, "runtime-next", current.options);
+      expect(next.node?.preparedRuntime).toEqual(current.options.nodeRuntimeIdentity);
       expect(calls.find(({ argv }) => argv[2] === "fork")?.argv[3]).toBe("chk_runtime_1");
       expect(current.options.prepareNodeRuntime).toHaveBeenCalledOnce();
       expect(events.indexOf("runtime-install")).toBeLessThan(events.indexOf("enrollment-begun"));

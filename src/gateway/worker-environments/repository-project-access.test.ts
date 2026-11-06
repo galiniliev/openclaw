@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { expect, it, vi } from "vitest";
-import { createDeferred } from "../../../test/helpers/promise.js";
 import { createWorkerEnvironmentAccess } from "./environment-access.js";
 import {
   PREPARATION_KEY,
@@ -22,15 +21,10 @@ it.each([
   "source unavailable",
   "caller revoked",
   "identity replaced",
-  "access lost after binding",
+  "caller revoked after binding",
+  "cancelled binding",
   "admitted intent",
-  "admitted intent access lost after binding",
-  "overlap",
-  "source failure",
-  "node failure",
-  "cancelled overlap",
-  "owner changed overlap",
-] as const)("revalidates source access during %s binding", async (scenario) => {
+] as const)("keeps initial admission and local ownership during %s binding", async (scenario) => {
   const project = structuredClone(PRESENCE_REPOSITORY);
   const record = await fixture.attachSeed("repository", { repository: project });
   if (scenario === "reopened store") {
@@ -38,33 +32,9 @@ it.each([
   }
   let callerCurrent = true;
   let identityCurrent = true;
-  const overlap = [
-    "overlap",
-    "source failure",
-    "node failure",
-    "cancelled overlap",
-    "owner changed overlap",
-  ].includes(scenario);
-  const bindRelease = createDeferred();
-  const sourceRelease = createDeferred();
-  let bindingStarted = false;
-  let validationStarted = false;
-  let firstFinished = false;
-  const abort = new AbortController();
-  const revalidate = async () => {
-    if (overlap) {
-      validationStarted = true;
-      await sourceRelease.promise;
-      if (scenario === "source failure") {
-        firstFinished = true;
-        throw new Error("Source validation failed");
-      }
-    }
-    assert(
-      !scenario.endsWith("access lost after binding"),
-      new Error("Repository access is no longer available"),
-    );
-  };
+  const revalidate = vi.fn(async () => {
+    throw new Error("Startup must reuse initial source admission");
+  });
   const source = () => ({
     project,
     recoverySource: undefined,
@@ -100,19 +70,17 @@ it.each([
   };
   const bind = vi.fn(async (request: { assertCurrent: () => void }) => {
     request.assertCurrent();
-    if (overlap) {
-      bindingStarted = true;
-      await bindRelease.promise;
-      firstFinished = true;
-      if (scenario === "node failure") {
-        throw new Error("Node binding failed");
-      }
-    }
     if (scenario === "reopened store") {
       expect(request).not.toHaveProperty("readNativeCredential");
       expect(request).not.toHaveProperty("retainCredentialCleanup");
     }
     identityCurrent = scenario !== "identity replaced";
+    if (scenario === "caller revoked after binding") {
+      callerCurrent = false;
+    }
+    if (scenario === "cancelled binding") {
+      fixture.abort.abort(new Error("Startup cancelled"));
+    }
     return prepared;
   });
   const access = createWorkerEnvironmentAccess({
@@ -140,44 +108,13 @@ it.each([
     ownerEpoch: record.ownerEpoch,
     sessionId: "session:repository",
     sessionKey: "agent:main:session:repository",
-    signal: abort.signal,
+    signal: fixture.abort.signal,
     readNativeCredential: async () => "synthetic-host-only-credential",
     retainCredentialCleanup: () => {},
     ...(reused ? { admittedIntent: intent } : {}),
     assertCurrent: () => assert(callerCurrent, new Error("Dispatch caller retired")),
   });
-  let finished = false;
-  void result.then(
-    () => {
-      finished = true;
-    },
-    () => {
-      finished = true;
-    },
-  );
-  if (overlap) {
-    try {
-      await vi.waitFor(() => expect(bindingStarted && validationStarted).toBe(true));
-      if (scenario === "source failure") {
-        sourceRelease.resolve();
-      } else {
-        bindRelease.resolve();
-      }
-      await vi.waitFor(() => expect(firstFinished).toBe(true));
-      expect(finished).toBe(false);
-      if (scenario === "cancelled overlap") {
-        abort.abort(new Error("Startup cancelled"));
-      }
-      if (scenario === "owner changed overlap") {
-        callerCurrent = false;
-      }
-    } finally {
-      bindRelease.resolve();
-      sourceRelease.resolve();
-      await Promise.allSettled([result]);
-    }
-  }
-  if (scenario === "reopened store" || scenario === "admitted intent" || scenario === "overlap") {
+  if (scenario === "reopened store" || scenario.startsWith("admitted intent")) {
     const binding = await result;
     expect(binding).toMatchObject(prepared);
     binding.assertCurrent();
@@ -185,23 +122,20 @@ it.each([
     expect(() => binding.assertCurrent()).toThrow("Repository identity changed");
   } else {
     await expect(result).rejects.toThrow(
-      scenario === "node failure"
-        ? "Node binding failed"
-        : scenario === "source failure"
-          ? "Source validation failed"
-          : scenario === "cancelled overlap"
-            ? "Startup cancelled"
-            : scenario === "caller revoked" || scenario === "owner changed overlap"
-              ? "Dispatch caller retired"
-              : /Repository (access|identity)/u,
+      scenario === "cancelled binding"
+        ? "Startup cancelled"
+        : scenario === "caller revoked" || scenario === "caller revoked after binding"
+          ? "Dispatch caller retired"
+          : /Repository (access|identity)/u,
     );
   }
   expect(bind).toHaveBeenCalledTimes(
     scenario === "source unavailable" || scenario === "caller revoked" ? 0 : 1,
   );
+  expect(revalidate).not.toHaveBeenCalled();
   expect(fixture.store.get(record.environmentId)).toEqual(record);
   if (reused) {
     expect(admit).not.toHaveBeenCalled();
-    expect(admittedSource.revalidate).toHaveBeenCalledOnce();
+    expect(admittedSource.revalidate).not.toHaveBeenCalled();
   }
 });

@@ -61,8 +61,7 @@ export function createWorkerPreparedWorkspaceBinding(options: Options) {
       if (!options.projectNamespace) {
         throw new Error("Prepared repository namespace is unavailable");
       }
-      // A ready hit and resumed initial binding must prove current source access too;
-      // a snapshot is reusable content, never a substitute for repository authority.
+      // Initial admission is owned by this dispatch; snapshots provide content only.
       // The intent retains dispatch-owned admission, not the closed provider operation.
       repository =
         (admittedIntent && options.preparedRepositorySource?.(record.profileId, admittedIntent)) ||
@@ -92,30 +91,15 @@ export function createWorkerPreparedWorkspaceBinding(options: Options) {
     };
     assertBindingCurrent();
     const initialSnapshot = admittedIntent && options.takeInitialSnapshot?.(admittedIntent, record);
-    // Both operations retain this attachment owner. Drain the node claim even
-    // when source access fails, before the caller can clean up or release it.
-    const [prepared, source] = await Promise.allSettled([
-      measureWorkerProvisionPhase(record, "workspace.binding.node", () =>
-        bind({
-          ...binding,
-          ...(initialSnapshot ? { initialSnapshot } : {}),
-          assertCurrent: assertBindingCurrent,
-        }),
-      ),
-      repository
-        ? measureWorkerProvisionPhase(record, "workspace.binding.source", () =>
-            repository.revalidate(request.signal),
-          )
-        : Promise.resolve(),
-    ]);
-    if (prepared.status === "rejected") {
-      throw prepared.reason;
-    }
-    if (source.status === "rejected") {
-      throw source.reason;
-    }
+    const prepared = await measureWorkerProvisionPhase(record, "workspace.binding.node", () =>
+      bind({
+        ...binding,
+        ...(initialSnapshot ? { initialSnapshot } : {}),
+        assertCurrent: assertBindingCurrent,
+      }),
+    );
     assertBindingCurrent();
-    return { ...prepared.value, assertCurrent: assertBindingCurrent };
+    return { ...prepared, assertCurrent: assertBindingCurrent };
   };
 
   return bindPreparedWorkspace;

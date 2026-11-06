@@ -332,6 +332,7 @@ export function createWorkerProviderProvisioning(params: {
         cancellation,
         projectOperation?.getPreparedWorkspace(),
         beforeProvision,
+        projectOperation?.getInitialSnapshot(),
       );
       const snapshot = projectOperation?.getInitialSnapshot();
       if (ready.state === "ready" && snapshot) {

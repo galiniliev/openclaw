@@ -109,6 +109,8 @@ describe("repository project admission", () => {
     mocks.matchesAgentLifecycleBindingAsync.mockReset().mockResolvedValue(true);
     mocks.prepareGitHubReadIdentity.mockReset().mockImplementation(async ({ assertActive }) => {
       assertActive();
+      mocks.prepareGitHubReadIdentity.mockClear();
+      fetchImpl.mockClear();
       const admittedToken = token;
       const assertSelected = () => {
         assertActive();
@@ -683,22 +685,27 @@ describe("repository project admission", () => {
       expected: JSON.parse(storedProject),
     });
     expect(reopened.project).toEqual(admitted.project);
+    mocks.prepareGitHubReadIdentity.mockClear();
+    fetchImpl.mockClear();
+    const admittedToken = token;
     token = "rotated-synthetic-token";
     const signal = new AbortController().signal;
     await expect(reopened.prepareGitPack!({ temporaryRoot: "/synthetic", signal })).resolves.toBe(
       "/synthetic/source.pack",
     );
+    expect(mocks.prepareGitHubReadIdentity).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
     expect(mocks.prepareGitPack).toHaveBeenCalledExactlyOnceWith({
       url: repositoryUrl,
       baseCommit: commit,
-      token,
+      token: admittedToken,
       temporaryRoot: "/synthetic",
       signal,
       assertCurrent: expect.any(Function),
     });
   });
 
-  it.each(["caller", "account", "visibility", "during fetch"] as const)(
+  it.each(["caller", "account", "during fetch"] as const)(
     "rejects private pack preparation after %s authority changes",
     async (change) => {
       privateRepository = true;
@@ -712,9 +719,6 @@ describe("repository project admission", () => {
       }
       if (change === "account") {
         selected = false;
-      }
-      if (change === "visibility") {
-        privateRepository = false;
       }
       if (change === "during fetch") {
         mocks.prepareGitPack.mockImplementationOnce(async () => {

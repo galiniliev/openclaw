@@ -234,7 +234,17 @@ export type WorkerLease = {
   /** The SSH account also owns processes unrelated to this worker lease. */
   sharedHost?: boolean;
   desktop?: WorkerDesktopEndpoint;
-} & ({ ssh: WorkerSshEndpoint; node?: never } | { node: { deviceId: string }; ssh?: never });
+} & (
+  | { ssh: WorkerSshEndpoint; node?: never }
+  | {
+      node: {
+        deviceId: string;
+        /** Completed runtime preparation on this newly allocated snapshot consumer, before user code. */
+        preparedRuntime?: WorkerNodeRuntimeIdentity;
+      };
+      ssh?: never;
+    }
+);
 
 /** Authoritative inspection result for an already-known worker lease. */
 export type WorkerLeaseStatus =

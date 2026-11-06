@@ -593,7 +593,6 @@ export async function prepareRepositoryWorkerProjectSource(params: AdmissionRequ
       ? {
           prepareGitPack: async (input: { temporaryRoot: string; signal: AbortSignal }) => {
             assertAdmission();
-            await revalidate(input.signal);
             const readIdentity = identity;
             const assertFetchCurrent = () => {
               input.signal.throwIfAborted();
@@ -614,7 +613,6 @@ export async function prepareRepositoryWorkerProjectSource(params: AdmissionRequ
               assertCurrent: assertFetchCurrent,
             });
             assertFetchCurrent();
-            await revalidate(input.signal);
             assertAdmission();
             return pack;
           },

@@ -4,6 +4,7 @@ import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { requireGit } from "../../agents/worktrees/git.js";
 import { NodeWorkerPreparedWorkspaceRuntime } from "../../node-host/node-worker-prepared-workspace.js";
 import { closeOpenClawStateDatabaseByPathAsync } from "../../state/openclaw-state-db-cache.js";
+import { completeWorkerNodeSetupForTest } from "./node-enrollment.test-support.js";
 import { createWorkerPreparationIdentity } from "./preparation-identity.js";
 import { readWorkerPreparation } from "./preparation-identity.schema.js";
 import { PRESENCE_REPOSITORY, usePreparedPoolFixture } from "./prepared-pool.test-support.js";
@@ -16,7 +17,9 @@ import {
   runProjectScriptWithGitProbe,
 } from "./project-preparation.test-support.js";
 import { createWorkerProviderIntent } from "./provider-intent.js";
+import { createWorkerNodeProvisioning } from "./provider-node-provisioning.js";
 import { prepareWorkerProviderProject } from "./provider-project-preparation.js";
+import { BUNDLE_ARTIFACT } from "./service.test-support.js";
 import { prepareWorkerProjectSnapshot, workerProjectSeedKey } from "./workspace-git-base.js";
 
 const sourceAdmission = vi.hoisted(() =>
@@ -158,7 +161,7 @@ describe("prepared project retention compatibility", () => {
           return undefined;
         }),
     });
-    expect(revalidate).toHaveBeenCalledOnce();
+    expect(revalidate).not.toHaveBeenCalled();
     expect(pack).not.toHaveBeenCalled();
     expect(result.captureRequired).toBeUndefined();
     expect(operation.getInitialSnapshot()).toEqual({
@@ -223,6 +226,114 @@ describe("prepared project retention compatibility", () => {
       "private edit\n",
     );
   });
+
+  it.each(["fresh", "reused", "wrong runtime", "wrong mode", "post-start writer"] as const)(
+    "carries completed runtime preparation only for an unchanged %s snapshot consumer",
+    async (mode) => {
+      const profile = fixture.profile();
+      const preparation = profile.project.preparation;
+      const recipe = {
+        source: "none" as const,
+        inputs: {},
+        env: {},
+        ...(mode === "post-start writer" ? { postStart: ["touch private-file"] } : {}),
+      };
+      const requested = await fixture.store.createIntent({
+        environmentId: "runtime-reuse",
+        providerId: fixture.provider.id,
+        profileId: "development",
+        provisionOperationId: "provision:runtime-reuse",
+        profileSnapshot: {
+          ...profile,
+          project: { ...profile.project, preparation: { ...preparation, recipe } },
+        },
+      });
+      await fixture.store.transition({
+        environmentId: requested.environmentId,
+        from: "requested",
+        to: "provisioning",
+      });
+      const pending = await fixture.store.ensureNodeEnrollment(requested.environmentId);
+      await completeWorkerNodeSetupForTest({
+        baseDir: fixture.root,
+        store: fixture.store,
+        setupId: pending.nodeSetupId!,
+        deviceId: "node",
+        completedAtMs: 1,
+      });
+      const record = fixture.store.get(requested.environmentId)!;
+      const ensureNodeWorkerBundle = vi.fn<
+        NonNullable<Parameters<typeof createWorkerNodeProvisioning>[0]["ensureNodeWorkerBundle"]>
+      >(async () => ({
+        bundleHash: preparation.artifacts.workerBundleHash,
+        openclawVersion: "2026.8.1",
+        protocolFeatures: [],
+      }));
+      const owner = createWorkerNodeProvisioning({
+        store: fixture.store,
+        now: () => 1,
+        isStopping: () => false,
+        ownerSignal: fixture.abort.signal,
+        prepareInstallation: async () => ({
+          ...BUNDLE_ARTIFACT,
+          tarballSha256: preparation.artifacts.workerArchiveSha256,
+        }),
+        ensureNodeWorkerBundle,
+        registerPreparedWorkspace: async () => {},
+        acceptInitial: async (current) => current,
+        failBootstrap: async (_record, _lease, _provider, error) => {
+          throw error;
+        },
+        commitReady: async (current) => current,
+        move: vi.fn(),
+        saveError: vi.fn(),
+      });
+      await owner.finish(
+        record,
+        {
+          leaseId: "lease",
+          sharedHost: false,
+          node: {
+            deviceId: "node",
+            preparedRuntime: {
+              nodeBootstrapSha256: preparation.artifacts.nodeBootstrapSha256,
+              workerBundleSha256:
+                mode === "wrong runtime"
+                  ? "0".repeat(64)
+                  : preparation.artifacts.workerArchiveSha256,
+              executionMode: mode === "wrong mode" ? "remote-exec" : "worker-turn",
+            },
+          },
+        },
+        fixture.provider,
+        fixture.abort.signal,
+        { leaseId: "lease", sharedHost: false, desktop: null },
+        undefined,
+        undefined,
+        {
+          preparationKey: preparation.key,
+          cacheKey: preparation.cacheKey,
+          sourceManifestRef: "/source",
+          preparedManifestRef: "/prepared",
+          workspaceDir: "/workspace",
+          homeDir: "/home",
+        },
+        undefined,
+        mode === "reused"
+          ? undefined
+          : {
+              checkpointId: "checkpoint",
+              baseCommit: profile.project.baseCommit,
+              sourceManifestRef: "/source",
+              preparedManifestRef: "/prepared",
+            },
+      );
+      expect(ensureNodeWorkerBundle).toHaveBeenCalledOnce();
+      expect(ensureNodeWorkerBundle.mock.calls[0]?.[0].initialSnapshot).toBe(
+        mode === "fresh" ? "checkpoint" : undefined,
+      );
+    },
+  );
 
   async function setup() {
     sourceAdmission

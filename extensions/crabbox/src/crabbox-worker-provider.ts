@@ -522,7 +522,7 @@ export function createCrabboxWorkerProvider(
         let enrollment: CrabboxWorkerNodeEnrollment;
         try {
           // Exact-runtime forks reuse installation; enrollment verifies it and fetches missing bundles.
-          const forkHasRuntime =
+          runtimePrepared ||=
             isFork &&
             isDeepStrictEqual(
               await warmImages.checkpointRuntimeIdentity(allocationChoice.checkpointId),
@@ -532,7 +532,6 @@ export function createCrabboxWorkerProvider(
             options?.prepareNodeRuntime &&
             !runtimePrepared &&
             priorAllocation?.phase !== "enrolled" &&
-            !forkHasRuntime &&
             (!project || (!parsed.warmImage && Boolean(parsed.azureSandboxDiskId)) || isFork)
           ) {
             await (await prepareRuntime()).run();
@@ -620,7 +619,10 @@ export function createCrabboxWorkerProvider(
         return {
           ...allocation,
           ...(options?.retention ? { retainedLease: inspectedParams.inspect.retention } : {}),
-          node: { deviceId },
+          node:
+            isFork && !priorAllocation && runtimePrepared
+              ? { deviceId, preparedRuntime: nodeRuntimeIdentity }
+              : { deviceId },
           ...(desktop ? { desktop: desktop.endpoint } : {}),
         };
       } finally {

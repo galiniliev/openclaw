@@ -229,9 +229,16 @@ describe("node-host worker supervisor commands", () => {
     const receipt = fullReceipt(input);
     const supervisor = supervisorWith(receipt);
     const pluginHandle = registerCollidingPlugin(command);
+    const invalidateSnapshotPreparation = vi.fn();
+    const bundleInstaller = { ensure: vi.fn(), invalidateSnapshotPreparation };
+    supervisor[method].mockImplementationOnce(async () => {
+      expect(invalidateSnapshotPreparation).toHaveBeenCalledTimes(method === "status" ? 0 : 1);
+      return receipt;
+    });
 
     const { result } = await invokePrivate({
       command,
+      bundleInstaller,
       paramsJSON: JSON.stringify(
         method === "launch"
           ? input

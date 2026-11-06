@@ -246,7 +246,26 @@ export function requireWorkerLease(value: WorkerLease): WorkerLease {
   if (typeof deviceId !== "string" || !deviceId.trim()) {
     throw new Error("Worker provider returned an invalid node device id");
   }
-  return { ...common, node: { deviceId: deviceId.trim() } };
+  const runtime = value.node?.preparedRuntime;
+  if (
+    runtime !== undefined &&
+    (!isRecord(runtime) ||
+      typeof runtime.nodeBootstrapSha256 !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(runtime.nodeBootstrapSha256) ||
+      (runtime.executionMode !== "worker-turn" && runtime.executionMode !== "remote-exec") ||
+      (runtime.workerBundleSha256 !== undefined &&
+        (typeof runtime.workerBundleSha256 !== "string" ||
+          !/^[a-f0-9]{64}$/u.test(runtime.workerBundleSha256))))
+  ) {
+    throw new Error("Worker provider returned an invalid prepared runtime identity");
+  }
+  return {
+    ...common,
+    node: {
+      deviceId: deviceId.trim(),
+      ...(value.node?.preparedRuntime ? { preparedRuntime: value.node.preparedRuntime } : {}),
+    },
+  };
 }
 
 export function requireInstall(
