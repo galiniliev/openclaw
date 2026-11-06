@@ -227,16 +227,29 @@ describe("prepared project retention compatibility", () => {
     );
   });
 
-  it.each(["fresh", "reused", "wrong runtime", "wrong mode", "post-start writer"] as const)(
+  it.each([
+    "fresh",
+    "default mode",
+    "disabled setup",
+    "post-create writer",
+    "reused",
+    "wrong runtime",
+    "wrong mode",
+    "post-start writer",
+  ] as const)(
     "carries completed runtime preparation only for an unchanged %s snapshot consumer",
     async (mode) => {
       const profile = fixture.profile();
+      const { executionMode: _executionMode, ...defaultProfile } = profile;
       const preparation = profile.project.preparation;
       const recipe = {
         source: "none" as const,
         inputs: {},
         env: {},
         ...(mode === "post-start writer" ? { postStart: ["touch private-file"] } : {}),
+        ...(mode === "disabled setup" || mode === "post-create writer"
+          ? { postCreate: ["touch private-file"] }
+          : {}),
       };
       const requested = await fixture.store.createIntent({
         environmentId: "runtime-reuse",
@@ -244,8 +257,16 @@ describe("prepared project retention compatibility", () => {
         profileId: "development",
         provisionOperationId: "provision:runtime-reuse",
         profileSnapshot: {
-          ...profile,
-          project: { ...profile.project, preparation: { ...preparation, recipe } },
+          ...(mode === "default mode" ? defaultProfile : profile),
+          ...(mode === "disabled setup" ? { runSetupScript: false } : {}),
+          project: {
+            ...profile.project,
+            preparation: {
+              ...preparation,
+              recipe,
+              ...(mode === "disabled setup" ? { runSetupScript: false } : {}),
+            },
+          },
         },
       });
       await fixture.store.transition({
@@ -330,7 +351,7 @@ describe("prepared project retention compatibility", () => {
       );
       expect(ensureNodeWorkerBundle).toHaveBeenCalledOnce();
       expect(ensureNodeWorkerBundle.mock.calls[0]?.[0].initialSnapshot).toBe(
-        mode === "fresh" ? "checkpoint" : undefined,
+        ["fresh", "default mode", "disabled setup"].includes(mode) ? "checkpoint" : undefined,
       );
     },
   );

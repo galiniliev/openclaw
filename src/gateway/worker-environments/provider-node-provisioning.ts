@@ -384,12 +384,15 @@ export function createWorkerNodeProvisioning(options: WorkerNodeProvisioningOpti
           ...(initialSnapshot &&
           preparation &&
           lease.sharedHost === false &&
-          projectPreparation?.recipe?.postCreate === undefined &&
-          projectPreparation?.recipe?.postStart === undefined &&
+          (record.profileSnapshot.runSetupScript === false ||
+            projectPreparation?.runSetupScript === false ||
+            (projectPreparation?.recipe?.postCreate === undefined &&
+              projectPreparation?.recipe?.postStart === undefined)) &&
           lease.node.preparedRuntime?.nodeBootstrapSha256 ===
             preparation.artifacts.nodeBootstrapSha256 &&
           lease.node.preparedRuntime.workerBundleSha256 === artifact.tarballSha256 &&
-          lease.node.preparedRuntime.executionMode === record.profileSnapshot.executionMode
+          lease.node.preparedRuntime.executionMode ===
+            (record.profileSnapshot.executionMode ?? "worker-turn")
             ? { initialSnapshot: initialSnapshot.checkpointId }
             : {}),
           signal: workSignal,
