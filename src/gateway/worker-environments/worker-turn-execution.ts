@@ -446,6 +446,7 @@ export async function executeWorkerTurn(
         surface,
         localMcpNodeId,
         exec,
+        memoryBoundary: params.environments.resolveExecMemoryBoundary?.(placement.environmentId),
         connectionIdentity,
         placements: params.placements,
         questionsEnabled: turn.config.mcp?.apps?.enabled === true,
