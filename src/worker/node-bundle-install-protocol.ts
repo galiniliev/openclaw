@@ -23,6 +23,7 @@ const BundleInstallInputSchema = z.strictObject({
   gatewayNamespace: z.string().regex(GATEWAY_NAMESPACE_PATTERN),
   prefetch: z.literal(1).optional(),
   bundlePrewarm: z.literal(WORKER_BUNDLE_PREWARM_VERSION).optional(),
+  initialSnapshot: z.string().min(1).max(4096).optional(),
   build: WorkerBuildSchema,
   archive: z.strictObject({
     token: z.string().regex(TOKEN_PATTERN),
@@ -33,6 +34,22 @@ const BundleInstallInputSchema = z.strictObject({
 
 export type NodeWorkerBundleInstallInput = z.infer<typeof BundleInstallInputSchema>;
 export type NodeWorkerBundleInstallResult = WorkerAdmissionHandshake;
+
+const BundlePreparationInputSchema = z.strictObject({
+  build: WorkerBuildSchema,
+  archive: BundleInstallInputSchema.shape.archive.omit({ token: true }),
+});
+export type NodeWorkerBundlePreparationInput = z.infer<typeof BundlePreparationInputSchema>;
+
+/** Local package preparation carries artifact identity, never transfer or enrollment authority. */
+export function parseNodeWorkerBundlePreparationInput(
+  raw: string,
+): NodeWorkerBundlePreparationInput {
+  if (Buffer.byteLength(raw, "utf8") > REQUEST_MAX_BYTES) {
+    throw new Error("Invalid worker bundle preparation input");
+  }
+  return BundlePreparationInputSchema.parse(JSON.parse(raw) as unknown);
+}
 
 export class NodeWorkerBundleInstallError extends Error {
   readonly code = NODE_WORKER_BUNDLE_INSTALL_ERROR_CODE;

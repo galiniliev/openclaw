@@ -194,6 +194,8 @@ export function createWorkerEnvironmentService(options: WorkerEnvironmentService
     ...options,
     store,
     readStartStatus: providerLifecycle.readStartStatus,
+    preparedRepositorySource: providerLifecycle.preparedRepositorySource,
+    takeInitialSnapshot: providerLifecycle.takeInitialSnapshot,
     prepareCurrentBundle: async () => await prepareInstallation("bundle"),
     now,
     identityResolverFor: providerLifecycle.identityResolverFor,
@@ -573,13 +575,11 @@ export function createWorkerEnvironmentService(options: WorkerEnvironmentService
     suspendRetained: providerLifecycle.suspendRetained,
     inspectTurnLease: (params: Parameters<typeof providerLifecycle.inspectTurnLease>[0]) => {
       const signal = params.signal ? AbortSignal.any([scope.signal, params.signal]) : scope.signal;
-      const operation = trackOperation(
-        withLock(params.environmentId, async () => {
-          signal.throwIfAborted();
-          await store.ready();
-          await providerLifecycle.inspectTurnLease({ ...params, signal });
-        }),
-      );
+      const operation = withLock(params.environmentId, async () => {
+        signal.throwIfAborted();
+        await store.ready();
+        await providerLifecycle.inspectTurnLease({ ...params, signal });
+      });
       // A cancelled waiter cannot detach accepted cleanup from the service lifetime.
       return racePromiseWithAbortSignal(operation, signal);
     },

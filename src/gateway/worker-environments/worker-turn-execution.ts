@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { SKILL_RESOURCE_PROTOCOL_FEATURE } from "../../../packages/gateway-protocol/src/schema/skill-resources.js";
-import { WORKER_LOCAL_INFERENCE_PROTOCOL_FEATURE } from "../../../packages/gateway-protocol/src/schema/worker-admission.js";
 import { WORKER_TURN_ADMISSION_PROTOCOL_FEATURE } from "../../../packages/gateway-protocol/src/schema/worker-turn-admission.js";
 import { readAdmittedRunOperatorAuthority } from "../../agents/admitted-run-context.js";
 import { resolveAgentDir } from "../../agents/agent-scope.js";
@@ -8,7 +7,6 @@ import { createOpenClawCodingToolsInternalAsync } from "../../agents/agent-tools
 import { applyEmbeddedAttemptToolsAllow } from "../../agents/embedded-agent-runner/run/attempt-tool-construction-plan.js";
 import { admitEmbeddedContextEngine } from "../../agents/embedded-agent-runner/run/context-engine-admission.js";
 import type { EmbeddedAgentRunResult } from "../../agents/embedded-agent-runner/types.js";
-import { createModelVisibilityPolicy } from "../../agents/model-visibility-policy.js";
 import { acquireAgentRunPreparedModelRuntime } from "../../agents/prepared-model-runtime.js";
 import { createSkillLibraryTool } from "../../agents/tools/skill-library-tool.js";
 import { registerAgentRunDelegatedAuthorityClosedHandler } from "../../infra/agent-run-registry.js";
@@ -19,7 +17,6 @@ import { WORKER_PROVIDER_REPLAY_LOCAL_RETRY_MESSAGE } from "../../worker/transcr
 import { createWorkerPlacementTools } from "../../worker/worker-placement-tools.js";
 import { readGitHubPublicationFact } from "../github-publication-discovery.js";
 import { requireCurrentWorkerTurnEnvironment, StaleWorkerBuildError } from "./admission.js";
-import { workerInferencePlacement } from "./inference-placement.js";
 import { sameWorkerSessionTurnClaim } from "./placement-record.js";
 import { isWorkerEnvironmentAttachedTo } from "./placement-target.js";
 import {
@@ -40,7 +37,11 @@ import {
   type WorkerTurnEnvironmentService,
 } from "./worker-turn-failure.js";
 import { prepareWorkerTurnMedia } from "./worker-turn-media.js";
-import { prepareWorkerTurnModel, workerTurnRuntimeLeaseOptions } from "./worker-turn-model.js";
+import {
+  prepareWorkerTurnModel,
+  resolveWorkerTurnInferencePlacement,
+  workerTurnRuntimeLeaseOptions,
+} from "./worker-turn-model.js";
 import {
   assertSupportedTurn,
   captureWorkerTurnInputAuthority,
@@ -99,35 +100,13 @@ export async function executeWorkerTurn(
       environments: params.environments,
       placement,
     });
-    const inferencePlacement = workerInferencePlacement(environment);
-    if (inferencePlacement === "worker") {
-      const policy = createModelVisibilityPolicy({
-        cfg: turn.config ?? {},
-        catalog: [],
-        defaultProvider: modelRef.provider,
-        agentId: placement.agentId,
-      });
-      if (!policy.allows(modelRef)) {
-        throw new Error(
-          `Worker-local inference cannot use ${modelRef.provider}/${modelRef.model} for agent ` +
-            `${placement.agentId}. Allow that model in the agent model policy or choose an allowed model.`,
-        );
-      }
-      if (!environment.nodeDeviceId) {
-        throw new Error(
-          "Worker-local inference requires a paired device profile. Set " +
-            "cloudWorkers.profiles.<id>.settings.device to a connected node.",
-        );
-      }
-      if (!bootstrapReceipt.protocolFeatures.includes(WORKER_LOCAL_INFERENCE_PROTOCOL_FEATURE)) {
-        throw new Error(
-          `Worker-local inference is unavailable on paired device ${environment.nodeDeviceId}. ` +
-            "Update and restart its OpenClaw node host, use a non-Windows host with " +
-            'nodeHost.workerRuns.isolation set to "none", and configure a compatible ' +
-            "models.providers model with a usable node-local credential.",
-        );
-      }
-    }
+    const inferencePlacement = resolveWorkerTurnInferencePlacement({
+      environment,
+      bootstrapReceipt,
+      modelRef,
+      config: turn.config,
+      agentId: placement.agentId,
+    });
     params.assertRunCurrent();
     turn.abortSignal?.throwIfAborted();
     // Keep credential discovery independent of the brokered publication request tool.

@@ -64,6 +64,7 @@ export type WorkerProviderLifecycleInputOptions = {
     record: WorkerEnvironmentRecord,
     bundle: Extract<WorkerInstallationArtifact, { install: "bundle" }>,
     signal?: AbortSignal,
+    assertRecoveryCurrent?: () => void,
   ) => Promise<WorkerNodeRuntimePreparation>;
   closeNodeRuntime?: (preparation: WorkerNodeRuntimePreparation) => void;
   prepareNodeArtifacts?: (
@@ -86,6 +87,7 @@ export type WorkerProviderLifecycleInputOptions = {
     sessionKey: string;
     preparationKey: string;
     cacheKey: string;
+    initialSnapshot?: import("../../worker/node-workspace-prepared-protocol.js").NodeWorkerInitialSnapshot;
     signal?: AbortSignal;
     assertCurrent: () => void;
   }) => Promise<NodeWorkerPreparedWorkspaceResult>;
