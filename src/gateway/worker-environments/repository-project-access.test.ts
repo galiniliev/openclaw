@@ -44,6 +44,7 @@ it.each([
     callerCurrent = scenario !== "caller revoked";
     return {
       project,
+      recoverySource: undefined,
       setupRecipe: undefined,
       recipe: { source: "none", inputs: {}, env: {} },
       assertCurrent: () => assert(identityCurrent, new Error("Repository identity changed")),
