@@ -7,6 +7,7 @@ import {
 } from "../../../packages/gateway-protocol/src/schema/environments.js";
 import { validateProviderSettings } from "../../config/provider-settings.js";
 import type { CloudWorkerProfileConfig } from "../../config/types.cloud-workers.js";
+import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { normalizeCapabilityProviderId } from "../../plugins/provider-registry-shared.js";
 import {
   WorkerProviderError,
@@ -303,4 +304,15 @@ export function requireInstall(
     throw serviceError("invalid_profile", "Worker profile has an invalid install method");
   }
   return install ?? "bundle";
+}
+
+export function usesRepositoryRefWorkerRecovery(
+  config: OpenClawConfig,
+  environment: Pick<WorkerEnvironmentRecord, "profileId" | "providerId">,
+): boolean {
+  const profile = config.cloudWorkers?.profiles?.[environment.profileId];
+  return (
+    profile?.lostWorkerRecovery === "repository-ref" &&
+    normalizeCapabilityProviderId(profile.provider) === environment.providerId
+  );
 }

@@ -62,6 +62,8 @@ type AdmissionRequest = {
         url: string;
         ref?: string;
         baseCommit?: string;
+        fallbackCommit?: string;
+        requirePublishedRef?: true;
       };
       expected?: never;
     }
@@ -90,13 +92,19 @@ export async function prepareRepositoryWorkerProjectSource(params: AdmissionRequ
         url: expected.source.url,
         baseCommit: expected.baseCommit,
         ref: undefined,
+        fallbackCommit: undefined,
+        requirePublishedRef: undefined,
       }
     : params.repository;
   if (!request || !/^[A-Za-z0-9_-]{1,128}$/u.test(params.namespace)) {
     throw new Error("Repository preparation request is invalid");
   }
   const url = parseConfiguredProjectGitUrl(request.url)?.url;
-  if (!url || (request.baseCommit !== undefined && !GitObject.test(request.baseCommit))) {
+  if (
+    !url ||
+    (request.baseCommit !== undefined && !GitObject.test(request.baseCommit)) ||
+    (request.fallbackCommit !== undefined && !GitObject.test(request.fallbackCommit))
+  ) {
     throw new Error("Repository preparation requires a GitHub URL and a valid pinned commit");
   }
   const agent =
@@ -176,6 +184,7 @@ export async function prepareRepositoryWorkerProjectSource(params: AdmissionRequ
     assertOwner: () => void,
     signal?: AbortSignal,
     graphql?: { query: string; variables: Record<string, string> },
+    missingRef = false,
   ): Promise<unknown> => {
     assertOwner();
     const response = await gitHubPublicApi.fetchGitHubApi(
@@ -192,14 +201,16 @@ export async function prepareRepositoryWorkerProjectSource(params: AdmissionRequ
     try {
       assertOwner();
       value =
-        graphql && readIdentity.token
-          ? await gitHubPublicApi.readGitHubGraphQLResponse(
-              response,
-              fetch,
-              readIdentity.token,
-              METADATA_MAX_BYTES,
-            )
-          : await gitHubPublicApi.readGitHubJsonResponse(response, METADATA_MAX_BYTES);
+        missingRef && response.status === 404
+          ? undefined
+          : graphql && readIdentity.token
+            ? await gitHubPublicApi.readGitHubGraphQLResponse(
+                response,
+                fetch,
+                readIdentity.token,
+                METADATA_MAX_BYTES,
+              )
+            : await gitHubPublicApi.readGitHubJsonResponse(response, METADATA_MAX_BYTES);
     } finally {
       await gitHubPublicApi.discardResponse(response);
     }
@@ -296,9 +307,53 @@ export async function prepareRepositoryWorkerProjectSource(params: AdmissionRequ
   ) {
     throw new Error("GitHub repository has no valid source reference; select a branch or commit.");
   }
-  const pinned = request.baseCommit ?? (GitObject.test(requestedRef) ? requestedRef : undefined);
+  let pinned = request.baseCommit ?? (GitObject.test(requestedRef) ? requestedRef : undefined);
+  let fallback: unknown;
+  let recoverySource: "published-branch" | "recorded-base" | undefined;
+  if (request.fallbackCommit || request.requirePublishedRef) {
+    const refPath = requestedRef
+      .replace(/^refs\//u, "")
+      .split("/")
+      .map(encodeURIComponent)
+      .join("/");
+    const ref = await read(
+      `/git/ref/${refPath}`,
+      identity,
+      assertAdmission,
+      params.signal,
+      undefined,
+      true,
+    );
+    if (ref === undefined) {
+      if (!request.fallbackCommit) {
+        throw new Error(
+          "The saved session branch is missing and its original commit is not recorded. Restore this workspace from a verified backup before retrying; no replacement worker was allocated.",
+        );
+      }
+      // Only exact ref absence may select the recorded base. The same current identity
+      // must still read that immutable object; access/transport/object failures propagate.
+      pinned = request.fallbackCommit;
+      fallback = await read(`/git/commits/${pinned}`, identity, assertAdmission, params.signal);
+      if (objectSha(fallback) !== pinned) {
+        sourceChanged();
+      }
+      recoverySource = "recorded-base";
+    } else {
+      if (
+        !isRecord(ref) ||
+        ref.ref !== `refs/${requestedRef}` ||
+        !isRecord(ref.object) ||
+        ref.object.type !== "commit"
+      ) {
+        sourceChanged();
+      }
+      pinned = objectSha(ref.object);
+      recoverySource = "published-branch";
+    }
+  }
   const commit =
     pinnedRepository?.commit ??
+    fallback ??
     (await read(
       pinned ? `/git/commits/${pinned}` : `/commits/${encodeURIComponent(requestedRef)}?per_page=1`,
       identity,
@@ -491,6 +546,7 @@ export async function prepareRepositoryWorkerProjectSource(params: AdmissionRequ
   };
   return {
     project,
+    recoverySource,
     setupRecipe,
     recipe,
     assertCurrent,
