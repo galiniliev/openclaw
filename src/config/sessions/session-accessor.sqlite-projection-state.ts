@@ -34,7 +34,10 @@ import { replaceSessionOwnerInTransaction } from "./session-accessor.sqlite-owne
 import { appendSessionResetBoundary } from "./session-accessor.sqlite-reset-boundary.js";
 import type { ResolvedSqliteReadScope } from "./session-accessor.sqlite-scope.js";
 import { appendTranscriptEventsInTransaction } from "./session-accessor.sqlite-transcript-store.js";
-import { commitSessionCreationReceipt } from "./session-creation-receipts.js";
+import {
+  assertRequestedSessionCreationAvailable,
+  commitSessionCreationReceipt,
+} from "./session-creation-receipts.js";
 import type { SessionEntryWritePostimages } from "./session-entry-write-postimage.js";
 import { SessionEntryLifecycleUpsertConflictError } from "./session-mutation-conflict-error.js";
 import type { SessionEntry } from "./types.js";
@@ -79,6 +82,10 @@ export function commitProjectedSessionEntryLifecycleMutationInDatabase(
   database: OpenClawAgentDatabase,
   options: ProjectedLifecycleCommitOptions,
 ): ProjectedLifecycleCommitResult {
+  if (options.creation?.receipt) {
+    const { operation, sessionKey, entry } = options.creation.receipt;
+    assertRequestedSessionCreationAvailable(database, operation, sessionKey, entry);
+  }
   const { projected, removalPlans, materializationFailed } = options;
   let pendingArchives = true;
   const removedSessionKeys: string[] = [];

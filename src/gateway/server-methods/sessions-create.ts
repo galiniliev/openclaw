@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { sha256Hex } from "@openclaw/normalization-core/node-crypto";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import {
   ErrorCodes,
@@ -22,7 +21,6 @@ import { ModelAccountConnectAuthorityError } from "../model-account-connect-erro
 import { getNodeWorkerSupervisorTransport } from "../node-registry-private.js";
 import { captureGatewayOperatorRunAuthority } from "../operator-run-authority.js";
 import { projectRequesterForClient } from "../project-access.js";
-import { repositoryDispatchCredentialReader } from "../repository-dispatch.js";
 import { startSessionCreateDiagnostics } from "../session-create-diagnostics.js";
 import { buildDashboardSessionKey } from "../session-create-key.js";
 import { resolveSessionCreateCatalogSelectionError } from "../session-create-model-selection.js";
@@ -118,6 +116,7 @@ export const sessionCreateHandlers: GatewayRequestHandlers = {
       return respond(false, undefined, requiredWorker.error);
     }
     const { requiredProfile, automaticEmptyWorkspace } = requiredWorker;
+    const workerProfile = p.profileId ?? requiredProfile;
     const requestAuthority = readGatewayRequestMutationAuthority(options);
     const getCurrentConfig = context.getRuntimeConfig;
     const requestingOperatorProfileId = client?.authenticatedUserProfile?.profileId;
@@ -186,7 +185,13 @@ export const sessionCreateHandlers: GatewayRequestHandlers = {
     const assertSessionCreateCurrent = Object.assign(
       bindGatewayDeviceRevocation(() => {
         requestAuthority.assertCurrent();
-        assertRequiredWorkerSessionCreateCurrent(getCurrentConfig(), requiredProfile, p);
+        assertRequiredWorkerSessionCreateCurrent(
+          getCurrentConfig(),
+          requiredProfile,
+          p,
+          { client },
+          sessionCreation.actor,
+        );
         authority.commitGuard?.();
         sessionMutationAuthorization?.assertCurrent();
         assertPreparedSkillLibrarySelection(sessionCreation.skillLibrarySelections);
@@ -403,7 +408,7 @@ export const sessionCreateHandlers: GatewayRequestHandlers = {
     if (repository) {
       prepareLifecycle = prepareSessionRepositoryWorkspace(repository, {
         branchPrefix: cfg.repositoryBranchPrefix,
-        runSetupScript: !requiredProfile && clientScopes.includes(ADMIN_SCOPE),
+        runSetupScript: !workerProfile && clientScopes.includes(ADMIN_SCOPE),
         assertCurrent: commitGuard,
       });
     }
@@ -467,7 +472,7 @@ export const sessionCreateHandlers: GatewayRequestHandlers = {
           titleSource: buildDashboardSessionTitleSource({ message: message ?? "", attachments }),
           currentUserMessage: message,
           useRequestedTitleSelection: Boolean(requestedModel && !personalModelSelection),
-          runSetupScript: !requiredProfile && clientScopes.includes(ADMIN_SCOPE),
+          runSetupScript: !workerProfile && clientScopes.includes(ADMIN_SCOPE),
           signal,
           commitGuard,
           onTitleError: (error) =>
@@ -589,7 +594,7 @@ export const sessionCreateHandlers: GatewayRequestHandlers = {
           entry: committed.entry,
           lifecycleRevision: committed.entry.lifecycleRevision,
         });
-        if ((hasInitialTurn || requiredProfile) && requestAuthority.family === "worker") {
+        if ((hasInitialTurn || workerProfile) && requestAuthority.family === "worker") {
           sessionSourceAccepted = acceptGatewayDeviceSourceAuthority(hasCurrentClientAuthority);
         }
       },
@@ -599,24 +604,16 @@ export const sessionCreateHandlers: GatewayRequestHandlers = {
         }
         await prepareRequiredWorkerCreatedSession({
           requiredProfile,
+          profileId: p.profileId,
           pendingWorktree: Boolean(preparedWorktree?.pendingWorktree),
           requestedProjectGitUrl,
           prepare: context.workerPlacementDispatchService?.withRequiredSession,
           session,
           assertCurrent: assertSessionCreateCurrent,
           retainDispatch: sessionMutationAuthorization?.retain,
-          readNativeCredential:
-            repository && requiredProfile
-              ? repositoryDispatchCredentialReader({
-                  sessionId: session.entry.sessionId,
-                  sessionKey: session.key,
-                  agentId: session.agentId,
-                  client,
-                  hasCurrentClientAuthority,
-                  requestDigest: sha256Hex(JSON.stringify({ requiredProfile, repository })),
-                  assertCurrent: assertSessionCreateCurrent,
-                })
-              : undefined,
+          repository,
+          client,
+          hasCurrentClientAuthority,
           signal,
         });
         await reportCreatedVisibleSpawn(cfg, sessionCreation, session, publicRead);

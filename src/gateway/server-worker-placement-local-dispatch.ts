@@ -28,6 +28,7 @@ export function createGatewayWorkerPlacementLocalDispatchBarrier(
       sessionKey,
       executionMode,
       requiredProfile,
+      preparingSession,
       signal,
       authorize,
       startDispatch,
@@ -58,15 +59,15 @@ export function createGatewayWorkerPlacementLocalDispatchBarrier(
           const preflightWorkerWorkspace = await loadWorkerWorkspacePreflight();
           await preflightWorkerWorkspace({ localPath: workspace.path, signal });
         }
-        if (requiredProfile) {
+        if (requiredProfile || preparingSession) {
           await params.placements.getAsync(sessionId);
         }
         assertCurrent(getRuntimeConfig());
         authorize?.();
         if (
-          requiredProfile &&
-          (getRuntimeConfig().cloudWorkers?.requiredProfile !== requiredProfile ||
-            params.placements.get(sessionId)?.turnClaim)
+          (requiredProfile &&
+            getRuntimeConfig().cloudWorkers?.requiredProfile !== requiredProfile) ||
+          ((requiredProfile || preparingSession) && params.placements.get(sessionId)?.turnClaim)
         ) {
           throw new WorkerDispatchTargetChangedError(
             "Required worker admission changed or a local turn is still active.",

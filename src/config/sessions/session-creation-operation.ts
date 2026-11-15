@@ -2,6 +2,8 @@
 export type SessionCreationOperation = {
   digest: string;
   fingerprint: string;
+  /** Optional fresh physical identity; never authorizes adopting an existing session. */
+  requestedSessionId?: string;
   authorization: { role: string | null; scopes: readonly string[] };
 };
 

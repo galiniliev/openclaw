@@ -16,6 +16,7 @@ export type RequiredSessionPlacementAdmission = <T>(
   signal?: AbortSignal,
   preparation?: {
     waitForReady: false;
+    profileId?: string;
     retainDispatch?: () => () => void;
     readNativeCredential?: GitHubCredentialReader;
   },

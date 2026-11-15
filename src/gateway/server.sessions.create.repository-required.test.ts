@@ -50,7 +50,15 @@ afterEach(() => {
 
 // Actual RPC admission/creation and dispatch owners, with native Git/checkpoint effects.
 // Provider allocation and remote transport/account responses remain synthetic.
-test.each(["allowed", "policy", "source", "stop", "caller"] as const)(
+test.each([
+  "allowed",
+  "selected-profile",
+  "default-profile",
+  "policy",
+  "source",
+  "stop",
+  "caller",
+] as const)(
   "required repository sessions.create retains authority after ACK: %s",
   async (scenario) => {
     const { dir, storePath } = await createSessionStoreDir();
@@ -59,7 +67,9 @@ test.each(["allowed", "policy", "source", "stop", "caller"] as const)(
     const profileId = "ghp_88888888888888888888888888888888";
     await config.writeConfigFile({
       cloudWorkers: {
-        requiredProfile: "development",
+        ...(["selected-profile", "default-profile"].includes(scenario)
+          ? {}
+          : { requiredProfile: "development" }),
         profiles: { development: { provider: "fake", settings: {} } },
       },
       gateway: { repositoryIntegration: "repository-policy" },
@@ -237,8 +247,10 @@ test.each(["allowed", "policy", "source", "stop", "caller"] as const)(
         };
       },
     });
+    let dispatchStarted = false;
     const originalDispatch = harness.service.dispatch;
     harness.service.dispatch = (...args) => {
+      dispatchStarted = true;
       args[3]?.addEventListener("abort", () => stopped.resolve(), { once: true });
       const result = originalDispatch(...args);
       void result.then(
@@ -284,11 +296,18 @@ test.each(["allowed", "policy", "source", "stop", "caller"] as const)(
       return respond.mock.calls[0]?.[1];
     };
     try {
-      const created = await rpc("sessions.create", {
+      const creationParams = {
         key,
         agentId: "main",
         repository: { url: "https://github.com/example/repository" },
-      });
+        ...(scenario === "selected-profile"
+          ? { profileId: "development", idempotencyKey: "worker-create" }
+          : {}),
+        ...(scenario === "default-profile"
+          ? { defaultProfileId: "development", idempotencyKey: "worker-create" }
+          : {}),
+      };
+      const created = await rpc("sessions.create", creationParams);
       expect(created).toMatchObject({ key, runStarted: false });
       await entered.promise;
       expect(verify).not.toHaveBeenCalled();
@@ -330,7 +349,7 @@ test.each(["allowed", "policy", "source", "stop", "caller"] as const)(
       resume.resolve();
       const outcome = await complete.promise;
       await stop;
-      if (scenario === "allowed") {
+      if (["allowed", "selected-profile", "default-profile"].includes(scenario)) {
         expect(outcome, String(outcome)).toMatchObject({ state: "active" });
         expect(verify).toHaveBeenCalledTimes(1);
         const placement = (
@@ -339,6 +358,15 @@ test.each(["allowed", "policy", "source", "stop", "caller"] as const)(
         expect(
           await fs.readFile(path.join(placement.remoteWorkspaceDir!, "tracked.txt"), "utf8"),
         ).toBe("pinned source\n");
+        if (scenario === "selected-profile" || scenario === "default-profile") {
+          await config.writeConfigFile({ cloudWorkers: { profiles: {} } });
+          expect(
+            await rpc("sessions.create", {
+              ...creationParams,
+              ...(scenario === "default-profile" ? { defaultProfileId: "removed-default" } : {}),
+            }),
+          ).toMatchObject({ key, sessionId: entry()!.sessionId, runStarted: false });
+        }
       } else {
         expect(outcome).toBeInstanceOf(Error);
         expect(verify).not.toHaveBeenCalled();
@@ -346,7 +374,9 @@ test.each(["allowed", "policy", "source", "stop", "caller"] as const)(
       }
     } finally {
       resume.resolve();
-      await complete.promise;
+      if (dispatchStarted) {
+        await complete.promise;
+      }
       catalog.release();
     }
   },
