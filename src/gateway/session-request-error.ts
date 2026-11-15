@@ -3,6 +3,19 @@ import { errorShape } from "../../packages/gateway-protocol/src/schema/error-cod
 import type { ErrorShape } from "../../packages/gateway-protocol/src/schema/frames.js";
 import type { SessionEntryCreateWithTranscriptResult } from "../config/sessions/session-accessor.types.js";
 
+/** Worker errors retain names, so known transactional claim refusals keep their public envelope. */
+export function sessionCreationCommitFailure(
+  error: unknown,
+): Extract<SessionEntryCreateWithTranscriptResult<ErrorShape>, { ok: false }> {
+  if (
+    error instanceof Error &&
+    ["SessionLabelConflictError", "SessionRequestedIdentityConflictError"].includes(error.name)
+  ) {
+    return { ...invalidSessionRequest(error.message), phase: "entry" };
+  }
+  throw error;
+}
+
 export function sessionCreationFailure(
   failure: Extract<SessionEntryCreateWithTranscriptResult<ErrorShape>, { ok: false }>,
 ): { ok: false; error: ErrorShape } {

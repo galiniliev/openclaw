@@ -650,11 +650,15 @@ test("durable creation replays before label claims and refuses a reset incarnati
     label: "Receipt original",
     idempotencyKey: "receipt-label-once",
   };
-  const request = (scopes = client.connect.scopes) =>
-    directSessionReq<CreatedSession>("sessions.create", params, {
-      client: { ...client, connect: { ...client.connect, scopes } } as never,
-      context: { dedupe: new Map() },
-    });
+  const request = (scopes = client.connect.scopes, defaultProfileId?: string) =>
+    directSessionReq<CreatedSession>(
+      "sessions.create",
+      { ...params, ...(defaultProfileId ? { defaultProfileId } : {}) },
+      {
+        client: { ...client, connect: { ...client.connect, scopes } } as never,
+        context: { dedupe: new Map() },
+      },
+    );
   const first = await request();
   expectOk(first);
   const created = first.payload!;
@@ -682,6 +686,10 @@ test("durable creation replays before label claims and refuses a reset incarnati
       runStarted: false,
       creationReplayed: true,
     },
+  });
+  expect(await request(client.connect.scopes, "removed-creation-default")).toMatchObject({
+    ok: true,
+    payload: { key: created.key, sessionId: created.sessionId, creationReplayed: true },
   });
   expect(await request(["operator.write"])).toMatchObject({
     ok: false,

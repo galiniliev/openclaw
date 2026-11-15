@@ -67,6 +67,7 @@ type WorkerLocalDispatchBarrier = (params: {
   executionMode: WorkerPlacementDispatchRequest["executionMode"];
   authorize?: WorkerPlacementAuthorization;
   requiredProfile?: string;
+  preparingSession?: true;
   signal?: AbortSignal;
   startDispatch: () => Promise<WorkerDispatchPlacement>;
 }) => Promise<WorkerDispatchPlacement>;
@@ -157,6 +158,7 @@ export function createWorkerPlacementDispatchService(options: WorkerPlacementDis
         executionMode: request.executionMode,
         authorize: assertCurrent,
         requiredProfile: request.requiredProfile,
+        preparingSession: request.preparingSession,
         signal,
         startDispatch: async () => {
           let assertDispatchCurrent = assertCurrent;

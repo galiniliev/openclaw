@@ -309,7 +309,7 @@ export function createGatewayWorkerPlacementRuntime(params: GatewayWorkerPlaceme
   const withRequiredSession: SessionPlacementAdmissionProvider["withRequiredSession"] = async (
     ...args
   ) => {
-    if (!getRuntimeConfig().cloudWorkers?.requiredProfile) {
+    if (!getRuntimeConfig().cloudWorkers?.requiredProfile && !args[4]?.profileId) {
       return await args[1](() => {});
     }
     const { createRequiredWorkerSessionPreparation } = await loadRequiredWorkerPreparation();

@@ -1,6 +1,7 @@
 import { normalizeOptionalAgentRuntimeId } from "../agents/agent-runtime-id.js";
 import type { SessionEntry } from "../config/sessions.js";
 import { prepareInitialAssistantTranscript } from "../config/sessions/session-accessor.sqlite-transcript-message-append.js";
+import { createSessionTranscriptHeader } from "../config/sessions/transcript-header.js";
 import {
   AGENT_HARNESS_SESSION_KEY_RESERVED_MESSAGE,
   isAgentHarnessSessionKey,
@@ -14,7 +15,11 @@ export function validateSessionCreateTarget(
   key: string | undefined,
   entry: Pick<SessionEntry, "modelSelectionLocked"> | undefined,
   authorizedHarnessCreation: boolean,
+  requestedSessionId?: string,
 ) {
+  if (requestedSessionId !== undefined && entry) {
+    return invalidSessionRequest("Requested session ID requires a new session key.");
+  }
   if (
     key &&
     isAgentHarnessSessionKey(key) &&
@@ -90,25 +95,23 @@ export function validateFreshSessionConstraints(input: FreshSessionConstraints) 
   return undefined;
 }
 
-/** Keep the first assistant message in the same transcript transaction as the new row. */
+/** Creation-owned transcript bytes commit with the row, including a requested identity's header. */
 export function withInitialAssistantTranscript<T extends object>(
   result: T,
   entry: SessionEntry,
   message: CreateGatewaySessionParams["initialAssistantMessage"],
   cwd: string | undefined,
+  initializeTranscript = false,
 ) {
+  const transcriptEvents = message
+    ? prepareInitialAssistantTranscript({ ...message, sessionId: entry.sessionId, cwd })
+    : initializeTranscript
+      ? [createSessionTranscriptHeader({ sessionId: entry.sessionId, cwd })]
+      : undefined;
   return {
     ...result,
     entry,
-    ...(message
-      ? {
-          transcriptEvents: prepareInitialAssistantTranscript({
-            ...message,
-            sessionId: entry.sessionId,
-            cwd,
-          }),
-        }
-      : {}),
+    ...(transcriptEvents ? { transcriptEvents } : {}),
   };
 }
 

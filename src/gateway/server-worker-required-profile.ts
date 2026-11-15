@@ -18,7 +18,14 @@ export function createRequiredWorkerSessionPreparation(options: {
   dispatch: Pick<ReturnType<typeof coordinateWorkerPlacementDispatch>, "ensurePlacement">;
 }): NonNullable<SessionPlacementAdmissionProvider["withRequiredSession"]> {
   return async (identity, task, authorize, signal, preparation) => {
-    const required = options.getConfig().cloudWorkers?.requiredProfile;
+    const requiredProfile = options.getConfig().cloudWorkers?.requiredProfile;
+    const required = preparation?.profileId ?? requiredProfile;
+    assertRequiredWorkerSelection(options.getConfig(), { profileId: preparation?.profileId });
+    if (preparation?.profileId && !authorize) {
+      throw new RequiredWorkerProfileError(
+        "Request-scoped worker creation requires live dispatch authority.",
+      );
+    }
     if (!required) {
       return await task(() => {});
     }
@@ -39,7 +46,7 @@ export function createRequiredWorkerSessionPreparation(options: {
         signal?.throwIfAborted();
         assertSource();
         if (
-          options.getConfig().cloudWorkers?.requiredProfile !== required ||
+          options.getConfig().cloudWorkers?.requiredProfile !== requiredProfile ||
           !isDeepStrictEqual(options.getConfig().cloudWorkers?.profiles?.[required], snapshot)
         ) {
           throw new RequiredWorkerProfileError(
@@ -91,7 +98,8 @@ export function createRequiredWorkerSessionPreparation(options: {
             agentId: identity.agentId!,
             profileId: required,
             executionMode: "worker-turn",
-            requiredProfile: required,
+            requiredProfile,
+            preparingSession: true,
             runSetupScript: false,
             readNativeCredential,
             devicePlacement: { requiredNodeCommands: [], consumesWorkerSlot: true },

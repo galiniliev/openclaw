@@ -29,6 +29,8 @@ export async function runWorkerPlacementHandoff<T>(
   request: WorkerSessionPlacementIdentity & {
     action: "dispatch" | "move";
     requiredProfile?: string;
+    /** Initial session admission retains its creating operation instead of interrupting it. */
+    preparingSession?: true;
     sourceDisposition?: "reconcile" | "abandon";
     signal?: AbortSignal;
   },
@@ -81,7 +83,7 @@ export async function runWorkerPlacementHandoff<T>(
         includeActive: false,
       }).queuedInputs;
       begun = await begin(resolved);
-      if (action === "dispatch" && request.requiredProfile) {
+      if (action === "dispatch" && (request.requiredProfile || request.preparingSession)) {
         // Initial required placement belongs to this held input; there is no local
         // turn to revoke, and clearing its queues would discard the first message.
         return;

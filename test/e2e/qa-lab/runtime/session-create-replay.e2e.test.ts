@@ -116,9 +116,11 @@ it(
         let request = await connect();
         const firstPid = instance.child?.pid;
         expect(firstPid).toBeTypeOf("number");
+        const requestedSessionId = "019a848b-7c00-7000-8000-000000000201";
         const params = {
           agentId: "replay",
           key: "agent:replay:dashboard:original",
+          sessionId: requestedSessionId,
           label: "Original receipt label",
           idempotencyKey: randomUUID(),
           message: "Reply CREATION_REPLAY_OK.",
@@ -129,6 +131,7 @@ it(
           runId: string;
           runStarted: boolean;
         }>("sessions.create", params);
+        expect(created.sessionId).toBe(requestedSessionId);
         expect(created.runStarted, JSON.stringify(created)).toBe(true);
         const wait = async (runId: string) => {
           const terminal = await request<{ status: string }>(
@@ -157,7 +160,7 @@ it(
         const replay = await request("sessions.create", params);
         expect(replay).toMatchObject({
           key: created.key,
-          sessionId: created.sessionId,
+          sessionId: requestedSessionId,
           creationReplayed: true,
           runStarted: false,
           entry: { label: "Renamed original" },

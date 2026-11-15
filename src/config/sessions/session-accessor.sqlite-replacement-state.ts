@@ -23,7 +23,10 @@ import type {
   SessionEntryReplacementCommitted,
 } from "./session-accessor.sqlite-replacement-types.js";
 import { appendTranscriptEventsInTransaction } from "./session-accessor.sqlite-transcript-store.js";
-import { commitSessionCreationReceipt } from "./session-creation-receipts.js";
+import {
+  assertRequestedSessionCreationAvailable,
+  commitSessionCreationReceipt,
+} from "./session-creation-receipts.js";
 import type { SessionEntryWindowRow } from "./session-entry-window.types.js";
 import type { SessionEntryWritePostimages } from "./session-entry-write-postimage.js";
 import type { SessionMaintenancePreservationSnapshot } from "./store-maintenance-preserve-snapshot.types.js";
@@ -38,6 +41,18 @@ export function commitSessionEntryReplacementsInDatabase(
   onArchived?: (sessionKey: string, previous: SessionEntry, current: SessionEntry) => void,
   postimages?: SessionEntryWritePostimages,
 ): SessionEntryReplacementCommitted {
+  const creation = input.creationOperation ? input.replacements[0] : undefined;
+  if (input.creationOperation) {
+    if (!creation || input.replacements.length !== 1) {
+      throw new Error("Creation receipt requires one exact session target");
+    }
+    assertRequestedSessionCreationAvailable(
+      database,
+      input.creationOperation,
+      creation.sessionKey,
+      creation.entry,
+    );
+  }
   if (input.labelClaim) {
     assertSessionCreationLabelAvailable(
       database,
@@ -208,16 +223,12 @@ export function commitSessionEntryReplacementsInDatabase(
       throw new Error("Session owner assignment lost its creation target");
     }
   }
-  if (input.creationOperation) {
-    const created = input.replacements[0];
-    if (!created || input.replacements.length !== 1) {
-      throw new Error("Creation receipt requires one exact session target");
-    }
+  if (input.creationOperation && creation) {
     commitSessionCreationReceipt(
       database,
       input.creationOperation,
-      created.sessionKey,
-      created.entry,
+      creation.sessionKey,
+      creation.entry,
     );
   }
   const preservation = maintenance?.preservation;
