@@ -134,9 +134,9 @@ describe("GitHub tool identity", () => {
         GH_CONFIG_DIR: expectedProfileDir,
         GIT_AUTHOR_EMAIL: "agent@example.test",
         GIT_COMMITTER_EMAIL: "agent@example.test",
-        GIT_CONFIG_COUNT: "1",
-        GIT_CONFIG_KEY_0: "user.email",
-        GIT_CONFIG_VALUE_0: "agent@example.test",
+        GIT_CONFIG_COUNT: "3",
+        GIT_CONFIG_KEY_2: "user.email",
+        GIT_CONFIG_VALUE_2: "agent@example.test",
       },
       managedLocalIdentity: true,
     });
