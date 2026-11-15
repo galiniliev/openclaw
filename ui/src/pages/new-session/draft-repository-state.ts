@@ -9,6 +9,7 @@ import type {
   ProjectsCheckoutOptionsResult,
   WorktreesBranchesResult,
 } from "../../../../packages/gateway-protocol/src/index.js";
+import { parseProjectGitUrl } from "../../../../src/projects/project-git-url.ts";
 import type { ApplicationContext } from "../../app/context.ts";
 import { hasOperatorWriteAccess } from "../../app/operator-access.ts";
 import { t } from "../../i18n/index.ts";
@@ -28,6 +29,8 @@ type DraftRepositorySnapshot = Readonly<{
   agentId: string;
   agents: readonly AgentSummary[];
   remotePlacement: boolean;
+  cloudRepository?: boolean;
+  githubHost?: string;
   selectedProject: ProjectRecord | undefined;
   remoteProject: DraftRemoteProject | null;
   folder: string;
@@ -189,16 +192,46 @@ export class DraftRepositoryStateOwner {
   }
 
   get remoteRepository(): SessionCreateParams["repository"] {
-    const { remotePlacement, remoteProject } = this.read();
-    if (!remotePlacement || !remoteProject) {
+    const { remotePlacement, remoteProject, cloudRepository, githubHost, selectedProject } =
+      this.read();
+    if (!remotePlacement) {
       return undefined;
     }
     const ref = this.baseRef.trim();
-    return { url: remoteProject.cloneUrl, ...(ref ? { ref } : {}) };
+    if (remoteProject) {
+      return { url: remoteProject.cloneUrl, ...(ref ? { ref } : {}) };
+    }
+    if (
+      !cloudRepository ||
+      selectedProject?.source !== "registered" ||
+      !selectedProject.originUrl
+    ) {
+      return undefined;
+    }
+    const project = parseProjectGitUrl(selectedProject.originUrl, githubHost);
+    if (!project) {
+      return undefined;
+    }
+    // GitHub admission resolves all cloud refs, including restored local draft
+    // names. Never materialize a Gateway checkout to make an unavailable ref work.
+    const repositoryRef =
+      ref.startsWith("origin/") && ref !== "origin/" ? ref.slice("origin/".length) : ref;
+    return { url: project.url, ...(repositoryRef ? { ref: repositoryRef } : {}) };
   }
 
   get repository(): DraftRepositoryState {
-    return this.repositoryValue;
+    const state = this.repositoryValue;
+    if (state.kind !== "git" || !this.read().cloudRepository || !this.remoteRepository) {
+      return state;
+    }
+    // Keep tracking names intact; normalize once when constructing the request.
+    // GitHub remains authoritative at dispatch.
+    return {
+      ...state,
+      branches: state.branches.filter(
+        (branch) => branch.kind === "remote" && branch.name.startsWith("origin/"),
+      ),
+    };
   }
 
   get preferenceReady(): boolean {

@@ -1,6 +1,7 @@
 import path from "node:path";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { ProjectRecent } from "../../../packages/gateway-protocol/src/index.js";
+import { isEmptyWorktreeSourcePath } from "../../agents/worktrees/empty-source-path.js";
 import type { InternalSessionEntry as SessionEntry } from "../../config/sessions/types.js";
 import type { ProjectRegistryRecord } from "../../projects/project-registry.types.js";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
@@ -106,6 +107,9 @@ export async function listProjectRecents(
         const indexed = (pathProjects ??= indexPathProjects(projects));
         const workspace = indexed.byAgent.get(agentId);
         project = workspace?.repoRoot === folder ? workspace : indexed.byPath.get(folder);
+      }
+      if (!project && folder && isEmptyWorktreeSourcePath(folder)) {
+        continue;
       }
       const execNode = project || !folder ? undefined : normalizeOptionalString(entry.execNode);
       const key = project
