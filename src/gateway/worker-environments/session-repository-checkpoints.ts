@@ -268,6 +268,8 @@ export async function stageSessionRepositoryCheckpoint(
     RepositoryGitHistory & {
       expectedRevision: number;
       checkpointRef?: string;
+      /** Exact artifact absence and source-only identity have been admitted by the recovery owner. */
+      missingCheckpoint?: true;
       stagingRoot: string;
       baseManifestRaw: string;
       currentManifestRaw: string;
@@ -346,7 +348,11 @@ export async function stageSessionRepositoryCheckpoint(
     }
   };
   assertRevision();
-  if (workspace.checkpointRef && params.currentManifestRef === workspace.manifestHash) {
+  if (
+    !params.missingCheckpoint &&
+    workspace.checkpointRef &&
+    params.currentManifestRef === workspace.manifestHash
+  ) {
     const acceptedRef = checkpointRef(workspace, workspace.checkpointRef);
     const companionRef = publicationRef(acceptedRef);
     const objects = await readWorkspaceResultRefObjects(root, [acceptedRef, companionRef]);
