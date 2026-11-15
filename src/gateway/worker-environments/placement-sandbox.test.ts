@@ -195,3 +195,71 @@ it.each([
     await expect(sandboxFor({ get }, placement)).rejects.toThrow("lost its exact environment");
   },
 );
+
+it("carries native owner and committed predecessor lineage into the prepared sandbox", async () => {
+  const placement = remoteExecPlacement();
+  const environment = nodeEnvironment();
+  const recovery = {
+    version: 1 as const,
+    predecessor: {
+      agentId: placement.agentId,
+      sessionKey: placement.sessionKey,
+      sessionId: placement.sessionId,
+      environmentId: "lost-worker",
+      ownerEpoch: 3,
+      retentionOwnerBinding: "a".repeat(64),
+    },
+    predecessorGeneration: 5,
+    replacementDispatchGeneration: 6,
+  };
+  const sandbox = await sandboxFor(
+    { get: () => environment },
+    { ...placement, confirmedLossRecovery: recovery },
+  );
+  expect(sandbox.nativeWorkerPlacement).toEqual({
+    owner: {
+      agentId: placement.agentId,
+      sessionKey: placement.sessionKey,
+      sessionId: placement.sessionId,
+      environmentId,
+      ownerEpoch: 7,
+    },
+    recovery,
+  });
+});
+
+it.each([false, true])(
+  "preserves retained native session requirements after observed resume (%s)",
+  async (resumed) => {
+    const placement = remoteExecPlacement();
+    const environment = {
+      ...nodeEnvironment(),
+      providerId: "crabbox",
+      sharedHost: false,
+      retention: {
+        policy: { version: 1 as const, ownerBinding: "b".repeat(64), computeWindowSeconds: 3600 },
+        runtimeReady: true,
+        operation: null,
+        observation: {
+          claimRevision: "current-retained-claim",
+          state: "running" as const,
+          computeExpiresAtMs: Date.now() + 3600000,
+          ...(resumed
+            ? {
+                operation: {
+                  id: "recorded-resume",
+                  action: "resume" as const,
+                  expectedClaimRevision: "prior-claim",
+                  phase: "observed" as const,
+                },
+              }
+            : {}),
+        },
+      },
+    };
+    const sandbox = await sandboxFor({ get: () => environment }, placement);
+    expect(sandbox.placementRetainedSession).toBe(true);
+    expect(sandbox.placementRequireExistingNativeState).toBe(resumed ? true : undefined);
+    expect(sandbox.nativeWorkerPlacement?.owner.retentionOwnerBinding).toBe("b".repeat(64));
+  },
+);

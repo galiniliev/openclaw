@@ -34,6 +34,7 @@ import type {
 } from "./service-contract.js";
 import { requireWorkerProfile } from "./service-validation.js";
 import type { WorkerEnvironmentService } from "./service.js";
+import { prepareCheckpointRecovery } from "./session-repository-checkpoint-recovery.js";
 import type { WorkerSessionWorkspace } from "./session-workspace.js";
 import { boundedWorkerError } from "./worker-error.js";
 import { AcceptedWorkspacePublicationIndeterminateError } from "./workspace-accepted-publication.js";
@@ -486,6 +487,8 @@ export function createWorkerPlacementDispatchStartup(options: {
                 runSetupScript: request.runSetupScript,
                 setupDisabled: !profileAllowsSetup,
                 assertCurrent: assertWorkspaceCurrent,
+                prepareCheckpointRecovery: () =>
+                  prepareCheckpointRecovery(placements, placement, assertWorkspaceCurrent),
               })
             : await tunnel.syncWorkspace({
                 source: {

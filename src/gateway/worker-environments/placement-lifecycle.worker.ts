@@ -1,3 +1,4 @@
+import type { NativeWorkerLossRecovery } from "../../agents/harness/native-session/worker-placement.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../../infra/kysely-sync.js";
 import {
   deferSqliteWorkerCommitReceipt,
@@ -89,6 +90,7 @@ function startWorkerPlacementDispatch(
       `Cannot dispatch session ${identity.sessionId} from placement ${current.state}`,
     );
   }
+  let confirmedLossRecovery: NativeWorkerLossRecovery | undefined;
   const expected = input.expectedPlacement;
   if (expected) {
     if (
@@ -129,6 +131,20 @@ function startWorkerPlacementDispatch(
       ) {
         throw new Error(`Failed worker placement ${identity.sessionId} still requires recovery`);
       }
+      if (environment.retention) {
+        // Cleanup may advance the environment epoch; the failed placement retains its exact predecessor.
+        confirmedLossRecovery = {
+          version: 1,
+          predecessor: {
+            ...identity,
+            environmentId: environment.environmentId,
+            ownerEpoch: current.activeOwnerEpoch,
+            retentionOwnerBinding: environment.retention.policy.ownerBinding,
+          },
+          predecessorGeneration: current.generation,
+          replacementDispatchGeneration: nextGeneration(current.generation),
+        };
+      }
     }
   }
   // The local predecessor keeps its claim until the dispatch barrier drains it.
@@ -138,6 +154,9 @@ function startWorkerPlacementDispatch(
       .updateTable("worker_session_placements")
       .set({
         state: "requested",
+        confirmed_loss_recovery_json: confirmedLossRecovery
+          ? JSON.stringify(confirmedLossRecovery)
+          : null,
         execution_mode: executionMode,
         environment_id: null,
         transition_generation: nextGeneration(current.generation),

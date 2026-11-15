@@ -124,11 +124,32 @@ export async function createRemoteExecPlacementSandbox(params: {
     assertCurrentEnvironment();
     return {
       ...common,
+      nativeWorkerPlacement: {
+        owner: {
+          agentId: placement.agentId,
+          sessionId: placement.sessionId,
+          sessionKey: placement.sessionKey,
+          environmentId: environment.environmentId,
+          ownerEpoch: environment.ownerEpoch,
+          ...(environment.retention
+            ? { retentionOwnerBinding: environment.retention.policy.ownerBinding }
+            : {}),
+        },
+        ...(placement.confirmedLossRecovery ? { recovery: placement.confirmedLossRecovery } : {}),
+      },
       backendId: "node",
       placementNodeId: environment.nodeDeviceId,
       placementEnvironmentId: environment.environmentId,
       placementSessionId: placement.sessionId,
       placementOwnerEpoch: environment.ownerEpoch,
+      ...(environment.retention
+        ? {
+            placementRetainedSession: true as const,
+            ...(environment.retention.observation?.operation?.action === "resume"
+              ? { placementRequireExistingNativeState: true as const }
+              : {}),
+          }
+        : {}),
     };
   }
   const sshEndpoint = environment.sshEndpoint;
