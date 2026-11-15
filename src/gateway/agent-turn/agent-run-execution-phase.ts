@@ -273,6 +273,7 @@ async function executeAgentRun(
             sessionKey: params.resolvedSessionKey,
             storePath: lifecycleStorePath,
             context: params.context,
+            client: params.client,
             signal: abortController.signal,
             assertCurrent: assertDispatchCurrent,
             runSetupScript: params.client?.connect.scopes?.includes(ADMIN_SCOPE) === true,

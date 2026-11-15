@@ -6,8 +6,12 @@ import {
   lockWorktreeForProcess,
   unlockWorktree,
 } from "./git-lock.js";
-import { readRegistryWorktreeForMutation, requireActiveWorktreeRecord } from "./registry-read.js";
-import { assertWorktreeRemovalAvailable, updateRegistryWorktree } from "./registry.js";
+import {
+  prepareWorktreeRemovalAvailability,
+  readRegistryWorktreeForMutation,
+  requireActiveWorktreeRecord,
+} from "./registry-read.js";
+import { updateRegistryWorktree } from "./registry.js";
 import { withWorktreeRunEnd } from "./run-end-lifecycle.js";
 import { withGitLockTransition } from "./run-lease.js";
 import type { ManagedWorktreeRecord, WorktreeMutationGuard } from "./types.js";
@@ -17,10 +21,11 @@ export async function acquireManagedWorktree(
   id: string,
   params: WorktreeMutationGuard = {},
 ): Promise<ManagedWorktreeRecord> {
+  const assertAvailable = await prepareWorktreeRemovalAvailability(env, id);
   const assertCurrent = () => {
     params.signal?.throwIfAborted();
     params.commitGuard?.();
-    assertWorktreeRemovalAvailable(env, id);
+    assertAvailable();
   };
   return withWorktreeRunEnd(env, () =>
     withWorktreeMutationLease(

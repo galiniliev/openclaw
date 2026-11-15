@@ -5,7 +5,11 @@ import {
 import type { RegisteredStateReadCommand } from "../../state/openclaw-state-read-operation-registry.js";
 import { captureOpenClawStateReadWorkerContext } from "../../state/openclaw-state-worker-context.js";
 import type { OpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.types.js";
-import { registryAuthorityChanged, WorktreeRecordNotFoundError } from "./errors.js";
+import {
+  registryAuthorityChanged,
+  WorktreeRecordNotFoundError,
+  WorktreeRemovalContentionError,
+} from "./errors.js";
 import type { WorktreeRegistryListOptions } from "./registry-read.kernel.js";
 import {
   captureWorktreeRegistryAuthority,
@@ -47,6 +51,7 @@ function predicateFields(kind: RowGuardKind): readonly WorktreeRegistryField[] {
   switch (kind) {
     case "activity":
       return ["activity", "identity"];
+    case "removal-available":
     case "removal-claim":
     case "removal-claims":
       return ["leases"];
@@ -362,4 +367,35 @@ export async function readExistingWorktreePaths(env: NodeJS.ProcessEnv): Promise
     },
     { env },
   );
+}
+
+/** Prepare custody once through the worker; live publication invalidates the returned guard. */
+export async function prepareWorktreeRemovalClaimsGuard(
+  env: NodeJS.ProcessEnv,
+  ids: readonly string[],
+  token: string,
+): Promise<() => void> {
+  const guard = await prepareWorktreeRegistryGuard(captureWorktreeRunEndContext(env), {
+    predicates: [{ kind: "removal-claims", ids, token }],
+  });
+  return () => {
+    try {
+      guard();
+    } catch {
+      throw new WorktreeRemovalContentionError(
+        "busy",
+        "Worktree removal claim changed; checkout preserved",
+      );
+    }
+  };
+}
+
+export async function prepareWorktreeRemovalAvailability(
+  env: NodeJS.ProcessEnv,
+  id: string,
+  token?: string,
+): Promise<() => void> {
+  return prepareWorktreeRegistryGuard(captureWorktreeRunEndContext(env), {
+    predicates: [{ kind: "removal-available", id, token }],
+  });
 }

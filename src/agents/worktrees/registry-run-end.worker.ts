@@ -210,6 +210,21 @@ function assertPredicate(db: EngineConnection, predicate: WorktreeRegistryPredic
   if (predicate.kind === "snapshot-retirement") {
     return assertSnapshotRetirementInDatabase(db, predicate.record);
   }
+  if (predicate.kind === "removal-available") {
+    const token = collectLiveRunLeases(
+      db,
+      query(db),
+      worktreeRunLeaseScope(predicate.id),
+      false,
+    ).removingToken;
+    if (token !== undefined && token !== predicate.token) {
+      throw new WorktreeRemovalContentionError(
+        "busy",
+        "Worktree removal is in progress; retry after cleanup settles",
+      );
+    }
+    return;
+  }
   if (predicate.kind === "removal-claim") {
     return assertRemovalToken(db, predicate.id, predicate.token);
   }

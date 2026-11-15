@@ -13,13 +13,13 @@ import type { WorktreeCleanupMutation } from "./gc-removal.js";
 import { lockState } from "./git-lock.js";
 import { commandError, requireGit } from "./git.js";
 import {
+  prepareWorktreeRemovalClaimsGuard,
   captureWorktreeRegistryReadGuard,
   readRegistryWorktree,
   requireActiveWorktreeRecord,
 } from "./registry-read.js";
 import {
   clearRegistryWorktreeProvisionedChunks,
-  createWorktreeRemovalClaimsGuard,
   finalizeWorktreeRemovalRows,
   getRegistryWorktreeProvisionedPaths,
   updateRegistryWorktree,
@@ -89,7 +89,7 @@ export async function removeSettledManagedWorktree(
   // Admission already excludes run leases and competing removers. Retain its
   // exact claim through snapshot, deletion, and terminal publication.
   const claimToken = params.claimToken;
-  const assertClaim = createWorktreeRemovalClaimsGuard(env, [record.id], claimToken);
+  const assertClaim = await prepareWorktreeRemovalClaimsGuard(env, [record.id], claimToken);
   const allocationGuard = params.commitGuard;
   let exactFinalized = false;
   if (params.exactState) {

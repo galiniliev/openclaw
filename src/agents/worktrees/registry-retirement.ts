@@ -1,9 +1,11 @@
 import { GitCommandTimeoutError } from "../../infra/git-exec.js";
 import { SqliteWorkerError } from "../../infra/sqlite-worker-contract.js";
 import type { WorktreeWorkerOperations } from "./dispatch.worker.js";
-import { readRegistryWorktreeForMutation } from "./registry-read.js";
+import {
+  prepareWorktreeRemovalClaimsGuard,
+  readRegistryWorktreeForMutation,
+} from "./registry-read.js";
 import { runWorktreeRegistryCommand } from "./registry-run-end.js";
-import { createWorktreeRemovalClaimsGuard } from "./registry.js";
 import {
   captureWorktreeRunEndContext,
   captureWorktreeRegistryMutation,
@@ -34,7 +36,7 @@ export async function deferFailedWorktreeRemoval(params: {
   assertCurrent: () => void;
 }): Promise<WorktreeRemovalDeferral | undefined> {
   const assertClaim = params.claimToken
-    ? createWorktreeRemovalClaimsGuard(params.env, [params.id], params.claimToken)
+    ? await prepareWorktreeRemovalClaimsGuard(params.env, [params.id], params.claimToken)
     : undefined;
   const assertCurrent = () => {
     params.assertCurrent();

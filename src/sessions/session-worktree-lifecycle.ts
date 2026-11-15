@@ -11,13 +11,11 @@ import {
 import { assertManagedWorktreeRemovalComplete } from "../agents/worktrees/git-lock.js";
 import { runGit } from "../agents/worktrees/git.js";
 import {
+  prepareWorktreeRemovalAvailability,
   captureWorktreeRegistryReadGuard,
   readRegistryWorktree,
 } from "../agents/worktrees/registry-read.js";
-import {
-  assertWorktreeRemovalAvailable,
-  updateRegistryWorktree,
-} from "../agents/worktrees/registry.js";
+import { updateRegistryWorktree } from "../agents/worktrees/registry.js";
 import { captureWorktreeRunEndContext } from "../agents/worktrees/run-end-lifecycle.js";
 import {
   classifyWorktreeRemovalError,
@@ -235,13 +233,17 @@ export async function restoreSessionWorktree(params: {
     // The destination's patch snapshot owns archivedAt; successful unarchive changes it.
     fields: ["sessionId", "lifecycleRevision", "worktree"],
   });
+  const assertRemovalAvailable = await prepareWorktreeRemovalAvailability(
+    scope.env ?? process.env,
+    id,
+  );
   const assertCurrent = composeSessionSourceAssertion(
     [params.commitGuard, source],
     (assertSources) => {
       assertSources();
       assertWorktreeCurrent();
       try {
-        assertWorktreeRemovalAvailable(scope.env ?? process.env, id);
+        assertRemovalAvailable();
       } catch (error) {
         if (error instanceof WorktreeRemovalContentionError) {
           throw new SessionWorktreeLifecycleError(error.message, "busy");

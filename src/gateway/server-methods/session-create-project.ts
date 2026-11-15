@@ -38,11 +38,10 @@ import {
 } from "../../sessions/session-controller.rpc-sources.js";
 import { ensureSessionDiffBaseline } from "../../sessions/session-diff-baseline.js";
 import { createDeferredCore } from "../../shared/deferred.js";
-import { githubApiToken } from "../github-public-api.js";
 import { ADMIN_SCOPE } from "../operator-scopes.js";
 import { projectRequesterForClient, resolveRequesterProject } from "../project-access.js";
-import { prepareGatewayProjectGitHubIdentity } from "../project-github-identity.js";
 import { commitPreparedSessionWorkspace } from "../session-lifecycle-preparation.js";
+import { prepareSessionProjectGitAccess } from "../session-project-git-access.js";
 import { resolveSessionProjectRootForRecord } from "../session-project-source.js";
 import { invalidSessionRequest } from "../session-request-error.js";
 import { resolveExplicitSessionName } from "../session-title-state.js";
@@ -239,6 +238,7 @@ export function prepareSessionWorkspace(params: {
     ...session,
     entry,
     runId: clientRunId,
+    client,
     context,
     signal,
     assertCurrent: assertRunOwnership,
@@ -300,6 +300,7 @@ export async function prepareSessionWorkspaceForRun(params: {
   runId: string;
   sessionKey: string;
   storePath: string;
+  client?: GatewayRequestHandlerOptions["client"];
   context: Parameters<typeof emitSessionsChanged>[0] &
     Pick<GatewayRequestHandlerOptions["context"], "logGateway">;
   signal: AbortSignal;
@@ -377,34 +378,37 @@ export async function prepareSessionWorkspaceForRun(params: {
         delete entry.pendingWorktree;
         return;
       }
-      const configuredToken = gitUrl ? githubApiToken(process.env, cfg) : undefined;
-      const projectIdentity =
-        gitUrl && !configuredToken
-          ? await prepareGatewayProjectGitHubIdentity({
-              agentId,
-              assertActive: assertRunOwnership,
-              config: cfg,
-              context,
-            })
-          : undefined;
-      const projectToken = configuredToken ?? projectIdentity?.token;
+      await using gitAccess = await prepareSessionProjectGitAccess({
+        cfg,
+        context,
+        client: params.client,
+        agentId,
+        sessionKey,
+        sessionId: entry.sessionId,
+        gitUrl,
+        workspace: pending?.workspace,
+        projectId: saved.projectId,
+        baseRef: pending?.baseRef,
+        checkoutCommit: pending?.baseCommit,
+        assertCurrent: assertRunOwnership,
+      });
       const assertProjectCurrent = () => {
         assertRunOwnership();
         if (metadata) {
           assertSavedWorkspaceIntent(metadata.readCurrent());
         }
-        projectIdentity?.assertSelected();
+        gitAccess?.assertCurrent();
       };
       const cloneOptions = {
         signal,
-        token: projectToken,
+        token: gitAccess?.token,
         assertCurrent: assertProjectCurrent,
-        startRun: projectIdentity?.start,
+        startRun: gitAccess?.startRun,
       };
       const project = gitUrl
         ? await materializeProjectClone({ cfg, gitUrl }, cloneOptions)
         : undefined;
-      projectIdentity?.assertSelected();
+      gitAccess?.assertCurrent();
       assertRunOwnership();
       const directory = project
         ? await resolveProjectDirectory(project.repoRoot)
@@ -432,7 +436,7 @@ export async function prepareSessionWorkspaceForRun(params: {
           project?.source === "cloned"
         ) {
           await refreshProjectClone(project, cloneOptions);
-          projectIdentity?.assertSelected();
+          gitAccess?.assertCurrent();
           assertRunOwnership();
           resolved = await resolveSessionWorktreeBase(directory, pending.baseRef, signal);
         }
@@ -477,6 +481,7 @@ export async function prepareSessionWorkspaceForRun(params: {
         name: pending.name,
         baseRef: pending.baseRef,
         checkoutCommit: pending.baseCommit,
+        gitNetwork: gitAccess?.gitNetwork,
         // An existing title can name the checkout; otherwise allocation owns
         // its short generated name while the chat title is prepared separately.
         label: resolveExplicitSessionName(saved),
