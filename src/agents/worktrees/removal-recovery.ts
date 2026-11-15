@@ -9,12 +9,12 @@ import { withWorktreeGitConfig } from "./checkout-git-config.js";
 import { lockState } from "./git-lock.js";
 import { rawPathStat, splitNullBuffer } from "./git-path-inventory.js";
 import { commandError, listGitWorktrees, requireGit, requireGitBuffer, runGit } from "./git.js";
-import { captureWorktreeRegistryReadGuard, readRegistryWorktree } from "./registry-read.js";
 import {
-  createWorktreeRemovalClaimsGuard,
-  getRegistryWorktreeProvisionedPaths,
-  updateRegistryWorktree,
-} from "./registry.js";
+  prepareWorktreeRemovalClaimsGuard,
+  captureWorktreeRegistryReadGuard,
+  readRegistryWorktree,
+} from "./registry-read.js";
+import { getRegistryWorktreeProvisionedPaths, updateRegistryWorktree } from "./registry.js";
 import {
   prepareSnapshotBranchDeletion,
   removeManagedCheckout,
@@ -191,7 +191,7 @@ async function recoverRemovalWithAllocation(params: {
       predicates: [...(params.workerAuthority?.predicates ?? []), { kind: "record", record }],
     },
   });
-  const assertClaim = createWorktreeRemovalClaimsGuard(params.env, [record.id], token);
+  let assertClaim = assertRecord;
   const assertCurrent = () => {
     assertRecord();
     assertDirectRefFiles();
@@ -204,6 +204,7 @@ async function recoverRemovalWithAllocation(params: {
     env: { GIT_NO_LAZY_FETCH: "1", GIT_NO_REPLACE_OBJECTS: "1", GIT_OPTIONAL_LOCKS: "0" },
   };
   try {
+    assertClaim = await prepareWorktreeRemovalClaimsGuard(params.env, [record.id], token);
     const provisioned = await getRegistryWorktreeProvisionedPaths(params.env, record.id);
     if (!provisioned || provisioned.length) {
       throw preserved("Provisioned-file recovery requires its original archive owner");

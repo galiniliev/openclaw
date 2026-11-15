@@ -73,7 +73,7 @@ export class ProjectCloneError extends Error {
   }
 }
 
-function cloneCommandEnv(
+export function projectCheckoutGitEnvironment(
   repositoryUrl: string | undefined,
   token: string | undefined,
   env: NodeJS.ProcessEnv,
@@ -207,7 +207,7 @@ export async function cloneProjectCheckout(
     );
   }
   await fs.mkdir(path.dirname(input.target), { recursive: true });
-  const commandEnv = cloneCommandEnv(input.url, options.token, env);
+  const commandEnv = projectCheckoutGitEnvironment(input.url, options.token, env);
   const result = await withGitNetworkRetry(
     "clone",
     {
@@ -317,7 +317,7 @@ export async function prepareProjectCheckoutDefaultBase(
       input.target,
       {
         env: {
-          ...cloneCommandEnv(input.url, options.token, options.env ?? process.env),
+          ...projectCheckoutGitEnvironment(input.url, options.token, options.env ?? process.env),
           GIT_NO_LAZY_FETCH: "1",
           GIT_OBJECT_DIRECTORY: stagingOptions.objectDirectory,
         },
@@ -563,7 +563,7 @@ function runProjectCheckoutGit(
         startRun: options.startRun,
         ...commandOptions,
         env: {
-          ...cloneCommandEnv(input.url, options.token, options.env ?? process.env),
+          ...projectCheckoutGitEnvironment(input.url, options.token, options.env ?? process.env),
           ...commandOptions.env,
           ...(options.objectDirectory ? { GIT_OBJECT_DIRECTORY: options.objectDirectory } : {}),
         },

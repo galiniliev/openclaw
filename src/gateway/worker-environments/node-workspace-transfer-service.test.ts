@@ -224,6 +224,18 @@ describe("node workspace transfer service", () => {
 
       await fs.writeFile(path.join(localPath, ".git", "HEAD"), "invalid HEAD\n");
       await expect(service.prepareSync(request)).rejects.toThrow("Worker workspace sync failed");
+      await service.closeAll();
+      for (const [operation, invoke] of [
+        [
+          "upload",
+          () => service.prepareUpload(request.environmentId, committed.snapshot.manifestRef),
+        ],
+        ["download", () => service.publishSnapshot(request.environmentId, committed.snapshot)],
+      ] as const) {
+        expect(invoke).toThrow(
+          expect.objectContaining({ name: "NodeWorkerWorkspaceTransferError", operation }),
+        );
+      }
     } finally {
       await service.closeAll();
     }

@@ -20,12 +20,12 @@ import { insertRegistryWorktreeProvisionedChunk } from "./provisioned-snapshot.t
 import {
   getRegistryWorktreeProvisionedChunk,
   prepareWorktreeRegistryGuard,
+  prepareWorktreeRemovalClaimsGuard,
 } from "./registry-read.js";
 import {
   abortWorktreeRemovalRow,
   claimWorktreeRemovalRow,
   clearRegistryWorktreeProvisionedChunks,
-  createWorktreeRemovalClaimsGuard,
   deleteRegistryWorktree,
   getRegistryWorktreeProvisionedPaths,
   getRegistryWorktreeProvisionedState,
@@ -91,9 +91,15 @@ it("checks every captured removal claim in the current database generation", asy
       now: 1,
     });
   }
-  const assertClaims = createWorktreeRemovalClaimsGuard(env, ["first", "second", "first"], token);
+  let assertClaims = await prepareWorktreeRemovalClaimsGuard(
+    env,
+    ["first", "second", "first"],
+    token,
+  );
   expect(assertClaims).not.toThrow();
   await closeDatabase();
+  expect(assertClaims).toThrow("Worktree removal claim changed");
+  assertClaims = await prepareWorktreeRemovalClaimsGuard(env, ["first", "second", "first"], token);
   expect(assertClaims).not.toThrow();
   await abortWorktreeRemovalRow(env, "second", token);
   expect(assertClaims).toThrow("Worktree removal claim changed");

@@ -6,6 +6,7 @@ import type {
   WorktreesRetireSnapshotParams,
 } from "../../../packages/gateway-protocol/src/schema/worktrees.js";
 import type { SessionSourceAssertion } from "../../config/sessions/session-source-authority.js";
+import type { GitCommandOptions } from "../../infra/git-exec.js";
 import type { OpenClawStateAsyncLeaseContext } from "../../state/openclaw-state-lease-context.js";
 import type { OpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.types.js";
 import type { SandboxStateOwnerPath } from "../sandbox/state-owner-path.js";
@@ -73,6 +74,7 @@ export type WorktreeRegistryPredicate =
         | "repoRoot"
       >;
     }
+  | { kind: "removal-available"; id: string; token?: string }
   | { kind: "removal-claim"; id: string; token: string }
   | { kind: "removal-claims"; ids: readonly string[]; token: string }
   | { kind: "projection"; id: string; ownerId: string; path: string; repoRoot: string }
@@ -124,6 +126,8 @@ export type CreateManagedWorktreeParams = {
   /** Derived default name; collisions receive a stable numeric suffix. */
   suggestedName?: string;
   baseRef?: string;
+  /** Ephemeral admitted network transport; never persisted or passed to setup. */
+  gitNetwork?: Pick<GitCommandOptions, "env" | "startRun">;
   /** Repository-owned source cone lists; selection never requests dependency setup. */
   profiles?: string[];
   /** Verified immutable checkout point when baseRef retains the publication target. */

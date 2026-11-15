@@ -9,12 +9,12 @@ import type { WorktreeAllocationGuard } from "./allocation.js";
 import { withManagedWorktreeGit } from "./checkout-policy.js";
 import { WorktreeRemovalContentionError } from "./errors.js";
 import type { WorktreeEvictionReason } from "./git-worktree-operations.js";
-import { prepareWorktreeRegistryGuard, readRegistryWorktrees } from "./registry-read.js";
 import {
-  createWorktreeRemovalClaimsGuard,
-  getRegistryWorktreeProvisionedPaths,
-  updateRegistryWorktree,
-} from "./registry.js";
+  prepareWorktreeRemovalClaimsGuard,
+  prepareWorktreeRegistryGuard,
+  readRegistryWorktrees,
+} from "./registry-read.js";
+import { getRegistryWorktreeProvisionedPaths, updateRegistryWorktree } from "./registry.js";
 import { captureWorktreeRunEndContext, withWorktreeRunEnd } from "./run-end-lifecycle.js";
 import {
   abortWorktreeRemoval,
@@ -55,7 +55,7 @@ export async function evictManagedWorktree(params: {
       ...authority,
       predicates: [...(authority.predicates ?? []), { kind: "binding", record }],
     };
-    let assertClaims = createWorktreeRemovalClaimsGuard(env, [record.id], token);
+    let assertClaims = guard.commitGuard;
     const assertBinding = await prepareWorktreeRegistryGuard(captureWorktreeRunEndContext(env), {
       predicates: [{ kind: "binding", record }],
     });
@@ -74,6 +74,7 @@ export async function evictManagedWorktree(params: {
       | { ok: true; value: WorktreeEvictionReason | "dirty-purged" }
       | { ok: false; error: unknown };
     try {
+      assertClaims = await prepareWorktreeRemovalClaimsGuard(env, [record.id], token);
       assertCurrent();
       const { withSettledLocalWorkspace } =
         await import("../../gateway/worker-environments/local-workspace-projection.js");
@@ -193,7 +194,7 @@ export async function evictManagedWorktree(params: {
                 throw error;
               }
               dependencies.push(id);
-              assertClaims = createWorktreeRemovalClaimsGuard(
+              assertClaims = await prepareWorktreeRemovalClaimsGuard(
                 env,
                 [record.id, ...dependencies],
                 token,

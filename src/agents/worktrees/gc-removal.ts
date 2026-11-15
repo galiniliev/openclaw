@@ -13,17 +13,17 @@ import {
 import { hasWorktreeUnknownOutcome } from "./errors.js";
 import type { WorktreeGcProgress } from "./gc-progress.js";
 import { worktreePathExists } from "./git.js";
-import { prepareWorktreeRegistryGuard, readRegistryWorktreeForMutation } from "./registry-read.js";
+import {
+  prepareWorktreeRemovalClaimsGuard,
+  prepareWorktreeRegistryGuard,
+  readRegistryWorktreeForMutation,
+} from "./registry-read.js";
 import {
   deferFailedWorktreeRemoval,
   deferWorktreeCleanup,
   retireMissingRegistryWorktree,
 } from "./registry-retirement.js";
-import {
-  createWorktreeRemovalClaimsGuard,
-  updateRegistryWorktree,
-  WorktreeRemovalContentionError,
-} from "./registry.js";
+import { updateRegistryWorktree, WorktreeRemovalContentionError } from "./registry.js";
 import {
   isWorktreePermissionError,
   isWorktreeRepositoryCorruptionError,
@@ -402,7 +402,7 @@ export function createWorktreeGcRemoval(context: {
           );
           try {
             await withWorktreeAllocationLease(custody, async (guard) => {
-              const assertClaim = createWorktreeRemovalClaimsGuard(env, [record.id], token);
+              const assertClaim = await prepareWorktreeRemovalClaimsGuard(env, [record.id], token);
               if (!(await hasMissingManagedWorktreeGitdir(record))) {
                 throw new WorktreeRemovalLockError(
                   "busy",

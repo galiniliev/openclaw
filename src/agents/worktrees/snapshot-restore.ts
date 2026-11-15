@@ -20,12 +20,12 @@ import {
 } from "./git.js";
 import { restoreProvisionedFiles } from "./provisioned-files.js";
 import { SNAPSHOT_CHUNK_BYTES } from "./provisioned-snapshot.js";
-import { captureWorktreeRegistryReadGuard, readRegistryWorktree } from "./registry-read.js";
 import {
-  createWorktreeRemovalClaimsGuard,
-  getRegistryWorktreeProvisionedState,
-  updateRegistryWorktree,
-} from "./registry.js";
+  prepareWorktreeRemovalClaimsGuard,
+  captureWorktreeRegistryReadGuard,
+  readRegistryWorktree,
+} from "./registry-read.js";
+import { getRegistryWorktreeProvisionedState, updateRegistryWorktree } from "./registry.js";
 import {
   assertExactStateOwner,
   assertExactStateSourceIdentity,
@@ -151,7 +151,6 @@ export async function restoreManagedWorktreeSnapshot(
       assertRecordCurrent();
     };
     const token = randomUUID();
-    const assertClaim = createWorktreeRemovalClaimsGuard(context.env, [record.id], token);
     await claimWorktreeRemoval(context.env, {
       worktreeId: record.id,
       token,
@@ -162,6 +161,7 @@ export async function restoreManagedWorktreeSnapshot(
       },
     });
     try {
+      const assertClaim = await prepareWorktreeRemovalClaimsGuard(context.env, [record.id], token);
       return await restoreSnapshot(
         {
           ...input,

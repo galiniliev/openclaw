@@ -1,9 +1,5 @@
 import { randomUUID } from "node:crypto";
-import {
-  executeSqliteQuerySync,
-  getNodeSqliteKysely,
-  sqliteStringSet,
-} from "../../infra/kysely-sync.js";
+import { executeSqliteQuerySync, getNodeSqliteKysely } from "../../infra/kysely-sync.js";
 import type { EngineConnection } from "../../infra/sql-connection.js";
 import { withStateDatabaseSchemaMaintenance } from "../../infra/state-database-maintenance.js";
 import {
@@ -12,12 +8,8 @@ import {
 } from "../../state/openclaw-state-db-readonly.js";
 import { tableExists, tableHasColumn } from "../../state/openclaw-state-db-schema-helpers.js";
 import type { DB as OpenClawStateKyselyDatabase } from "../../state/openclaw-state-db.generated.js";
-import {
-  openOpenClawStateDatabase,
-  runOpenClawStateWriteTransaction,
-} from "../../state/openclaw-state-db.js";
+import { runOpenClawStateWriteTransaction } from "../../state/openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "../../state/openclaw-state-db.paths.js";
-import { WorktreeRemovalContentionError } from "./errors.js";
 import { worktreeRegistryPublication } from "./registry-publication.js";
 import { rowToRecord } from "./registry-read.kernel.js";
 import { runWorktreeRunEndCommand } from "./registry-run-end.js";
@@ -26,11 +18,6 @@ import {
   captureWorktreeRegistryMutation,
   captureWorktreeRunEndContext,
 } from "./run-end-lifecycle.js";
-import {
-  collectLiveRunLeases,
-  worktreeRunLeaseScope,
-  WORKTREE_REMOVING_LEASE_KEY,
-} from "./run-lease-owner.js";
 import { releaseWorktreeRunLeaseInDatabase } from "./run-lease-store.kernel.js";
 import type { ManagedWorktreeRecord, WorktreeWorkerAuthority } from "./types.js";
 
@@ -50,10 +37,6 @@ type WorktreeRegistryDatabase = Pick<
   OpenClawStateKyselyDatabase,
   "worktrees" | "worktree_provisioned_file_chunks" | "state_leases"
 >;
-
-function dbFor(env: NodeJS.ProcessEnv): EngineConnection {
-  return openOpenClawStateDatabase({ env }).db;
-}
 
 function kyselyFor(db: EngineConnection) {
   return getNodeSqliteKysely<WorktreeRegistryDatabase>(db);
@@ -235,38 +218,6 @@ export function deleteRegistryWorktree(
   );
 }
 
-/** Batch lock-primitive read: one JSON binding avoids per-claim SQL and SQLite bind limits. */
-export function createWorktreeRemovalClaimsGuard(
-  env: NodeJS.ProcessEnv,
-  worktreeIds: readonly string[],
-  token: string,
-): () => void {
-  const ids = [...new Set(worktreeIds)];
-  const count = ids.length;
-  const scopes = sqliteStringSet(ids.map(worktreeRunLeaseScope));
-  return () => {
-    if (count === 0) {
-      return;
-    }
-    const db = dbFor(env);
-    const held = executeSqliteQuerySync(
-      db,
-      kyselyFor(db)
-        .selectFrom("state_leases")
-        .select((eb) => eb.fn.countAll<number>().as("held"))
-        .where("state_leases.scope", "in", scopes)
-        .where("state_leases.lease_key", "=", WORKTREE_REMOVING_LEASE_KEY)
-        .where("state_leases.owner", "=", token),
-    ).rows[0]?.held;
-    if (held !== count) {
-      throw new WorktreeRemovalContentionError(
-        "busy",
-        "Worktree removal claim changed; checkout preserved",
-      );
-    }
-  };
-}
-
 export function releaseWorktreeRunLeaseRow(
   env: NodeJS.ProcessEnv,
   worktreeId: string,
@@ -287,26 +238,5 @@ export function releaseWorktreeRunLeaseRow(
     );
   } finally {
     mutation.settle(false);
-  }
-}
-
-/** Check removal custody before a session mutation waits for checkout allocation. */
-export function assertWorktreeRemovalAvailable(
-  env: NodeJS.ProcessEnv,
-  worktreeId: string,
-  ownToken?: string,
-): void {
-  const db = dbFor(env);
-  const token = collectLiveRunLeases(
-    db,
-    kyselyFor(db),
-    worktreeRunLeaseScope(worktreeId),
-    false,
-  ).removingToken;
-  if (token !== undefined && token !== ownToken) {
-    throw new WorktreeRemovalContentionError(
-      "busy",
-      "Worktree removal is in progress; retry after cleanup settles",
-    );
   }
 }
