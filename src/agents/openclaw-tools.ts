@@ -593,7 +593,7 @@ function* createOpenClawToolsSteps(
       ? createGitHubPublishTool({
           ...options,
           publicationAvailable: options.githubPublicationAvailable,
-          observationOnly:
+          sharedWriterUnavailable:
             options.githubPublicationConfigurationAware === true &&
             readGitHubPublicationConfiguration({
               config: availabilityConfig ?? {},

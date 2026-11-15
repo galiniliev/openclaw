@@ -16,6 +16,7 @@ import {
   createCronCreatorAuthorityCapability,
   runWithCronCreatorAuthorityCapability,
 } from "./cron-creator-authority-context.js";
+import * as githubIdentityConfig from "./github-tool-identity-config.js";
 import { createLazyExecTool } from "./lazy-exec-tool.js";
 import { createOpenClawTools } from "./openclaw-tools.js";
 import {
@@ -458,6 +459,75 @@ describe("gateway client capability tool filtering", () => {
     expect(
       hasTool(createOpenClawTools({ githubPublicationAvailable: true }), "github_publish"),
     ).toBe(true);
+  });
+
+  it("offers explicit personal publication without shared configuration or construction-time account reads", async () => {
+    using config = vi
+      .spyOn(githubIdentityConfig, "readGitHubPublicationConfiguration")
+      .mockReturnValue("unconfigured");
+    const caller = { agentId: "main", sessionKey: "agent:main:personal-only" };
+    const account = { accountId: 101, login: "alice" };
+    const result = { requestId: "a1111111-1111-4111-8111-111111111111", status: "requested" };
+    using call = vi
+      .spyOn(inProcessGateway, "callInProcessGatewayTool")
+      .mockResolvedValueOnce({
+        personal: { state: "connected", generation: "original-generation", account },
+      })
+      .mockResolvedValue(result);
+    const build = (available = true) =>
+      expectToolNamed(
+        createTestOpenClawTools({
+          agentSessionKey: caller.sessionKey,
+          githubPublicationAvailable: available,
+          githubPublicationConfigurationAware: true,
+          wrapBeforeToolCallHook: false,
+        }),
+        "github_publish",
+      );
+    const tool = build();
+    expect(build().parameters).toBe(tool.parameters);
+    expect(call).not.toHaveBeenCalled();
+    expect(config).toHaveBeenCalled();
+    for (const input of [
+      { action: "readiness" },
+      { action: "readiness", publisher: "personal" },
+      { publisher: "personal", title: "Repair" },
+      { action: "status", publisher: "personal", requestId: result.requestId },
+      { action: "confirm", publisher: "personal", requestId: result.requestId },
+    ]) {
+      expect(Value.Check(tool.parameters, input), JSON.stringify(input)).toBe(true);
+    }
+    for (const input of [
+      {},
+      { action: "publish" },
+      { publisher: "shared" },
+      { action: "status", requestId: result.requestId },
+      { action: "edit", publisher: "personal" },
+      { publisher: "personal", workspacePath: "/tmp/workspace" },
+    ]) {
+      expect(Value.Check(tool.parameters, input), JSON.stringify(input)).toBe(false);
+    }
+    const execute = (args: unknown) =>
+      withGatewayToolCallerIdentity(caller, () => tool.execute("personal-only", args));
+    await expect(execute({})).rejects.toThrow("explicitly select publisher personal");
+    await expect(execute({ action: "edit" })).rejects.toThrow(
+      "explicitly select publisher personal",
+    );
+    expect(call).not.toHaveBeenCalled();
+    await execute({ publisher: "personal", title: "Repair" });
+    expect(call.mock.calls.map(([method]) => method)).toEqual([
+      "sessions.github.options",
+      "sessions.github.publish",
+    ]);
+    expect(call).toHaveBeenLastCalledWith("sessions.github.publish", {
+      sessionKey: caller.sessionKey,
+      idempotencyKey: "personal-only",
+      title: "Repair",
+      selection: { source: "personal", generation: "original-generation", account },
+    });
+    const unsupported = build(false);
+    expect(Value.Check(unsupported.parameters, { action: "readiness" })).toBe(true);
+    expect(Value.Check(unsupported.parameters, { publisher: "personal" })).toBe(false);
   });
 
   it("negotiates GitHub reconnect guidance with the requesting Control UI", () => {

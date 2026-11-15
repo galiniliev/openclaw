@@ -4,7 +4,7 @@ import { openClawIdRecoveryPrincipalSchema } from "../gateway/openclaw-id/tunnel
 
 const requesterSchema = z
   .strictObject({
-    version: z.literal(1),
+    version: z.union([z.literal(1), z.literal(2)]),
     actor: z.discriminatedUnion("kind", [
       z.strictObject({ kind: z.literal("operator"), profileId: z.string().min(1).max(128) }),
       z.strictObject({ kind: z.literal("system") }),
@@ -29,6 +29,7 @@ const requesterSchema = z
       .optional(),
   })
   .refine((value) => value.actor.kind !== "system" || value.grant === null)
+  .refine((value) => value.version !== 2 || value.actor.kind === "operator")
   .refine(
     (value) =>
       !value.openclawIdPrincipal ||
@@ -81,7 +82,7 @@ function immutableRequester(
   value: GitHubPublicationRequesterSnapshot,
 ): GitHubPublicationRequesterSnapshot {
   return Object.freeze({
-    version: 1,
+    version: value.version,
     actor: Object.freeze(value.actor),
     scopes: Object.freeze([...new Set(value.scopes)].toSorted()),
     ...(value.openclawIdPrincipal
