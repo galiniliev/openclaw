@@ -19,6 +19,7 @@ import {
   NODE_WORKSPACE_EMPTY_MANIFEST_REF,
   NodeWorkerPublicationConflictError,
 } from "../worker/node-workspace-transfer-protocol.js";
+import { transferNodeRepositoryPublication } from "./node-worker-publication-merge.js";
 import { runNodeWorkerWorkspaceTransfer } from "./node-worker-transfer-client.js";
 
 const temporary = useAutoCleanupTempDirTracker(afterEach);
@@ -197,4 +198,103 @@ it("restores exact retained ancestry through transfer without changing later edi
   expect(git("symbolic-ref", "--short", "HEAD")).toBe("main");
   expect(await fs.readFile(path.join(workspace, ".git", "index"))).toEqual(index);
   expect(await fs.readFile(path.join(workspace, "fix.txt"), "utf8")).toBe("later unstaged work\n");
+});
+
+it("merges a shallow editing checkout without borrowing its incomplete ancestry", async () => {
+  const root = temporary.make("publication-shallow-");
+  const remote = path.join(root, "remote");
+  const workspace = path.join(root, "workspace");
+  const inputRoot = path.join(root, "input");
+  await fs.mkdir(remote);
+  const env = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: os.devNull,
+    GIT_CONFIG_SYSTEM: os.devNull,
+    GIT_CONFIG_COUNT: "0",
+    GIT_AUTHOR_NAME: "Fixture",
+    GIT_AUTHOR_EMAIL: "fixture@example.test",
+    GIT_COMMITTER_NAME: "Fixture",
+    GIT_COMMITTER_EMAIL: "fixture@example.test",
+  };
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", args, { cwd, env, encoding: "utf8" }).trim();
+  git(remote, "init", "--quiet", "--initial-branch=main");
+  const historical = Array.from({ length: 2_000 }, (_, i) =>
+    createHash("sha256").update(String(i)).digest("hex"),
+  ).join("\n");
+  await fs.writeFile(path.join(remote, "history.txt"), historical);
+  git(remote, "add", ".");
+  git(remote, "commit", "--quiet", "-m", "ancestor");
+  const ancestor = git(remote, "rev-parse", "HEAD");
+  await fs.writeFile(path.join(remote, "history.txt"), "shallow tip\n");
+  await fs.writeFile(path.join(remote, "fix.txt"), "base\n");
+  git(remote, "add", ".");
+  git(remote, "commit", "--quiet", "-m", "base");
+  const baseCommit = git(remote, "rev-parse", "HEAD");
+  git(root, "clone", "--quiet", "--depth=1", pathToFileURL(remote).href, workspace);
+  expect(git(workspace, "rev-parse", "--is-shallow-repository")).toBe("true");
+  expect(spawnSync("git", ["cat-file", "-e", ancestor], { cwd: workspace, env }).status).not.toBe(
+    0,
+  );
+  await fs.writeFile(path.join(workspace, "fix.txt"), "saved repair\n");
+  execFileSync(
+    process.execPath,
+    ["-e", REMOTE_GITHUB_PUBLICATION_SNAPSHOT_JS, workspace, baseCommit, inputRoot],
+    { env },
+  );
+  const rawInput = await fs.readFile(path.join(inputRoot, "snapshot.json"));
+  const inputDigest = `sha256:${createHash("sha256").update(rawInput).digest("hex")}`;
+  await fs.writeFile(path.join(remote, "history.txt"), historical + "\nnew upstream line\n");
+  git(remote, "commit", "--quiet", "-am", "latest main");
+  const targetCommit = git(remote, "rev-parse", "HEAD");
+  const index = await fs.readFile(path.join(workspace, ".git", "index"));
+  const shallow = await fs.readFile(path.join(workspace, ".git", "shallow"));
+  await transferNodeRepositoryPublication(
+    {
+      gatewayUrl: "https://gateway.example.test",
+      environmentId: "environment",
+      workspaceDir: workspace,
+      manifestHome: root,
+      request: { gatewayUrl: "https://gateway.example.test", token: "synthetic-token" },
+      setStage() {},
+      transfer: {
+        direction: "publication",
+        token: "synthetic-token",
+        inputToken: "synthetic-input",
+        inputManifestRef: NODE_WORKSPACE_EMPTY_MANIFEST_REF,
+        inputDigest,
+        sourceUrl: pathToFileURL(remote).href,
+        targetUrl: pathToFileURL(remote).href,
+        targetCommit,
+        gitToken: "synthetic-token",
+      },
+    },
+    {
+      download: async (params) => {
+        await fs.cp(inputRoot, params.workspaceDir, { recursive: true });
+        return "";
+      },
+      upload: async (params) => {
+        const snapshot = JSON.parse(
+          await fs.readFile(path.join(params.workspaceDir, "snapshot.json"), "utf8"),
+        );
+        expect(snapshot.baseCommit).toBe(targetCommit);
+        expect(snapshot.entries).toEqual([
+          { path: "fix.txt", mode: "100644", sha: expect.any(String) },
+        ]);
+        expect(
+          await fs.readFile(
+            path.join(params.workspaceDir, "blobs", snapshot.entries[0].sha),
+            "utf8",
+          ),
+        ).toBe("saved repair\n");
+        return "";
+      },
+    },
+  );
+  expect(git(workspace, "rev-parse", "HEAD")).toBe(baseCommit);
+  expect(await fs.readFile(path.join(workspace, ".git", "index"))).toEqual(index);
+  expect(await fs.readFile(path.join(workspace, ".git", "shallow"))).toEqual(shallow);
+  expect(await fs.readFile(path.join(workspace, "fix.txt"), "utf8")).toBe("saved repair\n");
+  expect(await fs.readFile(path.join(inputRoot, "snapshot.json"))).toEqual(rawInput);
 });

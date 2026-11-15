@@ -139,7 +139,8 @@ async function mergeNodeRepositoryPublication(params: {
       )
         .toString("utf8")
         .trim();
-      await fs.writeFile(path.join(dir, "objects", "info", "alternates"), `${objects}\n`);
+      // Fetch complete ancestry before borrowing shallow or partial editing objects.
+      // Negotiation must never advertise objects whose parents are unavailable.
       for (const [role, url, commit] of [
         ["source-base", params.sourceUrl, snapshot.baseCommit],
         ["target-base", params.targetUrl, params.targetCommit],
@@ -160,6 +161,7 @@ async function mergeNodeRepositoryPublication(params: {
           role,
         );
       }
+      await fs.writeFile(path.join(dir, "objects", "info", "alternates"), `${objects}\n`);
       if ((await text(["rev-parse", `${snapshot.baseCommit}^{tree}`])) !== snapshot.baseTree) {
         throw new Error("Publication integration source base changed.");
       }
