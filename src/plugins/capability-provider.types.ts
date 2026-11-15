@@ -72,6 +72,18 @@ export type {
 
 export type WorkerProfile = Readonly<Record<string, PluginJsonValue>>;
 
+/** Snapshot inspection facts derived by native cache owners, never an execution grant. */
+export type WorkerValidatedMachineCaches = {
+  nodeToolchain?: {
+    version: string;
+    platform: "linux";
+    arch: "x64" | "arm64";
+    archiveSha256: string;
+    inventorySha256: string;
+  };
+  workerBundle?: { bundleHash: string };
+};
+
 /** Provider-authored picker metadata for one machine class or exact machine type. */
 export type WorkerMachineOption = Readonly<SchemaContract<ProtocolWorkerMachineOption>>;
 
@@ -184,6 +196,8 @@ type WorkerNodeBootstrapAccess = {
 /** Operation-bound immutable artifacts without a node identity or enrollment credential. */
 export type WorkerNodeRuntimePreparation = WorkerNodeBootstrapAccess & {
   workerBundle: {
+    bundleHash?: string;
+    protocolFeatures?: readonly string[];
     url: string;
     token: string;
     sha256: string;
@@ -226,7 +240,10 @@ export type WorkerLease = {
   /** The SSH account also owns processes unrelated to this worker lease. */
   sharedHost?: boolean;
   desktop?: WorkerDesktopEndpoint;
-} & ({ ssh: WorkerSshEndpoint; node?: never } | { node: { deviceId: string }; ssh?: never });
+} & (
+  | { ssh: WorkerSshEndpoint; node?: never }
+  | { node: { deviceId: string; preparedRuntime?: WorkerNodeRuntimeIdentity }; ssh?: never }
+);
 
 /** Authoritative inspection result for an already-known worker lease. */
 export type WorkerLeaseStatus = {
@@ -427,6 +444,8 @@ export type WorkerProvider = {
       assertCurrent?: () => void;
       /** Original committed resource on replay; never adopt a replacement. */
       resourceReceipt?: WorkerResourceReceipt;
+      /** Native environment identity for non-authoritative phase diagnostics. */
+      environmentId?: string;
       /** Immutable acquisition policy; activity and inspection never extend compute. */
       retention?: WorkerRetentionPolicy;
       /** Await before setup/enrollment or cleanup affects a newly identified resource. */
@@ -458,9 +477,32 @@ export type WorkerProvider = {
         inspectPreparedWorkspace?: (transport: {
           runScript: (script: string, signal: AbortSignal) => Promise<string>;
           recordRecipePreparation?: (value: WorkerRecipePreparation) => Promise<void>;
-        }) => Promise<void>;
+          /** Completed base recorded by this allocation before enrollment. */
+          baseCommit?: string;
+          /** Verify the complete selected cache inventory before reusable image capture. */
+          snapshot?: true;
+          /** Current producer identity for snapshot-only machine bundle inspection. */
+          snapshotWorkerBundle?: {
+            bundleHash: string;
+            openclawVersion: string;
+            protocolFeatures: readonly string[];
+          };
+        }) => Promise<void | {
+          namespace: string;
+          seedKey: string;
+          cacheKey: string;
+          baseCommit: string;
+          workspaceDir: string;
+          homeDir: string;
+          sourceManifestRef: string;
+          preparedManifestRef: string;
+          validatedMachineCaches?: WorkerValidatedMachineCaches;
+        }>;
         /** Bound to this preparation attempt; retained callbacks reject after it closes. */
         prepare: (transport: {
+          snapshotBaseCommit?: string;
+          initialSnapshotCheckpointId?: string;
+          setupInitializer?: { command: string[]; envKeys: string[] };
           runScript: (script: string, signal: AbortSignal) => Promise<string>;
           /** Render using this provider command's remaining budget before repository code runs. */
           runScriptWithBudget?: (
@@ -473,6 +515,7 @@ export type WorkerProvider = {
         }) => Promise<{
           seedKey: string;
           cacheHit: boolean;
+          baseCommit?: string;
           /** New completed setup must enter the reusable image before enrollment. */
           captureRequired?: true;
           /** Detected setup is best effort; this allocation must remain cold on failure. */
@@ -503,7 +546,10 @@ export type WorkerProvider = {
   runSetupCommand?: (
     lease: { leaseId: string; profile: WorkerProfile },
     command: {
-      createScript: (setupEnv?: Record<string, string>) => string;
+      createScript: (
+        setupEnv?: Record<string, string>,
+        setupInitializer?: { command: string[]; envKeys: string[] },
+      ) => string;
       workspaceDir: string;
       homeDir: string;
       timeoutMs: number;
@@ -513,8 +559,8 @@ export type WorkerProvider = {
   ) => Promise<SpawnResult | undefined>;
   /**
    * Restart only the same enrolled node on this dedicated lease after proving its
-   * process is absent. A live process owns reconnect. Never allocate, install, pair,
-   * change repository contents, or replay input. Settle commands on cancellation.
+   * process is absent. A live process owns reconnect unless runtime preparation admits an idle
+   * upgrade. Never allocate, pair, change repository contents, or replay input. Settle commands on cancellation.
    */
   resumeNode?: (request: {
     leaseId: string;
@@ -522,6 +568,10 @@ export type WorkerProvider = {
     deviceId: string;
     nodeBootstrapSha256: string;
     openclawVersion: string;
+    /** Fresh immutable runtime grants; upgrade only the exact idle enrolled node. */
+    runtime?: WorkerNodeRuntimePreparation;
+    /** Recovery-only work consumes the canonical retained runtime without replacing it. */
+    retainedRuntimeOnly?: true;
     /** Saved preparation target, not the profile's current default. */
     platform: string;
     signal: AbortSignal;
