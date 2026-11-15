@@ -4,7 +4,7 @@ import type { CronRunReceiptHandle } from "../store/run-receipt.types.js";
 import type { CronJob } from "../types.js";
 import { markServiceCronJobActive } from "./run-receipts.js";
 import { recomputeUnownedCronSchedules } from "./schedule-maintenance.js";
-import type { CronServiceState } from "./state.js";
+import { isCronServiceReadOnly, type CronServiceState } from "./state.js";
 import { ensureLoadedForOperation } from "./store.js";
 import type { IsolatedAgentSetupTimeoutResult } from "./timer-execution-timeout.js";
 import { maybeNotifyIsolatedAgentSetupTimeout } from "./timer-notifications.js";
@@ -44,7 +44,7 @@ export function maybeNotifyManualIsolatedSetupTimeout(
 
 export async function ensureLoadedForRead(state: CronServiceState) {
   await ensureLoadedForOperation(state);
-  if (!state.store || state.schedulerStarted) {
+  if (!state.store || state.schedulerStarted || isCronServiceReadOnly()) {
     return;
   }
   // Read repair is row-owned and never advances a past-due slot (#16156).

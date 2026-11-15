@@ -445,6 +445,12 @@ export function captureGatewayStateOwner(databasePath: string) {
     assertCurrent,
     // Async preparation is for retained native handles bound to this canonical target.
     prepareAccess: createStateDatabaseAccess(identity, owner).prepareAccess,
+    /** A subordinate execution lease may revoke only the process owner it captured. */
+    invalidate(error: Error) {
+      if (owners.get(key) === owner && owner.accepting) {
+        loseOwner(owner, error);
+      }
+    },
     signal: owner.lost.signal,
   };
 }
@@ -522,6 +528,12 @@ async function captureAdmittedGatewayStateOwner(admission: StateOwnerAdmission, 
     assertCurrent,
     assertReadAllowed,
     prepareAccess: access.prepareAccess,
+    /** A subordinate execution lease may revoke only the process owner it captured. */
+    invalidate(error: Error) {
+      if (owners.get(key) === owner && owner.accepting) {
+        loseOwner(owner, error);
+      }
+    },
   };
 }
 

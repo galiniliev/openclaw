@@ -626,8 +626,36 @@ openclaw database migration-capture create --base-archive /private/filesystem.ta
 openclaw database migration-capture restore /private/migration-capsule --manifest-sha256 <producer-manifest-digest> --target /private/new-staging --json
 ```
 
-Creation requires exclusive offline ownership and an absent output directory
-outside the state/config roots. The private capsule contains the filesystem
+By default, creation requires exclusive offline ownership and a supplied base
+archive. A host whose existing Gateway must remain alive while its replica-local
+files are captured can explicitly use an already prepared **non-drain** suspension:
+
+```bash
+openclaw database migration-capture create --externally-quiesced --request-id <host-request-id> --suspension-id <ready-suspension-id> --output /private/migration-capsule --json
+```
+
+The host must first freeze and settle its broker and other non-Native file
+writers. This mode authenticates to the discovered local Gateway, checks the
+existing suspension and physical owner, renews the same request, and requires
+ready status with zero active work and write custody throughout capture. It
+creates and verifies the filesystem base **inside that suspension**; supplying
+`--base-archive` is refused. Exact database snapshots use artifact-preserving
+read-only copies while the old process remains alive. It does not claim the
+source is stopped, migrate its schema, resume it or commit shutdown. Legacy audit
+inputs requiring a writer lease refuse rather than mutating the source.
+
+A changed owner, expired lease, failed renewal or mismatched suspension refuses
+the capture, retaining partial artifacts without a successful receipt. The old
+renewal RPC has no expected-suspension compare-and-swap; if a delayed request
+returns a different suspension, the host must reconcile that actual state. The
+command never resumes an uncertain source. After success, the original host must
+continue renewing the same suspension and holding all other writers until its
+managed retirement is confirmed; the capsule alone does not stop future writes.
+The optional `quiescence` manifest field binds the request, suspension, physical
+owner, and observed expiry to this capture, not to future activation authority.
+
+Both modes require an absent output directory outside the state/config roots.
+The private capsule contains the filesystem
 archive, exact native SQLite snapshots, and authored configuration/includes.
 Registered and retained native stores, fixed-local credentials, safety journals
 and daemon intent are discovered through the existing exact recovery owner.
@@ -647,10 +675,12 @@ external lifecycle owner perform its existing state/config promotion before
 running the ordinary database porter.
 
 The receipt's exact profile covers the native database/configuration images.
-`verified: true` confirms artifact validation, not temporal consistency of an
-arbitrary base archive. The controller must create the base after the Gateway
-and every embedded or external writer have stopped, and keep them stopped through
-capture; matching `sourceStateDir` alone does not prove a consistent generation.
+`verified: true` confirms artifact validation. For the default offline mode it
+does not establish temporal consistency of an arbitrary supplied base: the
+controller must bind that base to the same frozen source generation; matching
+`sourceStateDir` alone is not that proof. The externally quiesced mode creates
+its own base under the checked suspension, while the host remains responsible
+for the non-Native writer barrier and subsequent source retirement.
 Keep the complete capsule private; it includes credentials, claims and completion
 records deliberately absent from portable user backups. An incomplete capture
 is retained for diagnosis and never grants updater rollback or port-resume
@@ -1061,6 +1091,51 @@ with `ALTER ROLE <openclaw_role> SET synchronous_commit = off` or the equivalent
 `ALTER DATABASE` setting. This can lose recently acknowledged commits on a server
 or operating-system crash, without corruption. Ports and backups always commit
 durably.
+
+### Supervisor-owned rolling handoff
+
+A private Gateway supervisor can prewarm a successor and bind its observational
+readers before transferring execution. This requires PostgreSQL for every portable
+store family, a matching final local companion, and compatible configuration,
+schema descriptors, plugin versions, and protocol contracts. Schema changes still
+use the stopped-writer update and migration flow above. Ordinary `openclaw update`
+does not select this private supervisor path automatically.
+
+The candidate can serve only the explicitly qualified core reads while mutation
+admission remains closed. Autonomous services, recovery writes, and other mutable
+startup work stay deferred. Writer activation requires the existing execution
+lease transfer and positive retirement of the predecessor; prewarm or read
+readiness alone never grants write authority. This temporary read-only overlap
+does not provide active-active Gateway support.
+
+Qualified dashboard reads include `board.get` (HTML metadata and view tickets) and
+`board.data.read`. Automation views can read `cron.list`, `cron.status`, `cron.get`,
+`cron.runs`, and `cron.history`, with `agents.list` supplying their shared agent
+selector, and `users.prefs.get` supplies personal Control UI preferences. These
+retain the normal session visibility, widget grants, and store
+identity checks. Cron reads use the existing read-only worker; schedule repair and
+quarantine persistence wait for writer admission. MCP App reconstruction and other
+methods that can initialize execution remain fenced.
+
+The qualified-read list is part of the rolling compatibility digest. A predecessor
+with an older list cannot form a compatible rolling pair with this contract;
+install the updated contract through the stopped-writer flow before relying on
+these reads in later rolling handoffs.
+
+Compatible clients retain qualified reads and requests the Gateway confirms never
+entered their handler. Reconnection must authenticate the same store and release,
+and the original request deadline and cancellation remain in force. A write whose
+delivery or outcome is unknown is not automatically replayed. An unqualified
+connected operator client prevents the planned fence until it upgrades or disconnects.
+
+After execution has been yielded, expiry cannot automatically reopen the old
+writer. The supervisor must reconcile the recorded owners before resuming or
+activating either process. Ordinary stopped-owner recovery can reclaim the lease
+only after the predecessor is positively dead and its recorded handoff has expired.
+Live and unverified predecessors remain reserved, and a late candidate cannot use
+an expired or replaced handoff. Keep an uncertain handoff with its original
+controller instead of starting another writer or repeating an operation with an
+unknown outcome.
 
 ## Search on PostgreSQL
 

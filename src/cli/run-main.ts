@@ -38,7 +38,6 @@ import { tryRunGatewayServiceUpdateCapabilityProbe } from "./daemon-cli/update-c
 import { shouldStartLocalOnboarding } from "./fresh-install-config.js";
 import {
   isGatewayRunInvocationArgv,
-  resolveGatewayCommandPath,
   resolveGatewayRunPreBootstrapOptions,
 } from "./gateway-run-argv.js";
 import {
@@ -52,8 +51,10 @@ import { tryOutputPrecomputedCommandHelp } from "./precomputed-help.js";
 import { applyCliProfileEnv, parseCliProfileArgs } from "./profile.js";
 import { getCoreCliCommandDescriptors } from "./program/core-command-descriptors.js";
 import { getSubCliEntriesCore } from "./program/subcli-descriptors.js";
+import { tryRunGatewayRunFastPath } from "./run-main-gateway.js";
 import {
   findSubcommand,
+  isCommanderParseExit,
   normalizeRootNoColorArgvForProgram,
   resolveRootOptionRole,
 } from "./run-main-options.js";
@@ -105,75 +106,6 @@ function requireInteractiveTty(message: string): boolean {
   console.error(message);
   process.exitCode = 1;
   return false;
-}
-
-async function tryRunGatewayRunFastPath(
-  argv: string[],
-  startupTrace: ReturnType<typeof createGatewayDispatchStartupTrace>,
-): Promise<boolean> {
-  if (!isGatewayRunFastPathArgv(argv)) {
-    return false;
-  }
-  const [
-    { Command },
-    { addGatewayRunCommand, bootstrapGatewayRun },
-    { VERSION },
-    { emitCliBanner },
-    { defaultRuntime },
-  ] = await startupTrace.measure("gateway-run-imports", () =>
-    Promise.all([
-      import("commander"),
-      import("./gateway-cli/run-command.js"),
-      import("../version.js"),
-      import("./banner.js"),
-      import("../runtime.js"),
-    ]),
-  );
-  const commandPath = resolveGatewayCommandPath(argv) ?? ["gateway"];
-  const startupPolicy = resolveCliStartupPolicyForArgv({
-    argv,
-    commandPath,
-    jsonOutputMode: hasJsonOutputFlag(argv),
-  });
-  if (!startupPolicy.hideBanner) {
-    emitCliBanner(VERSION, { argv });
-  }
-  const program = new Command();
-  program.name("openclaw");
-  program.enablePositionalOptions();
-  program.option("--no-color", "Disable ANSI colors", false);
-  program.exitOverride((err) => {
-    process.exitCode = typeof err.exitCode === "number" ? err.exitCode : 1;
-    throw err;
-  });
-  const beforeRun = (opts: { force?: boolean; reset?: boolean }) =>
-    bootstrapGatewayRun({
-      opts,
-      runtime: defaultRuntime,
-      commandPath,
-      startupPolicy,
-      startupTrace,
-    });
-  const gateway = addGatewayRunCommand(
-    program.command("gateway").description("Run, inspect, and query the WebSocket Gateway"),
-    { beforeRun },
-  );
-  addGatewayRunCommand(
-    gateway.command("run").description("Run the WebSocket Gateway (foreground)"),
-    { beforeRun },
-  );
-  const parseArgv = normalizeRootNoColorArgvForProgram(argv, program);
-  try {
-    await startupTrace.measure("gateway-run-parse", () => program.parseAsync(parseArgv), {
-      timeline: false,
-    });
-  } catch (error) {
-    if (!isCommanderParseExit(error)) {
-      throw error;
-    }
-    process.exitCode = error.exitCode;
-  }
-  return true;
 }
 
 async function resolveBareRootLaunchTarget(): Promise<BareRootLaunchTarget> {
@@ -423,19 +355,6 @@ function pauseNonTtyStdinForCliExit(): void {
   } catch {
     // Best-effort cleanup for command paths that only inspected stdin.
   }
-}
-
-function isCommanderParseExit(error: unknown): error is { exitCode: number } {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-  const candidate = error as { code?: unknown; exitCode?: unknown };
-  return (
-    typeof candidate.exitCode === "number" &&
-    Number.isInteger(candidate.exitCode) &&
-    typeof candidate.code === "string" &&
-    candidate.code.startsWith("commander.")
-  );
 }
 
 function findBuiltInCommandDescriptor(primary: string) {

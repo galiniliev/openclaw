@@ -49,6 +49,7 @@ import { canReadDetailedUpdateMetadata } from "../../events.js";
 import { projectHealthSummary } from "../../health/presentation.js";
 import { getRemoteControlUiIngressContext } from "../../ingress-attribution.js";
 import { ADMIN_SCOPE } from "../../method-scopes.js";
+import { isCoreGatewayRollingRead } from "../../methods/core-method-policy.js";
 import { scheduleNodeConnectionNotification } from "../../node-connection-notifications.js";
 import { resolveOpenClawIdClawOrigin } from "../../openclaw-id/claw-origin.js";
 import {
@@ -70,6 +71,7 @@ import { allowedSessionVisibilities } from "../../session-sharing.js";
 import { formatForLog, logWs } from "../../ws-log.js";
 import { shouldScheduleBackgroundHealthRefresh } from "../health-refresh-admission.js";
 import { buildGatewaySnapshot, getHealthCache, getHealthVersion } from "../health-state.js";
+import { runWhenGatewayConnectMutable } from "./connect-admission.js";
 import { emitGatewayAuthSecurityEvent } from "./connect-auth-security.js";
 import type {
   DeviceAuthorizedGatewayConnect,
@@ -227,6 +229,14 @@ export async function sendGatewayHello(
       connId,
     },
     features: {
+      plannedHandoffReadMethods: context.handler
+        .getMethodRegistry?.()
+        .descriptors()
+        .filter(
+          (descriptor) =>
+            descriptor.owner.kind === "core" && isCoreGatewayRollingRead(descriptor.name),
+        )
+        .map((descriptor) => descriptor.name),
       methods: gatewayMethods.filter(
         (method) =>
           (method !== "mcp.authLogin" ||
@@ -321,6 +331,11 @@ export async function sendGatewayHello(
       ...(sessionCap !== undefined ? { sessionCap } : {}),
       ...(profileActivityViewerId !== undefined ? { profileActivityViewerId } : {}),
       ...(recoveryScope ? { recoveryScope } : {}),
+      ...(buildRequestContext().configRevisionProjector?.logicalStoreIdentity
+        ? {
+            storeIdentity: buildRequestContext().configRevisionProjector!.logicalStoreIdentity,
+          }
+        : {}),
       ...(canMigrateRecovery ? { recoveryMigrationAllowed: true as const } : {}),
       ...(deviceToken
         ? {
@@ -445,29 +460,31 @@ export async function sendGatewayHello(
     return;
   }
   onHelloDelivered();
-  const metadata = context.pendingDeviceMetadata;
-  if (metadata) {
-    context.runDetachedConnectWork(
-      () => recordPairedDeviceAccess(metadata.deviceId, metadata.patch, metadata.identity),
-      (err) =>
-        logGateway.warn(
-          `device access metadata refresh failed conn=${connId}: ${formatForLog(err)}`,
-        ),
-    );
-  }
-  try {
-    const client = context.handler.getClient();
-    if (
-      client?.presenceKey &&
-      !client.invalidated &&
-      client.socket.readyState === WEBSOCKET_OPEN_READY_STATE &&
-      !context.handler.isClosed()
-    ) {
-      commitPresence(client.presenceKey, connId);
+  runWhenGatewayConnectMutable(context, state, () => {
+    const metadata = context.pendingDeviceMetadata;
+    if (metadata) {
+      context.runDetachedConnectWork(
+        () => recordPairedDeviceAccess(metadata.deviceId, metadata.patch, metadata.identity),
+        (err) =>
+          logGateway.warn(
+            `device access metadata refresh failed conn=${connId}: ${formatForLog(err)}`,
+          ),
+      );
     }
-  } catch (err) {
-    logGateway.warn(`presence commit failed conn=${connId}: ${formatForLog(err)}`);
-  }
+    try {
+      const client = context.handler.getClient();
+      if (
+        client?.presenceKey &&
+        !client.invalidated &&
+        client.socket.readyState === WEBSOCKET_OPEN_READY_STATE &&
+        !context.handler.isClosed()
+      ) {
+        commitPresence(client.presenceKey, connId);
+      }
+    } catch (err) {
+      logGateway.warn(`presence commit failed conn=${connId}: ${formatForLog(err)}`);
+    }
+  });
   if (bootstrapHandoff) {
     try {
       const confirmedHandoff = await confirmSetupHandoffDelivery({ handoff: bootstrapHandoff });

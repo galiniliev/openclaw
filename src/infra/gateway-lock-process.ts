@@ -5,6 +5,8 @@ import { getFileLockProcessStartTime } from "../shared/pid-alive.js";
 import { parseProcCmdline } from "./gateway-process-argv.js";
 import { readWindowsProcessArgsSync } from "./windows-port-pids.js";
 
+export const GATEWAY_LOCK_PROCESS_TIMEOUT_MS = 1000;
+
 export function readGatewayLockProcessStartTime(
   pid: number,
   platform: NodeJS.Platform,

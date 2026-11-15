@@ -1,8 +1,13 @@
+import fs from "node:fs";
+import nodePath from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTempDirTracker } from "../../test/helpers/temp-dir.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { setDatabaseEngineReadOnlyAdmission } from "../infra/database-engine/context.js";
+import { resetDatabaseEngineSelectionForTest } from "../infra/database-engine/context.test-support.js";
+import { readLifecycleWriteCustody } from "../infra/lifecycle-write-custody.js";
 import { tableExists } from "../state/openclaw-state-db-schema-helpers.js";
 import {
   closeOpenClawStateDatabaseForTest,
@@ -72,12 +77,68 @@ async function runIds(database: ReturnType<typeof databaseFixture>) {
 }
 
 afterEach(async () => {
+  resetDatabaseEngineSelectionForTest();
   await closeOpenClawStateDatabaseAsync();
   closeOpenClawStateDatabaseForTest();
   tempDirs.cleanup();
 });
 
 describe("audit event writer", () => {
+  it("joins accepted persistence before a fence and retires without starting new maintenance", async () => {
+    const stateDir = tempDirs.make("openclaw-audit-writer-fenced-close-");
+    const errors: string[] = [];
+    const writer = createAuditEventWriter({
+      scheduler: createTestGatewayScheduler(),
+      stateDir,
+      onError: (error) => errors.push(error),
+    });
+    await writer.ready;
+    expect(writer.record(input())).toBe(true);
+    expect(readLifecycleWriteCustody()).toContainEqual({ phase: "audit-persistence", count: 1 });
+    // Admission observes the owner's recorded persistence, not a timer estimate.
+    const { waitForGatewayActiveWork } = await import("../infra/gateway-active-work.js");
+    expect((await waitForGatewayActiveWork(5_000)).drained).toBe(true);
+    setDatabaseEngineReadOnlyAdmission(true);
+    await writer.stop();
+    expect(errors).toEqual([]);
+    expect(readLifecycleWriteCustody()).toEqual([]);
+  });
+  it.each([false, true])(
+    "defers maintenance and acceptance until the host starts it (activate=%s)",
+    async (activate) => {
+      const stateDir = tempDirs.make("openclaw-audit-writer-standby-");
+      let start: (() => void) | undefined;
+      const writer = createAuditEventWriter({
+        scheduler: createTestGatewayScheduler(),
+        stateDir,
+        deferStart: (ready) => {
+          start = ready;
+        },
+      });
+      expect(writer.record(input())).toBe(false);
+      expect(fs.existsSync(nodePath.join(stateDir, "state/openclaw.sqlite"))).toBe(false);
+      if (activate) {
+        start?.();
+        await writer.ready;
+        expect(writer.record({ ...input(), runId: "after-activation" })).toBe(true);
+      }
+      await writer.stop();
+      start?.();
+      expect(writer.record(input())).toBe(false);
+      if (activate) {
+        expect(
+          (
+            await listAuditEvents({
+              database: { env: { OPENCLAW_STATE_DIR: stateDir } },
+              limit: 10,
+            })
+          ).events.map((event) => event.runId),
+        ).toEqual(["after-activation"]);
+      } else {
+        expect(fs.existsSync(nodePath.join(stateDir, "state/openclaw.sqlite"))).toBe(false);
+      }
+    },
+  );
   it("rejects one uncloneable event without disabling later audit records", async () => {
     const database = databaseFixture();
     const { writer, errors } = startWriter(database);

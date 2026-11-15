@@ -1,15 +1,22 @@
 import { clearRuntimeConfigSnapshot } from "../../config/runtime-snapshot.js";
 import { markGatewayRestartTrace } from "../../gateway/restart-trace.js";
+import type { BoundGatewayRollingContract } from "../../gateway/rolling-release-contract.js";
 import type { GatewayServerOptions, GatewayStartupOperation } from "../../gateway/server-public.js";
-import type { startGatewayServer } from "../../gateway/server.js";
 import type { GatewayInstallationReplacement } from "../../gateway/stale-install.js";
 import { isAbortError } from "../../infra/abort-signal.js";
+import {
+  getDatabaseEngineSelection,
+  withDatabaseEngineSelection,
+} from "../../infra/database-engine/context.js";
+import { startDiagnosticsTimeline } from "../../infra/diagnostics-timeline.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import type { GatewayBootLifecycleCompletion } from "../../infra/gateway-boot-lifecycle.js";
 import { acquireGatewayLock } from "../../infra/gateway-lock.js";
 import type { GatewayOwnerSupervisor } from "../../infra/gateway-owner-lease.types.js";
 import type { GatewayRestartEmitter } from "../../infra/restart.js";
 import { SqliteIntegrityWorkerInterruptedError } from "../../infra/sqlite-integrity-worker-error.js";
+import { findStartupMaintenanceRequiredError } from "../../infra/startup-maintenance-required.js";
+import { isTailscaleServeAuthenticationRequiredError } from "../../infra/tailscale-backend-ready.js";
 import type { SubsystemLogger } from "../../logging/subsystem.js";
 import { AsyncWorkScope } from "../../shared/async-work-scope.js";
 import { drainGlobalSingletonLifecycleState } from "../../shared/global-singleton.js";
@@ -22,9 +29,21 @@ const lifecycleRuntimeLoader = createLazyImportLoader(() => import("./lifecycle.
 
 /** Prime lifecycle code and acquire initial custody before installing signal handlers. */
 export async function prepareGatewayRunLoop(
-  params: { lockPort?: number; lifecycleLockDeadlineMs?: number },
+  params: {
+    ownsProcessLifecycle?: boolean;
+    lockPort?: number;
+    lifecycleLockDeadlineMs?: number;
+    rollingHandoff?: BoundGatewayRollingContract;
+    startupSignal?: AbortSignal;
+  },
   logger: Pick<SubsystemLogger, "info" | "warn">,
 ) {
+  startDiagnosticsTimeline(params.ownsProcessLifecycle === true);
+  // macOS/BSD process inspection reports process.title instead of the original
+  // argv. Give the long-running Gateway a verifiable identity for lock readers.
+  if (process.title === "openclaw") {
+    process.title = "openclaw-gateway";
+  }
   // Updates rotate dist chunks; signal handling must retain this exact runtime.
   const lifecycleRuntime = await measureGatewayBootstrapStep(
     "cli.bootstrap.lifecycle-runtime",
@@ -35,20 +54,30 @@ export async function prepareGatewayRunLoop(
   const restartDecision = lifecycleRuntime.resolveGatewayRestartDecision();
   // Resolve the native deadline before acquiring custody that needs final settlement.
   const startupBudget = await resolveGatewayShutdownBudget(supervisorMode, logger);
-  const lock = await measureGatewayBootstrapStep("cli.bootstrap.gateway-lock", () =>
+  const acquire = () =>
     acquireGatewayLock({
       port: params.lockPort,
       listenerMode: supervisorMode ? "supervised" : "foreground",
       supervisor,
+      ...(params.startupSignal
+        ? { assertCurrent: () => params.startupSignal!.throwIfAborted() }
+        : {}),
+      ...(params.rollingHandoff ? { rollingHandoff: params.rollingHandoff } : {}),
       ...(params.lifecycleLockDeadlineMs !== undefined
         ? { lifecycleDeadlineMs: params.lifecycleLockDeadlineMs }
         : {}),
-    }),
+    });
+  const selection = getDatabaseEngineSelection();
+  const lock = await measureGatewayBootstrapStep("cli.bootstrap.gateway-lock", () =>
+    params.rollingHandoff && selection
+      ? withDatabaseEngineSelection({ ...selection, access: "read-write" }, acquire)
+      : acquire(),
   );
+  startupBudget.log("startup");
   return { lifecycleRuntime, supervisor, supervisorMode, restartDecision, startupBudget, lock };
 }
 
-type GatewayRunLoopStartOptions = Pick<
+export type GatewayRunLoopStartOptions = Pick<
   GatewayServerOptions,
   | "processStartedAt"
   | "startupStartedAt"
@@ -63,25 +92,6 @@ export type GatewayRestartStartupFailureHandler = (
   signal: AbortSignal,
 ) => Promise<"completed" | "failed" | void>;
 
-export type GatewayRunLoopParams = {
-  start: (
-    params?: GatewayRunLoopStartOptions,
-  ) => Promise<Awaited<ReturnType<typeof startGatewayServer>>>;
-  /** Grants this run loop authority over the process it exclusively owns. */
-  ownsProcessLifecycle?: boolean;
-  lockPort?: number;
-  lifecycleLockDeadlineMs?: number;
-  healthHost?: string;
-  beginBoot?: (
-    startedAtMs: number,
-    previousOwner?: { pid: number; heartbeatAt?: number },
-  ) => void | Promise<void>;
-  completeBoot?: (completion: GatewayBootLifecycleCompletion) => void | Promise<void>;
-  /** Reports terminal cleanup disposition, never mere invocation or exit intent. */
-  onProcessResourcesSettled?: (outcome: "drained" | "retained") => void;
-  onRestartStartupFailure?: GatewayRestartStartupFailureHandler;
-};
-
 export function createGatewayRestartRecovery(
   {
     onRestartStartupFailure: onFailure,
@@ -95,6 +105,14 @@ export function createGatewayRestartRecovery(
     | { controller: AbortController; settled: ReturnType<GatewayRestartStartupFailureHandler> }
     | undefined;
   return {
+    canWaitForTailscaleServe(error: unknown): boolean {
+      return (
+        Boolean(supervisor) &&
+        Boolean(onFailure) &&
+        !findStartupMaintenanceRequiredError(error) &&
+        isTailscaleServeAuthenticationRequiredError(error)
+      );
+    },
     reportInstallationReplacement(
       replacement: GatewayInstallationReplacement,
     ): GatewayBootLifecycleCompletion {

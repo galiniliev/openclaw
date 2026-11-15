@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import {
+  parseGatewayRollingContract,
+  type GatewayRollingContract,
+} from "../gateway/rolling-release-contract.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { getAsyncWorkSignal } from "../shared/async-work-scope.js";
 import { getFileLockProcessStartTime } from "../shared/pid-alive.js";
@@ -25,19 +30,26 @@ import { startOpenClawStateLeaseHeartbeat } from "../state/openclaw-state-lease-
 import {
   releaseOpenClawStateLeaseInTransaction,
   updateOpenClawStateLeasePayloadInTransaction,
+  renewOpenClawStateLeaseUnderWriteFence,
 } from "../state/openclaw-state-lease-store.js";
 import { captureOpenClawStateReadSource } from "../state/openclaw-state-read-worker.js";
 import type { OpenClawStateReadOutcome } from "../state/openclaw-state-read.types.js";
 import { captureOpenClawStateReadWorkerContext } from "../state/openclaw-state-worker-context.js";
 import { readProcessMachineIdentity } from "./current-machine-identity.js";
 import {
+  getDatabaseEngineSelection,
+  withDatabaseEngineSelection,
+} from "./database-engine/context.js";
+import {
   classifyGatewayOwnerProcessNamespace,
   describeGatewayLockHolder,
   GatewayLockNamespaceError,
   readGatewayLockProcessNamespace,
 } from "./gateway-lock-payload.js";
+import { admitGatewayRollingSuccessor } from "./gateway-owner-lease-rolling.js";
 import { gatewayOwnerKey, readGatewayOwnerLeaseFromDatabase } from "./gateway-owner-lease.read.js";
 import type {
+  GatewayOwnerLease,
   GatewayOwnerLeaseIdentity,
   GatewayOwnerSupervisor,
 } from "./gateway-owner-lease.types.js";
@@ -61,17 +73,16 @@ import { readStateLeaseProcessOwnerStatus } from "./state-lease-process-owner.js
 
 const log = createSubsystemLogger("gateway");
 
-export type GatewayOwnerLease = {
-  owner: string;
-  previousOwner?: GatewayOwnerLeaseIdentity;
-  ready: Promise<void>;
-  markListening: () => void;
-  release: () => Promise<void>;
-};
-
 function resolveStoppedGatewayOwnerLease(previous: GatewayOwnerLeaseIdentity | undefined) {
   if (!previous) {
     return undefined;
+  }
+  // A failed handoff cannot strand a dead owner forever; time alone never retires a live reader.
+  if (
+    previous.rollingHandoff &&
+    !(previous.state === "dead" && previous.rollingHandoff.expiresAtMs <= Date.now())
+  ) {
+    throw new Error("Gateway ownership is reserved for its exact rolling successor");
   }
   if (previous.state === "dead") {
     return previous;
@@ -96,6 +107,7 @@ export async function assertGatewayOwnerLeaseStopped(
   env: NodeJS.ProcessEnv,
   owner: StateDatabaseSchemaLease,
   schemaMaintenance = false,
+  rollingHandoff?: GatewayRollingContract,
 ): Promise<void> {
   const pathname = resolveOpenClawStateSqlitePath(env);
   owner.assertDatabaseAccess(pathname);
@@ -195,14 +207,17 @@ export async function assertGatewayOwnerLeaseStopped(
       if (reply.type !== "gatewayOwnerLease.read") {
         throw new Error("Unexpected Gateway owner lease inspection result");
       }
-      resolveStoppedGatewayOwnerLease(
-        reply.lease
-          ? {
-              ...reply.lease,
-              state: readStateLeaseProcessOwnerStatus(reply.lease, reply.lease.heartbeatAt),
-            }
-          : undefined,
-      );
+      const observed = reply.lease
+        ? {
+            ...reply.lease,
+            state: readStateLeaseProcessOwnerStatus(reply.lease, reply.lease.heartbeatAt),
+          }
+        : undefined;
+      if (rollingHandoff) {
+        admitGatewayRollingSuccessor(observed, rollingHandoff);
+      } else {
+        resolveStoppedGatewayOwnerLease(observed);
+      }
     }
   } catch (error) {
     errors.push(error);
@@ -297,6 +312,7 @@ export function acquireGatewayOwnerLease(params: {
   mode: GatewayOwnerLeaseIdentity["mode"];
   supervisor: GatewayOwnerSupervisor | null;
   owner?: string;
+  rollingHandoff?: GatewayRollingContract;
 }): GatewayOwnerLease {
   const env = params.env ?? process.env;
   const databasePath = resolveOpenClawStateSqlitePath(env);
@@ -319,32 +335,44 @@ export function acquireGatewayOwnerLease(params: {
     supervisor: params.supervisor,
   };
   const payloadJson = JSON.stringify(payload);
+  const selection = getDatabaseEngineSelection();
+  const controlSelection = selection ? { ...selection, access: "read-write" as const } : undefined;
+  const runControl = <T>(run: () => T): T =>
+    controlSelection ? withDatabaseEngineSelection(controlSelection, run) : run();
   const mutateLease = <T>(
-    operation: "acquire" | "release" | "listening",
+    operation: "acquire" | "release" | "listening" | "handoff" | "observe",
     mutate: (db: EngineConnection) => T,
-  ) =>
-    withOpenClawStateStartupMigrationCheckpointDatabase(
-      (db) =>
-        // Compound operations join the admitted owner's transaction; native
-        // checkpoint bootstrap still needs its own envelope here.
-        db.isTransaction
-          ? mutate(db)
-          : operation === "release"
-            ? runSqliteSingleStatementSync(db, () => mutate(db))
-            : runSqliteImmediateTransactionSync(db, () => mutate(db), {
-                databaseLabel: databasePath,
-                operationLabel: `gateway.owner-lease.${operation}`,
-              }),
-      {
-        env,
-        path: databasePath,
-        sealOnClose: operation === "release",
-        singleStatement: operation === "release" ? true : undefined,
-      },
-    );
+  ) => {
+    const run = () =>
+      withOpenClawStateStartupMigrationCheckpointDatabase(
+        (db) =>
+          // Compound operations join the admitted owner's transaction; native
+          // checkpoint bootstrap still needs its own envelope here.
+          db.isTransaction
+            ? mutate(db)
+            : operation === "release"
+              ? runSqliteSingleStatementSync(db, () => mutate(db))
+              : runSqliteImmediateTransactionSync(db, () => mutate(db), {
+                  databaseLabel: databasePath,
+                  operationLabel: `gateway.owner-lease.${operation}`,
+                }),
+        {
+          env,
+          path: databasePath,
+          sealOnClose: operation === "release" || operation === "handoff",
+          singleStatement: operation === "release" ? true : undefined,
+        },
+      );
+    // This existing owner is the only control-plane write capability during a
+    // domain fence. User work never receives this scoped selection.
+    return runControl(run);
+  };
   let previousOwner: GatewayOwnerLeaseIdentity | undefined;
-  const expiresAt = mutateLease("acquire", (db) => {
-    const previous = resolveStoppedGatewayOwnerLease(readGatewayOwnerLeaseFromDatabase(db));
+  let expiresAt = mutateLease("acquire", (db) => {
+    const observed = readGatewayOwnerLeaseFromDatabase(db);
+    const previous = params.rollingHandoff
+      ? admitGatewayRollingSuccessor(observed, params.rollingHandoff)
+      : resolveStoppedGatewayOwnerLease(observed);
     previousOwner = previous;
     const now = Date.now();
     const leaseExpiresAt = now + STARTUP_MIGRATION_LEASE_TTL_MS;
@@ -376,42 +404,59 @@ export function acquireGatewayOwnerLease(params: {
     }
     return leaseExpiresAt;
   });
+  const acquiredAt = expiresAt - STARTUP_MIGRATION_LEASE_TTL_MS;
   let heartbeat: ReturnType<typeof startOpenClawStateLeaseHeartbeat> | undefined;
   let constructionFailure: { error: unknown } | undefined;
   let warned = false;
-  const ready = (async () => {
-    try {
-      // Start outside the write transaction so the worker never retains its lifecycle gate.
-      heartbeat = startOpenClawStateLeaseHeartbeat({
-        path: databasePath,
-        identity,
-        leaseMs: STARTUP_MIGRATION_LEASE_TTL_MS,
-        acquiredAt: expiresAt - STARTUP_MIGRATION_LEASE_TTL_MS,
-        expiresAt,
-        // Heartbeat age is diagnostic; process evidence, not age, governs recovery.
-        heartbeatMs: Math.floor(STARTUP_MIGRATION_LEASE_TTL_MS / 3),
-        ...(processOwner.startedAt === null
-          ? { processOwner: { identity: processOwner, env: resolveDiagnosticProcessEnv(env) } }
-          : {}),
-        onLost: () => {
-          if (!warned) {
-            warned = true;
-            log.warn("Gateway owner lease heartbeat stopped; process identity remains recorded");
-          }
-        },
-      });
-    } catch (error) {
-      constructionFailure = { error };
-      throw error;
-    }
-    await heartbeat.ready;
-  })();
+  const startHeartbeat = () =>
+    runControl(async () => {
+      try {
+        // Start outside the write transaction so the worker never retains its lifecycle gate.
+        heartbeat = startOpenClawStateLeaseHeartbeat({
+          path: databasePath,
+          identity,
+          leaseMs: STARTUP_MIGRATION_LEASE_TTL_MS,
+          acquiredAt,
+          expiresAt,
+          // Keep holder diagnostics fresh even when its process namespace is not visible.
+          heartbeatMs: Math.floor(STARTUP_MIGRATION_LEASE_TTL_MS / 3),
+          ...(processOwner.startedAt === null
+            ? { processOwner: { identity: processOwner, env: resolveDiagnosticProcessEnv(env) } }
+            : {}),
+          onLost: (error) => {
+            if (!warned) {
+              warned = true;
+              log.warn("Gateway owner lease heartbeat stopped; process identity remains recorded");
+              custody?.invalidate(
+                new Error("Gateway execution ownership was lost", { cause: error }),
+              );
+            }
+          },
+        });
+      } catch (error) {
+        constructionFailure = { error };
+        throw error;
+      }
+      await heartbeat.ready;
+    });
+  const ready = startHeartbeat();
   let released = false;
+  let yielded: GatewayRollingContract | undefined;
+  let yieldStoppedHeartbeat = false;
+  let preparation = params.rollingHandoff;
+  const assertCurrent = () => {
+    custody?.assertCurrent();
+    if (released || warned || constructionFailure) {
+      throw new Error("Gateway execution ownership is not current");
+    }
+  };
   return {
     owner: identity.owner,
     previousOwner,
+    assertCurrent,
     ready,
     markListening() {
+      assertCurrent();
       mutateLease("listening", (db) => {
         custody?.assertCurrent();
         // A heartbeat can repair an initially unavailable process start time.
@@ -445,8 +490,8 @@ export function acquireGatewayOwnerLease(params: {
       }
       await heartbeat?.stop();
       try {
-        const assertCurrent = await custody?.prepareAccess();
-        assertCurrent?.();
+        const assertAccessCurrent = await custody?.prepareAccess();
+        assertAccessCurrent?.();
         // Lost custody may join its worker, but cannot mutate the recorded lease.
         if (!custody?.signal.aborted) {
           mutateLease("release", (db) => {
@@ -459,6 +504,230 @@ export function acquireGatewayOwnerLease(params: {
         }
       }
       released = true;
+    },
+    async yieldTo(contract) {
+      assertCurrent();
+      if (preparation) {
+        throw new Error("Gateway preparation must activate before becoming a predecessor");
+      }
+      if (
+        contract.predecessorOwner !== identity.owner ||
+        !contract.companionGeneration ||
+        contract.expiresAtMs <= Date.now()
+      ) {
+        throw new Error("Gateway rolling handoff does not name this current owner");
+      }
+      await heartbeat?.stop();
+      yieldStoppedHeartbeat = true;
+      mutateLease("listening", (db) => {
+        custody?.assertCurrent();
+        const observed = readGatewayOwnerLeaseFromDatabase(db);
+        if (
+          contract.expiresAtMs <= Date.now() ||
+          observed?.owner !== identity.owner ||
+          observed.rollingHandoff
+        ) {
+          throw new Error("Gateway owner changed before rolling handoff publication");
+        }
+        if (
+          !updateOpenClawStateLeasePayloadInTransaction(
+            db,
+            identity,
+            JSON.stringify({ ...payload, rollingHandoff: contract }),
+          )
+        ) {
+          throw new Error("Gateway rolling handoff publication lost ownership");
+        }
+      });
+      // Retain the same row for the successor's exact compare-and-swap. Ordinary
+      // close must never delete that grant or a subsequently acquired owner.
+      released = true;
+      yielded = contract;
+    },
+    async observeYield() {
+      custody?.assertCurrent();
+      if (!yielded || !released) {
+        throw new Error("Gateway has no held execution handoff");
+      }
+      const held = yielded;
+      return mutateLease("observe", (db) => {
+        custody?.assertCurrent();
+        const observed = readGatewayOwnerLeaseFromDatabase(db);
+        const contract = observed?.rollingHandoff;
+        if (
+          !observed ||
+          !contract?.companionGeneration ||
+          !isDeepStrictEqual({ ...contract, candidateBootId: held.candidateBootId }, held) ||
+          (observed.owner === identity.owner
+            ? observed.rollingReturnToOwner !== undefined
+            : observed.rollingReturnToOwner !== identity.owner)
+        ) {
+          throw new Error("Matching reserved or returned handoff is unavailable");
+        }
+        return {
+          owner: observed.owner,
+          contract: { ...contract },
+          ...(observed.rollingReturnToOwner
+            ? { returnedToOwner: observed.rollingReturnToOwner }
+            : {}),
+        };
+      });
+    },
+    async rebindYield(previous, candidateBootId, expectedOwner) {
+      custody?.assertCurrent();
+      const next = parseGatewayRollingContract({ ...previous, candidateBootId });
+      if (
+        !yielded ||
+        !released ||
+        preparation ||
+        warned ||
+        constructionFailure ||
+        previous.predecessorOwner !== identity.owner ||
+        !previous.companionGeneration ||
+        candidateBootId === previous.candidateBootId ||
+        previous.expiresAtMs <= Date.now() ||
+        !isDeepStrictEqual({ ...yielded, candidateBootId: previous.candidateBootId }, previous)
+      ) {
+        throw new Error("Gateway has no matching held handoff to rebind");
+      }
+      mutateLease("handoff", (db) => {
+        custody?.assertCurrent();
+        const observed = readGatewayOwnerLeaseFromDatabase(db);
+        if (
+          !observed ||
+          observed.owner !== expectedOwner ||
+          !isDeepStrictEqual(observed.rollingHandoff, previous) ||
+          previous.expiresAtMs <= Date.now() ||
+          (observed.owner === identity.owner
+            ? observed.rollingReturnToOwner !== undefined
+            : observed.rollingReturnToOwner !== identity.owner)
+        ) {
+          throw new Error("Gateway handoff changed or candidate has not returned its grant");
+        }
+        const rebound = executeSqliteQueryTakeFirstSync(
+          db,
+          getNodeSqliteKysely<Pick<DB, "state_leases">>(db)
+            .updateTable("state_leases")
+            .set({
+              owner: identity.owner,
+              payload_json: JSON.stringify({ ...payload, rollingHandoff: next }),
+              created_at: acquiredAt,
+              updated_at: Date.now(),
+            })
+            .where("scope", "=", identity.scope)
+            .where("lease_key", "=", identity.key)
+            .where("owner", "=", expectedOwner)
+            .returning("owner"),
+        );
+        if (!rebound) {
+          throw new Error("Gateway rebind lost its exact reservation");
+        }
+      });
+      // Keep execution released and its heartbeat stopped. Only the fresh
+      // candidate may acquire this reservation through normal admission.
+      yielded = next;
+      return { ...next };
+    },
+    async returnToPredecessor() {
+      assertCurrent();
+      const contract = preparation;
+      if (!contract?.companionGeneration) {
+        throw new Error("Gateway execution owner has no bound rolling predecessor");
+      }
+      await heartbeat?.stop();
+      mutateLease("handoff", (db) => {
+        assertCurrent();
+        const observed = readGatewayOwnerLeaseFromDatabase(db);
+        if (observed?.owner !== identity.owner || observed.rollingHandoff) {
+          throw new Error("Gateway execution owner changed before preparation abort");
+        }
+        if (
+          !updateOpenClawStateLeasePayloadInTransaction(
+            db,
+            identity,
+            JSON.stringify({
+              ...payload,
+              rollingHandoff: contract,
+              rollingReturnToOwner: contract.predecessorOwner,
+            }),
+          )
+        ) {
+          throw new Error("Gateway preparation abort could not return execution ownership");
+        }
+      });
+      released = true;
+    },
+    commitPreparation(releaseId) {
+      assertCurrent();
+      if (preparation?.releaseId !== releaseId) {
+        throw new Error("Gateway preparation grant is absent or already consumed");
+      }
+      preparation = undefined;
+    },
+    async restoreYield() {
+      custody?.assertCurrent();
+      if (!yielded && !yieldStoppedHeartbeat) {
+        if (released) {
+          throw new Error("Gateway execution owner has already retired");
+        }
+        return;
+      }
+      mutateLease("acquire", (db) => {
+        const observed = readGatewayOwnerLeaseFromDatabase(db);
+        const returned = observed?.rollingReturnToOwner === identity.owner;
+        if (
+          !observed ||
+          (!returned && observed.owner !== identity.owner) ||
+          (yielded
+            ? !observed.rollingHandoff ||
+              Object.entries(yielded).some(
+                ([key, value]) =>
+                  observed.rollingHandoff?.[key as keyof GatewayRollingContract] !== value,
+              )
+            : observed.rollingHandoff !== undefined)
+        ) {
+          throw new Error("Gateway execution ownership has transferred; predecessor cannot resume");
+        }
+        if (returned) {
+          const now = Date.now();
+          const restored = executeSqliteQueryTakeFirstSync(
+            db,
+            getNodeSqliteKysely<Pick<DB, "state_leases">>(db)
+              .updateTable("state_leases")
+              .set({
+                owner: identity.owner,
+                expires_at: now + STARTUP_MIGRATION_LEASE_TTL_MS,
+                heartbeat_at: now,
+                payload_json: payloadJson,
+                created_at: acquiredAt,
+                updated_at: now,
+              })
+              .where("scope", "=", identity.scope)
+              .where("lease_key", "=", identity.key)
+              .where("owner", "=", observed.owner)
+              .returning("expires_at"),
+          );
+          if (!restored?.expires_at) {
+            throw new Error("Gateway returned execution grant changed during restoration");
+          }
+          expiresAt = restored.expires_at;
+          return;
+        }
+        const renewed = renewOpenClawStateLeaseUnderWriteFence(
+          db,
+          identity,
+          acquiredAt,
+          STARTUP_MIGRATION_LEASE_TTL_MS,
+        );
+        if (!renewed || !updateOpenClawStateLeasePayloadInTransaction(db, identity, payloadJson)) {
+          throw new Error("Gateway execution ownership could not be restored");
+        }
+        expiresAt = renewed;
+      });
+      await startHeartbeat();
+      released = false;
+      yielded = undefined;
+      yieldStoppedHeartbeat = false;
     },
   };
 }

@@ -4,6 +4,7 @@ import { extractErrorCode } from "@openclaw/normalization-core/error-coercion";
 import { isStatePostgres } from "../state/openclaw-state-db-engine.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import { acquireFileLockSync } from "./file-lock-manager.js";
+import { resolveGatewayOwnerStatus } from "./gateway-lock-owner-status.js";
 import {
   describeGatewayLockHolder,
   parseGatewayLockPayload,
@@ -19,7 +20,7 @@ import {
   inspectPostgresGatewayRecovery,
   recoverPostgresGatewayLease,
 } from "./gateway-lock-recovery-postgres.js";
-import { resolveGatewayLockPaths, resolveGatewayOwnerStatus } from "./gateway-lock.js";
+import { resolveGatewayLockPaths } from "./gateway-lock.js";
 import { decodeGatewayOwnerLease } from "./gateway-owner-lease.read.js";
 import { defaultPayload } from "./gateway-state-owner-record.js";
 import { acquireGatewayStateOwner, type StateDatabaseSchemaLease } from "./gateway-state-owner.js";

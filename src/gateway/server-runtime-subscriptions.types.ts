@@ -11,6 +11,7 @@ import type { GatewayContextResolver } from "./server-methods/types.js";
 import type { SessionRowProjection } from "./session-row-projection.js";
 
 export type GatewayEventSubscriptionParams = {
+  deferAuditStart?: (start: () => void) => void;
   scheduler: GatewayScheduler;
   signal: AbortSignal;
   log: SubsystemLogger;
