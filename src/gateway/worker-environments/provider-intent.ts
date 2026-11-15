@@ -62,6 +62,8 @@ export type WorkerProviderIntentPreparationOptions = {
   emptyWorkspace?: true;
   /** Dedicated runtime capacity without repository contents or read authority. */
   imageReserve?: true;
+  /** Secondary conversation machines have no repository-owned retained workspace. */
+  conversation?: true;
   repository?: {
     agentId: string;
     url: string;
@@ -82,7 +84,7 @@ export type WorkerProviderIntentPreparationOptions = {
 
 function allocationSnapshot(
   profile: WorkerProfile,
-  { machineClass, os, executionMode }: WorkerProviderIntentPreparationOptions,
+  { machineClass, os, executionMode, conversation }: WorkerProviderIntentPreparationOptions,
 ): WorkerProfile {
   // A new allocation admits its own project, even when it inherits provider settings.
   const { project: _project, runtimePreparation: _runtimePreparation, ...snapshot } = profile;
@@ -91,6 +93,7 @@ function allocationSnapshot(
     ...(machineClass === undefined ? {} : { machineClass }),
     ...(os === undefined ? {} : { os }),
     ...(executionMode === undefined ? {} : { executionMode }),
+    ...(conversation ? { workspaceDurability: { mode: "mirrored" } } : {}),
   };
 }
 

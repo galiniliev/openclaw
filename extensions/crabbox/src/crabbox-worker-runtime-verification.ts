@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { CRABBOX_SETUP_TIMEOUT_MS } from "./crabbox-worker-timeouts.js";
 
 export type CrabboxRuntimeInstallationIdentity = {
   nodeBootstrap: {
@@ -119,6 +120,18 @@ export const CRABBOX_RUNTIME_VERIFICATION_SOURCE = `
       finally { source.destroy(); }
     } finally { await handle.close(); }
     return true;
+  };
+
+  const prepareExpandedWorker = (verifyOnly = false) => {
+    // Archive-only callers retain their installation contract. Snapshot producers
+    // carry the current build identity to the same native bundle installer as nodes.
+    if (!workerBundle || (workerBundle.bundleHash === undefined && workerBundle.protocolFeatures === undefined)) return;
+    const input = JSON.stringify({
+      build: { bundleHash: workerBundle.bundleHash, openclawVersion: bootstrap.openclawVersion, protocolFeatures: workerBundle.protocolFeatures },
+      archive: { sha256: workerBundle.sha256, bytes: workerBundle.bytes },
+    });
+    const result = spawnSync(process.execPath, [cli, "node", "prepare-worker-bundle", "--input", input, ...(verifyOnly ? ["--verify-only"] : [])], { env: nodeEnv, encoding: "utf8", timeout: ${CRABBOX_SETUP_TIMEOUT_MS} });
+    if (result.status !== 0) throw subprocessError("Cloud worker expanded bundle preparation failed", result);
   };
 
   // Project only verification/publication already completed by the installer.

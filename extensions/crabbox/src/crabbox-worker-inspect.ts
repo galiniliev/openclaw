@@ -101,6 +101,11 @@ export function parseInspectJson(
   }
 
   const failureError = nonEmptyString(value.failureError);
+  const azureSandboxId =
+    value.provider === "azure-sandbox" ? nonEmptyString(value.serverId) : undefined;
+  if (azureSandboxId && !/^[A-Za-z0-9._()-]{1,256}$/u.test(azureSandboxId)) {
+    throw new Error("Crabbox inspect returned an invalid Sandbox resource identity");
+  }
   const lifetime = parseCrabboxLeaseLifetime(value);
   const resourceReceipt = readCrabboxResourceReceipt(value);
   const retention = readCrabboxRetention(value, policy, expectedReceipt);
@@ -108,6 +113,7 @@ export function parseInspectJson(
     throw new Error("Crabbox retained running resource has no qualified receipt");
   }
   return {
+    ...(azureSandboxId ? { azureSandboxId } : {}),
     id,
     state,
     tailscaleEnabled,

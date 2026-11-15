@@ -1,6 +1,11 @@
 import { expect, it, vi } from "vitest";
 import { createNodeBootstrapFixture } from "./crabbox-worker-node-enrollment.test-support.js";
-import { operationLeaseId } from "./crabbox-worker-profile.js";
+import {
+  buildCrabboxAllocationArgs,
+  operationLeaseId,
+  resolveCrabboxPreparationTarget,
+  resolveCrabboxProvisionProfile,
+} from "./crabbox-worker-profile.js";
 import {
   catalogJson,
   classProfile,
@@ -12,6 +17,121 @@ import {
 // mock-isolation: Exercise provider sizing without downloading or allocating a worker.
 vi.mock("./crabbox-managed-binary.js", () => ({ ensureManagedCrabboxBinary: vi.fn() }));
 const { createProvider } = createProviderTestHarness({}, "crabbox-sizing-");
+
+it("keeps the snapshot tier as default and selects disk capacity before allocating other sizes", async () => {
+  const provider = createProvider({
+    runCommand: async () =>
+      commandResult({
+        stdout: catalogJson(
+          "azure-sandbox",
+          ["linux"],
+          [classProfile("small", { vcpu: 2, memory: { value: 4, unit: "GiB" } })],
+        ),
+      }),
+  });
+  const profile = {
+    provider: "azure-sandbox",
+    type: "4cpu-8gib",
+    ttl: "24h",
+    idleTimeout: "60m",
+    azureSandboxDiskId: "source-disk",
+    azureSandboxSnapshotId: "snapshot",
+    azureSandboxSnapshotReceipt: "/qualified/binding.json",
+    azureSandboxSnapshotGeneration: "a".repeat(64),
+  };
+  const machines = await provider.listMachineOptions!(profile);
+  expect(machines.map(({ id }) => id)).toEqual([
+    "0.25cpu-0.5gib",
+    "0.5cpu-1gib",
+    "1cpu-2gib",
+    "2cpu-4gib",
+    "4cpu-8gib",
+    "8cpu-16gib",
+    "16cpu-32gib",
+  ]);
+  expect(machines.filter((machine) => machine.default)).toEqual([
+    { id: "4cpu-8gib", os: "linux", label: "XL · 80 GiB disk", cpu: 4, memoryGb: 8, default: true },
+  ]);
+  for (const selection of [undefined, machines.find((machine) => machine.default)!.id, "XL"]) {
+    const resolved = resolveCrabboxProvisionProfile(profile, selection).profile;
+    expect(resolved).toMatchObject({ class: "4cpu-8gib", type: "4cpu-8gib" });
+    expect(resolveCrabboxPreparationTarget(profile, selection)?.machineClass).toBe("4cpu-8gib");
+    const args = buildCrabboxAllocationArgs(resolved, "cbx_snapshot", "snapshot", {
+      version: 1,
+      ownerBinding: "b".repeat(64),
+      computeWindowSeconds: 14_400,
+    });
+    expect(args).not.toContain("--type");
+    expect(args).not.toContain("--class");
+    expect(args.slice(args.indexOf("--ttl"), args.indexOf("--ttl") + 2)).toEqual([
+      "--ttl",
+      "14400s",
+    ]);
+    expect(
+      args.slice(
+        args.indexOf("--azure-sandbox-owner-binding"),
+        args.indexOf("--azure-sandbox-owner-binding") + 2,
+      ),
+    ).toEqual(["--azure-sandbox-owner-binding", "b".repeat(64)]);
+    expect(
+      args.slice(
+        args.indexOf("--azure-sandbox-snapshot-id"),
+        args.indexOf("--azure-sandbox-snapshot-id") + 2,
+      ),
+    ).toEqual(["--azure-sandbox-snapshot-id", "snapshot"]);
+  }
+  for (const machine of machines.filter((candidate) => !candidate.default)) {
+    const resolved = resolveCrabboxProvisionProfile(profile, machine.id).profile;
+    expect(resolved).toMatchObject({
+      type: machine.id,
+      class: machine.id,
+      azureSandboxDiskId: "source-disk",
+    });
+    expect(resolved).not.toHaveProperty("azureSandboxSnapshotId");
+    expect(resolved).not.toHaveProperty("azureSandboxSnapshotReceipt");
+    expect(resolved).not.toHaveProperty("azureSandboxSnapshotGeneration");
+    const args = buildCrabboxAllocationArgs(resolved, "cbx_other_size", "other-size");
+    expect(args.slice(args.indexOf("--type"), args.indexOf("--type") + 2)).toEqual([
+      "--type",
+      machine.id,
+    ]);
+    expect(args).not.toContain("--azure-sandbox-snapshot-id");
+    expect(
+      args.slice(
+        args.indexOf("--azure-sandbox-disk-id"),
+        args.indexOf("--azure-sandbox-disk-id") + 2,
+      ),
+    ).toEqual(["--azure-sandbox-disk-id", "source-disk"]);
+    expect(resolveCrabboxPreparationTarget(profile, machine.id)).toEqual(
+      resolveCrabboxPreparationTarget({
+        provider: profile.provider,
+        type: machine.id,
+        ttl: profile.ttl,
+        idleTimeout: profile.idleTimeout,
+        azureSandboxDiskId: profile.azureSandboxDiskId,
+      }),
+    );
+  }
+  const legacy = resolveCrabboxProvisionProfile(profile, "beast").profile;
+  expect(legacy.azureSandboxSnapshotId).toBeUndefined();
+  expect(buildCrabboxAllocationArgs(legacy, "cbx_legacy", "legacy")).toContain("--class");
+  const tiny = resolveCrabboxProvisionProfile(
+    { ...profile, warmImage: false },
+    "tiny",
+    "linux",
+  ).profile;
+  expect(tiny).toMatchObject({ class: "tiny", type: undefined, warmImage: false });
+  const tinyArgs = buildCrabboxAllocationArgs(tiny, "cbx_temporary", "temporary");
+  expect(tinyArgs.slice(tinyArgs.indexOf("--class"), tinyArgs.indexOf("--class") + 2)).toEqual([
+    "--class",
+    "tiny",
+  ]);
+  expect(tinyArgs).not.toContain("--type");
+  expect(tinyArgs).not.toContain("--azure-sandbox-snapshot-id");
+  // The saved input and its private-owner/retry selection are never rewritten.
+  expect(profile.azureSandboxSnapshotId).toBe("snapshot");
+  expect(profile.azureSandboxSnapshotGeneration).toBe("a".repeat(64));
+});
 
 it("advertises and allocates Sandbox native types without changing generic class sizes", async () => {
   const calls: string[][] = [];

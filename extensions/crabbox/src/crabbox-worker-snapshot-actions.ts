@@ -1,4 +1,5 @@
 import { coerceErrorMessage } from "openclaw/plugin-sdk/error-runtime";
+import type { WorkerProvider } from "openclaw/plugin-sdk/plugin-entry";
 import { parseCrabboxCleanupProfile } from "./crabbox-worker-profile.js";
 import type { createCrabboxWarmImageManager } from "./crabbox-worker-warm-image.js";
 
@@ -43,8 +44,13 @@ export function createCrabboxSnapshotActions(dependencies: {
   manager: WarmImageManager;
   signal: AbortSignal;
   resolveBinaries: (profiles: Profiles, signal: AbortSignal) => Promise<string[]>;
-}): { images: CrabboxSnapshotActions; settle: () => Promise<void> } {
+}): {
+  images: CrabboxSnapshotActions;
+  maintain: NonNullable<WorkerProvider["maintain"]>;
+  settle: () => Promise<void>;
+} {
   const { manager, signal, resolveBinaries } = dependencies;
+  let maintenanceInFlight: Promise<void> | undefined;
   const operations = new Set<Promise<unknown>>();
   const track = async <T>(run: () => Promise<T>): Promise<T> => {
     signal.throwIfAborted();
@@ -75,8 +81,33 @@ export function createCrabboxSnapshotActions(dependencies: {
           );
         }),
     },
+    maintain(context) {
+      context.assertCurrent();
+      signal.throwIfAborted();
+      return (maintenanceInFlight ??= Promise.resolve()
+        .then(async () => {
+          const maintenanceSignal = AbortSignal.any([context.signal, signal]);
+          const assertCurrent = () => {
+            maintenanceSignal.throwIfAborted();
+            context.assertCurrent();
+          };
+          assertCurrent();
+          // Records have no binary owner: try sorted executables until deletion or all report absent.
+          // Crabbox prints `checkpoint absent id=<id>` with exit 0 (internal/cli/checkpoint.go).
+          const resolvedBinaries = await resolveBinaries(context.profiles, maintenanceSignal);
+          assertCurrent();
+          await manager.maintain({
+            binaries: resolvedBinaries,
+            signal: maintenanceSignal,
+            assertCurrent,
+          });
+        })
+        .finally(() => {
+          maintenanceInFlight = undefined;
+        }));
+    },
     async settle() {
-      await Promise.allSettled(operations);
+      await Promise.allSettled([...operations, maintenanceInFlight]);
     },
   };
 }

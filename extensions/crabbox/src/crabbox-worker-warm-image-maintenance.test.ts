@@ -282,7 +282,7 @@ it.each(["dispose", "authority", "operator delete"] as const)(
       await rejected;
       await stopping;
     }
-    expect(s.store.lookup("expired")?.operation).toEqual(retirement);
+    expect(s.store.lookup("expired")?.retirements).toEqual([retirement]);
     expect(s.checkpoints("delete")).toEqual(deletionArgs("/opt/a/crabbox"));
     await closeOpenClawStateDatabaseAsync();
     resetPluginStateStoreForTests();
@@ -367,12 +367,12 @@ it.each([false, true])(
         cbx_active: warmAllocation({ kind: "checkpoint", checkpointId: "chk_current" }),
       },
     });
-    s.store.register("z-retiring", { ...retained, operation: retirement });
+    s.store.register("z-retiring", { ...retained, retirements: [retirement] });
 
     for (let pass = 0; pass < 2; pass++) {
       await s.provider.maintain!(context());
       expect(s.store.lookup("z-retiring")).toEqual(
-        fails ? { ...retained, operation: retirement } : retained,
+        fails ? { ...retained, retirements: [retirement] } : retained,
       );
     }
 
@@ -403,7 +403,7 @@ it.each(["exit", "command"])("retains deletion on first-catalog %s errors", asyn
   await s.provider.maintain!(mixedContext());
   await s.provider.maintain!(mixedContext());
 
-  expect(s.store.lookup("expired")?.operation).toEqual(retirement);
+  expect(s.store.lookup("expired")?.retirements).toEqual([retirement]);
   expect(s.calls.map(({ argv }) => argv)).toEqual(deletionArgs("/opt/a/crabbox", "/opt/a/crabbox"));
   expect(s.warn).toHaveBeenCalledTimes(2);
   expect(s.warn).toHaveBeenCalledWith(expect.stringContaining("deletion obligation retained"));
@@ -458,7 +458,7 @@ it.each([
       expect(s.store.lookup("expired-cold-only")).toBeUndefined();
     }
   } else {
-    expect(s.store.lookup("expired")?.operation).toEqual(retirement);
+    expect(s.store.lookup("expired")?.retirements).toEqual([retirement]);
     expect(s.store.lookup("expired-cold-only")?.captureUnsupported).toBeDefined();
   }
   expect(s.warn).not.toHaveBeenCalled();
@@ -498,7 +498,7 @@ it.each(["expired", "stopped", "running", "unclaimed", "inspection failure"])(
     });
     const record = {
       ...retained,
-      operation: retirement,
+      retirements: [retirement],
       allocations: {
         [leaseId]: warmAllocation(
           state === "stopped"
@@ -552,7 +552,7 @@ it("keeps a dispatch allocation while its fixed lease has not been created", asy
     const record = {
       ...entry.value,
       image: warmImage("chk_replacement", { lastDemandAtMs: Date.now() }),
-      operation: { type: "retire" as const, checkpointId },
+      retirements: [{ type: "retire" as const, checkpointId }],
     };
     s.store.register(entry.key, record);
     s.calls.length = 0;

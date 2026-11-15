@@ -435,6 +435,26 @@ describe("retained session disk lifecycle", () => {
     expect(s.calls.filter(({ argv }) => argv[1] === "inspect")).toHaveLength(2);
   });
 
+  it("resumes an exact saved retained lease whose creation profile enabled reusable images", async () => {
+    const s = retainedScenario();
+    const savedProfile = { ...retainedProfile, warmImage: true };
+    const lease = { ...s.lease, profile: savedProfile };
+    await expect(s.provider.inspect(lease)).resolves.toMatchObject({ status: "active" });
+    await expect(
+      s.provider.setRetainedState!({
+        ...lease,
+        operation: { id: "saved-pause", action: "pause", expectedClaimRevision: "revision-1" },
+      }),
+    ).resolves.toMatchObject({ state: "suspended" });
+    expect(savedProfile.warmImage).toBe(true);
+    expect(s.calls.some(({ argv }) => ["warmup", "checkpoint", "stop"].includes(argv[1]!))).toBe(
+      false,
+    );
+    await expect(s.provider.inspect({ ...lease, resourceReceipt: undefined })).rejects.toThrow(
+      "original resource receipt",
+    );
+  });
+
   it("prepares immutable policy before allocation and sends the released retention flags without renewal", async () => {
     const s = retainedScenario();
     const input = { ...policy };

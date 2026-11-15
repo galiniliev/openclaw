@@ -4,13 +4,27 @@ import {
   normalizeOptionalString as nonEmptyString,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import {
+  observeCrabboxAzureSnapshot,
+  restoreCrabboxAzureSnapshotContext,
+} from "./crabbox-worker-azure-snapshot-capture.js";
+import type { AzureSandboxSnapshotContext } from "./crabbox-worker-azure-snapshot.js";
+import {
   crabboxCommandError,
   crabboxCommandOutput,
   parseCrabboxJson,
   runCrabboxCommand,
+  type CrabboxProviderEnvironment,
 } from "./crabbox-worker-command.js";
 import { WARM_IMAGE_COMMAND_TIMEOUT_MS } from "./crabbox-worker-timeouts.js";
-import type { WarmImageRecord } from "./crabbox-worker-warm-image-records.js";
+import {
+  projectCrabboxWarmImage,
+  type WarmImageRecord,
+  type WarmProfileRecord,
+} from "./crabbox-worker-warm-image-records.js";
+import {
+  CrabboxWarmImageRequestError,
+  type openCrabboxWarmImageStore,
+} from "./crabbox-worker-warm-image-store.js";
 
 export const CHECKPOINT_ID_PATTERN = /^chk_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 
@@ -159,6 +173,9 @@ export function parseCheckpointAvailability(stdout: string): "available" | "pend
 
 export type CheckpointContext = {
   binary: string;
+  providerEnv?: CrabboxProviderEnvironment;
+  azureSnapshot?: AzureSandboxSnapshotContext;
+  timingIdentity?: { operationId: string; environmentId?: string };
   signal?: AbortSignal;
   assertCurrent?: () => void;
 };
@@ -184,6 +201,7 @@ export async function checkpointCommand(
     action: commandAction,
     args,
     binary: context.binary,
+    providerEnv: context.providerEnv,
     timeoutMs,
     ...(context.signal ? { signal: context.signal } : {}),
     ...(input === undefined ? {} : { input }),
@@ -222,4 +240,82 @@ export async function deleteCheckpoint(
     }
   }
   return false;
+}
+
+export function createCrabboxWarmImageCheckpointUpdates(
+  openStore: () => ReturnType<typeof openCrabboxWarmImageStore>,
+) {
+  const checkpointEntry = async (checkpointId: string) => {
+    const entry = (await openStore().entries()).find(
+      ({ value }) =>
+        value.image?.checkpointId === checkpointId ||
+        value.previous?.checkpointId === checkpointId ||
+        value.retirements?.some((debt) => debt.checkpointId === checkpointId),
+    );
+    if (!entry) {
+      throw new CrabboxWarmImageRequestError("Unknown snapshot checkpoint.");
+    }
+    return entry;
+  };
+  const updateCheckpoint = async (
+    checkpointId: string,
+    change: (record: WarmProfileRecord) => WarmProfileRecord | string,
+    assertOwnerCurrent?: () => void,
+  ) => {
+    const { key } = await checkpointEntry(checkpointId);
+    let rejection: string | undefined;
+    let accepted: WarmProfileRecord | undefined;
+    const updated = await openStore().update(key, (record) => {
+      assertOwnerCurrent?.();
+      rejection = undefined;
+      accepted = undefined;
+      if (!record) {
+        rejection = "Snapshot changed; refresh the list and retry.";
+        return undefined;
+      }
+      const next = change(record);
+      if (typeof next === "string") {
+        rejection = next;
+        return undefined;
+      }
+      accepted = next;
+      return next;
+    });
+    if (!updated || !accepted || rejection) {
+      throw new CrabboxWarmImageRequestError(rejection ?? "Snapshot changed; refresh and retry.");
+    }
+    return projectCrabboxWarmImage(key, accepted);
+  };
+
+  return { checkpointEntry, updateCheckpoint };
+}
+
+export async function observeCrabboxWarmImage(
+  context: CheckpointContext,
+  image: Pick<WarmImageRecord, "checkpointId" | "azureSandbox">,
+  requireSnapshotHelper: () => string,
+  timeoutMs = WARM_IMAGE_COMMAND_TIMEOUT_MS,
+) {
+  if (image.azureSandbox) {
+    return observeCrabboxAzureSnapshot(
+      context.azureSnapshot ??
+        restoreCrabboxAzureSnapshotContext(image.azureSandbox, requireSnapshotHelper()),
+      image.azureSandbox,
+      {
+        timeoutMs,
+        assertCurrent: () => assertCurrent(context),
+        signal: context.signal,
+        timingIdentity: context.timingIdentity ?? { operationId: image.azureSandbox.operationId },
+      },
+    );
+  }
+  const args = ["checkpoint", "inspect", image.checkpointId, "--verify", "--json"];
+  return parseCheckpointAvailability(
+    await checkpointCommand(
+      context,
+      "inspect",
+      args,
+      Math.min(timeoutMs, WARM_IMAGE_COMMAND_TIMEOUT_MS),
+    ),
+  );
 }

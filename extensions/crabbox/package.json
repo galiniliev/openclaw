@@ -17,6 +17,10 @@
     "build": {
       "staticAssets": [
         {
+          "source": "./assets/azure-sandbox-checkpoint.py",
+          "output": "assets/azure-sandbox-checkpoint.py"
+        },
+        {
           "source": "./assets/openclaw-worker-wallpaper.png",
           "output": "assets/openclaw-worker-wallpaper.png"
         }

@@ -113,6 +113,14 @@ A worker profile's `settings.target` and `settings.class` remain its defaults; a
 
 New Session, Dispatch, Move, and Restart submit the machine and operating system shown in the picker. Explicit selections and configured defaults take precedence. Without a configured machine default, the picker prefers a class only when its reported vCPU and RAM are both no larger than every other available class for that operating system. Equal shapes keep provider order. Unknown dimensions or a CPU/RAM tradeoff keep the first catalog choice. This is a hardware-size preference, not a price or workload-capacity guarantee; class names such as Small do not rank consistently across operating systems.
 
+For an explicitly selected Azure Sandbox snapshot, `settings.type` declares the
+snapshot's captured tier. The infrastructure owner must verify that the source
+matches that tier before selecting it. That tier remains the picker default,
+and matching selections use the snapshot without compute overrides. Other
+available sizes use the configured source disk and their normal size arguments,
+selected before allocation. An uncertain create never falls back to another
+machine. Snapshot restores inherit their captured compute and disk capacity.
+
 The selected profile row and the closed picker show the operating system and machine in muted text beside the profile name, using the selected values or profile defaults. Only metadata reported by the provider is shown. To override the operating system or size for one new placement over RPC, pass `os` and/or `machineClass` with `profileId`:
 
 ```bash
