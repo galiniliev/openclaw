@@ -6,9 +6,10 @@ export const stateWorkerResourceReceiptMigration = {
   tables: ["worker_environments"],
   columns: ["worker_environments.resource_receipt_json"],
   migrate(db: DatabaseSync, previousVersion: number): boolean {
-    if (previousVersion >= 37) {
+    if (previousVersion > 37) {
       return false;
     }
+    // Doctor also completes v37 stores whose published layout omitted this column.
     // Existing environments remain unqualified; only a provider can supply resource identity.
     return ensureColumn(db, "worker_environments", "resource_receipt_json TEXT");
   },

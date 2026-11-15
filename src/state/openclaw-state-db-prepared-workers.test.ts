@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { openNodeSqliteDatabase } from "../infra/node-sqlite.js";
@@ -18,6 +20,7 @@ import {
   repairOpenClawStateDatabaseSchema as repairState,
   runOpenClawStateWriteTransaction as writeState,
 } from "./openclaw-state-db.js";
+import { getOpenClawStatePredecessorSchema } from "./openclaw-state-schema-runtime.js";
 import { removePreparedWorkerOwnershipColumns } from "./openclaw-state-schema-v17.test-support.js";
 import {
   addPreCutoverClientCredentialTablesForTest,
@@ -111,6 +114,59 @@ function createLegacyWorkers(version = 16, publicationDeferred = false) {
 }
 
 describe("prepared worker schema migration", () => {
+  it.each([false, true])(
+    "repairs the missing v37 resource column without losing worker custody (rollback=%s)",
+    async (rollback) => {
+      const options = { env: { OPENCLAW_STATE_DIR: tempDirs.make("worker-receipt-v37-") } };
+      const pathname = path.join(options.env.OPENCLAW_STATE_DIR, "state", "openclaw.sqlite");
+      fs.mkdirSync(path.dirname(pathname), { recursive: true });
+      const legacy = openNodeSqliteDatabase(pathname);
+      legacy.exec(getOpenClawStatePredecessorSchema(37));
+      legacy.exec(`
+        ALTER TABLE worker_environments DROP COLUMN resource_receipt_json;
+        ALTER TABLE worker_environments ADD COLUMN session_retention_json TEXT;
+        PRAGMA user_version=37;
+        INSERT INTO schema_meta (meta_key, role, schema_version, created_at, updated_at)
+          VALUES ('primary', 'global', 37, 1, 1);
+        INSERT INTO worker_environments (
+          environment_id, provider_id, profile_id, profile_snapshot_json,
+          provision_operation_id, lease_id, state, owner_epoch,
+          created_at_ms, updated_at_ms, state_changed_at_ms, session_retention_json
+        ) VALUES ('kept-worker', 'fixture', 'profile', '{"settings":{}}',
+          'kept-operation', 'kept-lease', 'ready', 7, 1, 2, 2, '{"legacy":"kept"}');
+        INSERT INTO worker_environment_credentials (
+          environment_id, credential_hash, bundle_hash, session_id,
+          rpc_set_version, owner_epoch, expires_at_ms
+        ) VALUES ('kept-worker', 'fixture-hash', 'fixture-bundle', 'kept-session', 1, 7, 1000);
+      `);
+      if (rollback) {
+        legacy.exec(`CREATE TRIGGER refuse_receipt_publication BEFORE UPDATE ON schema_meta
+          BEGIN SELECT RAISE(ABORT, 'receipt publication refused'); END;`);
+      }
+      const before = readSnapshot(legacy);
+      legacy.close();
+      const repaired = await withBackup(options, () => repairState(options));
+      using preserved = openNodeSqliteDatabase(pathname, { readOnly: true });
+      if (rollback) {
+        expect(repaired.warnings.join("\n")).toContain("receipt publication refused");
+        expect(readSnapshot(preserved)).toEqual(before);
+        return;
+      }
+      expect(repaired.warnings).toEqual([]);
+      expect(readRows(preserved, "SELECT rowid, * FROM worker_environments")).toEqual(
+        before.environments.map((row) => ({
+          ...row,
+          resource_receipt_json: null,
+          retention_json: null,
+          provision_source_json: null,
+        })),
+      );
+      expect(readObligations(preserved)).toEqual(before.obligations);
+      expectRow(preserved, "PRAGMA user_version", { user_version: OPENCLAW_STATE_SCHEMA_VERSION });
+      expectRows(preserved, "PRAGMA foreign_key_check", []);
+    },
+  );
+
   it("creates node ownership only on first use and retries after an outer rollback", () => {
     const options = {
       env: { OPENCLAW_STATE_DIR: tempDirs.make("openclaw-prepared-first-use-") },
