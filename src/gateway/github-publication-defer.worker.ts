@@ -49,16 +49,21 @@ export function selectGitHubPublicationDeferralsInDatabase(
         ? listGitHubPublicationsForClaimInDatabase(db, selection.claim, { pendingOnly: true })
         : listRepositoryGitHubPublicationsInDatabase(db, {
             sessionId: selection.claim.sessionId,
-            ownerProfileId: null,
             pending: true,
-          }).filter((row) => matchesRepositoryGitHubPublicationClaim(row, selection.claim))
+          }).filter(
+            (row) =>
+              (row.owner_profile_id === null || row.requester_authority_json !== null) &&
+              matchesRepositoryGitHubPublicationClaim(row, selection.claim),
+          )
     ).map((row) => row.request_id);
   }
   const localClaims = new Map(selection.localClaims?.map((claim) => [claim.sessionId, claim]));
   const rows = (
     kind === "shared"
       ? listSharedGitHubPublicationsInDatabase(db, { pending: true })
-      : listRepositoryGitHubPublicationsInDatabase(db, { ownerProfileId: null, pending: true })
+      : listRepositoryGitHubPublicationsInDatabase(db, { pending: true }).filter(
+          (row) => row.owner_profile_id === null || row.requester_authority_json !== null,
+        )
   ).filter((row) => {
     if (!row.claim_id) {
       return false;

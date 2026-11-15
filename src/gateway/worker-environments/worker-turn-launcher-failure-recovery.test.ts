@@ -28,7 +28,7 @@ import {
   type WorkerTunnelHandle,
 } from "./tunnel-contract.js";
 import { success } from "./tunnel.test-support.js";
-import { failHandedOffTurn } from "./worker-turn-failure.js";
+import { failHandedOffTurn, prepareWorkerTurnFailure } from "./worker-turn-failure.js";
 import {
   createLauncher,
   environmentForTunnel,
@@ -116,6 +116,60 @@ function heldFailure(
 describe("worker turn launcher failure recovery", () => {
   beforeEach(fx.setupWorkerTurnLauncherTest);
   afterEach(() => fx.cleanupWorkerTurnLauncherTest({ reuseReadWorkers: true }));
+
+  it("retains the original failure when cleanup observes an already released repository claim", async () => {
+    const { active, turnClaim } = await claimActivePlacement("released-claim", "original-run");
+    await fx.placements.releaseTurn(turnClaim);
+    const original = new Error("original publication failure");
+    const fence = vi.fn();
+    await expect(
+      prepareWorkerTurnFailure(
+        {
+          placements: fx.placements,
+          environments: { ...strictEnvironment(), fenceWorkerTurnForRecovery: fence },
+          reconcileActivePlacement: vi.fn(),
+          waitForAdmissionNode: vi.fn(),
+          handedOffWorkspace: {
+            kind: "repository",
+            // This negative path must refuse the stale claim before using disk authority.
+            repository: {
+              workspaceId: "original-workspace",
+              agentId: active.agentId,
+              sessionKey: active.sessionKey,
+              url: "https://github.com/example/repo.git",
+              requestedRef: null,
+              runSetupScript: false,
+              baseCommit: null,
+              baseManifestHash: null,
+              branch: "original-branch",
+              checkpointRef: null,
+              manifestHash: null,
+              revision: 1,
+              createdAtMs: 1,
+              updatedAtMs: 1,
+              diskAuthority: {
+                environmentId: active.environmentId,
+                resourceReceipt: {
+                  version: 1,
+                  leaseId: "original-lease",
+                  identity: { diskId: "original-disk" },
+                },
+              },
+            },
+          },
+        },
+        active,
+        { ...turnClaim, agentId: active.agentId, sessionKey: active.sessionKey },
+        original,
+        () => {},
+        undefined,
+      ),
+    ).rejects.toMatchObject({
+      message: "Failed retained worker lost its exact workspace recovery owner",
+      cause: original,
+    });
+    expect(fence).not.toHaveBeenCalled();
+  });
 
   it.each(["supervisor", "runtime"] as const)(
     "keeps the typed node-loss cause through the %s result and failed workspace recovery",

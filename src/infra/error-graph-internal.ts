@@ -3,6 +3,25 @@ import { collectNestedErrorCandidates } from "@openclaw/normalization-core/error
 export { collectNestedErrorCandidates };
 export { extractErrorCodeOrErrno } from "@openclaw/normalization-core/error-coercion";
 
+/** Stack locations only: exception messages and scalar causes can contain tool output. */
+export function readErrorStackFrames(failure: unknown): string[][] {
+  try {
+    return collectNestedErrorCandidates(failure)
+      .filter((error): error is Error => error instanceof Error)
+      .slice(0, 4)
+      .map((error) => {
+        const stack = error.stack ?? "";
+        const heading = error.message ? `${error.name}: ${error.message}` : error.name;
+        return (stack.startsWith(heading) ? stack.slice(heading.length) : "")
+          .split("\n")
+          .filter((line) => /^\s+at /u.test(line))
+          .slice(0, 12);
+      });
+  } catch {
+    return [];
+  }
+}
+
 /** Await owned work and cleanup, retaining both failures without changing their identity. */
 export async function settleWithCleanup<T>(
   operation: Promise<T>,

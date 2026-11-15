@@ -195,6 +195,7 @@ export function createRepositoryGitHubPublicationRecovery(params: {
   getCommittedRuntimeConfig: () => OpenClawConfig;
   disk?: RepositoryDiskPublicationSource;
   isExecuting: (requestId: string) => boolean;
+  hasPersonalSource?: (requestId: string) => boolean;
   assertCurrent: () => void;
   execute: (
     row: RepositoryGitHubPublicationRow,
@@ -208,11 +209,11 @@ export function createRepositoryGitHubPublicationRecovery(params: {
     (
       await listRepositoryGitHubPublicationsAsync({
         sessionId: claim.sessionId,
-        ownerProfileId: null,
         pending: true,
       })
     ).filter(
       (candidate) =>
+        (candidate.owner_profile_id === null || candidate.requester_authority_json !== null) &&
         !candidate.checkpoint_ref &&
         (candidate.claim_id === null || matchesRepositoryGitHubPublicationClaim(candidate, claim)),
     );
@@ -225,17 +226,7 @@ export function createRepositoryGitHubPublicationRecovery(params: {
           throw new Error("GitHub publication lost its workspace result claim.");
         }
       };
-      const pending = await listRepositoryGitHubPublicationsAsync({
-        sessionId: claim.sessionId,
-        ownerProfileId: null,
-        pending: true,
-      });
-      const selected = pending.filter(
-        (candidate) =>
-          !candidate.checkpoint_ref &&
-          (candidate.claim_id === null ||
-            matchesRepositoryGitHubPublicationClaim(candidate, claim)),
-      );
+      const selected = await pendingForClaim(claim);
       for (const row of selected) {
         try {
           await placements.prepareWorkspaceResultClaim(claim);
@@ -268,6 +259,7 @@ export function createRepositoryGitHubPublicationRecovery(params: {
                   lifecycleRevision: row.session_lifecycle_revision,
                   repositoryWorkspaceId: row.workspace_id,
                   repositoryBranch: row.branch,
+                  ...(row.owner_profile_id ? { personalOwnerProfileId: row.owner_profile_id } : {}),
                 }),
             };
             await captureCheckpoint(
@@ -303,10 +295,9 @@ export function createRepositoryGitHubPublicationRecovery(params: {
         return;
       }
       const failures: Error[] = [];
-      const rows = await listRepositoryGitHubPublicationsAsync({
-        ownerProfileId: null,
-        pending: true,
-      });
+      const rows = (await listRepositoryGitHubPublicationsAsync({ pending: true })).filter(
+        (row) => row.owner_profile_id === null || row.requester_authority_json !== null,
+      );
       params.recovery?.retain(rows.map((row) => row.request_id));
       if (isStopping?.()) {
         return;
@@ -318,6 +309,7 @@ export function createRepositoryGitHubPublicationRecovery(params: {
         }
         try {
           if (
+            (row.owner_profile_id !== null && !params.hasPersonalSource?.(row.request_id)) ||
             currentPlacements.get(row.session_id)?.turnClaim ||
             params.isExecuting(row.request_id)
           ) {
@@ -404,10 +396,9 @@ export function createRepositoryGitHubPublicationRecovery(params: {
       }
     },
     async deferOrphanedRequestsAsync(): Promise<void> {
-      const pending = await listRepositoryGitHubPublicationsAsync({
-        ownerProfileId: null,
-        pending: true,
-      });
+      const pending = (await listRepositoryGitHubPublicationsAsync({ pending: true })).filter(
+        (row) => row.owner_profile_id === null || row.requester_authority_json !== null,
+      );
       if (pending.length === 0) {
         return;
       }

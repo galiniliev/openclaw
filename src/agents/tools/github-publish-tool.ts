@@ -40,6 +40,10 @@ import {
   getGatewayToolCallerIdentity,
 } from "./gateway-caller-context.js";
 import {
+  executePersonalPublicationControl,
+  selectPersonalPublicationAccount,
+} from "./github-publish-tool.personal.js";
+import {
   callAgentToolGatewayRequest,
   callInProcessGatewayTool as callGateway,
 } from "./in-process-gateway.js";
@@ -51,6 +55,8 @@ const publicationOperatorActions = GitHubPublicationActionSchema.properties.acti
 const publicationWorkspaceActions = [
   "publish",
   "readiness",
+  "status",
+  "confirm",
   "inspect_pr",
   "prepare_pr",
   "refresh_base",
@@ -64,6 +70,7 @@ export const githubPublishToolDefinition = {
   name: "github_publish",
   parameters: Type.Object(
     {
+      publisher: Type.Optional(stringEnum(["shared", "personal"])),
       publishingSessionKey: GitHubPublicationActionSchema.properties.publishingSessionKey,
       ...GitHubBaseRefreshSchema.properties,
       ...GitHubPublicationEditSchema.properties,
@@ -92,6 +99,7 @@ function describeGitHubPublishTool(
     "inspect_pr: supply pullRequestUrl to read an existing PR. Guests verify authorship through their linked GitHub account; a current full-write maintainer may inspect another person's PR through the shared publisher. Accepts copied PR tab, query and comment links. Returns the canonical PR URL, author, state, base/head repositories, branches and observed commits. It does not prepare a workspace, bind the PR, publish changes or grant later authority. This is not a credential preflight for the managed publisher: bot-authored PRs need not belong to your linked account. Guests need verified current account access for private repositories. ";
   const publication = publicationAvailable
     ? `Publish workspace changes or edit authorized PR metadata through Gateway-held credentials.
+- publisher: "personal" publishes as the verified requesting human only when explicitly asked; omit it to retain the shared publisher. The host selects the saved account, never the session creator. Personal readiness reads the saved connection without publishing. Observe requested/publishing results using action status with the original requestId; never republish to poll. If status returns confirmation, review it and explicitly use action confirm with publisher personal and that requestId; the host retains the original identity and digest. Existing bound PRs retain their original publisher.
 - publish (default when action is omitted): publish accepted workspace changes as an open PR by default; draft: true creates a draft. title/body and draft are used only when creating a PR. Updating an existing PR preserves its state. requested/publishing means accepted, not finished: retain requestId, finish the turn and await its result here; do not submit another publication to recover it. The receipt does not resume the agent. If authorized review, CI or landing remains, ${continuation}; a receipt does not complete it. With workspacePath, status started is not success: the result, possibly a refusal, resumes this session as the next turn. Running background exec, unfinished children, open terminals or another active run refuse preparation; finish or kill them first. Each checkout publishes to one PR; publishing it again updates that PR.
 - edit: read current metadata with {action: "edit"}. To edit an explicitly identified PR without preparing its source, also supply pullRequestUrl on every read and edit; the Gateway verifies your linked authorship or current maintainer authority and repository access. This explicit target takes precedence over the session PR and accepts no requestId. Read first, omitting expectedHeadCommit, title/body and expectedTitle/expectedBody. To change either field, send the read's top-level headCommit as expectedHeadCommit (not publication.headCommit), requestId when a publication receipt is returned, and its new value with the observed expectedTitle/expectedBody. Keep attribution, marker and footer unchanged in the full body. Omitted fields stay unchanged. Edit never synchronizes, stages, commits or pushes files or changes PR state. After an uncertain response, read again with action edit and the same pullRequestUrl when explicitly selected, without write preconditions, before retrying.
 - ready: mark the current session's own draft, or an explicitly identified pullRequestUrl, ready for review, using the expectedHeadCommit and any publication requestId observed with edit. After an uncertain response, read with edit before retrying. This does not merge the PR.
@@ -124,6 +132,25 @@ const githubPublicationObservationParameters = Type.Object(
   { additionalProperties: false },
 );
 
+const githubPersonalPublicationParameters = Type.Object(
+  {
+    publisher: Type.Optional(Type.Literal("personal")),
+    action: Type.Optional(stringEnum(["publish", "readiness", "status", "confirm"])),
+    publishingSessionKey: GitHubPublicationActionSchema.properties.publishingSessionKey,
+    requestId: GitHubPublicationActionSchema.properties.requestId,
+    title: Type.Optional(GitHubPublicationTitleSchema),
+    body: GitHubPublicationEditSchema.properties.body,
+    draft: Type.Optional(Type.Boolean()),
+  },
+  {
+    additionalProperties: false,
+    anyOf: [
+      { properties: { action: { const: "readiness" } }, required: ["action"] },
+      { required: ["publisher"] },
+    ],
+  },
+);
+
 function resolveGitHubPublishParameters(params: {
   publicationAvailable: boolean;
   prepareAvailable: boolean;
@@ -148,6 +175,7 @@ function resolveGitHubPublishParameters(params: {
       ? Type.Object(
           {
             ...GitHubPublicationActionSchema.properties,
+            publisher: githubPublishToolDefinition.parameters.properties.publisher,
             ...(refreshBaseAvailable ? GitHubBaseRefreshSchema.properties : {}),
             ...GitHubPublicationEditSchema.properties,
             ...(evidenceAvailable
@@ -168,8 +196,14 @@ function resolveGitHubPublishParameters(params: {
       : Type.Object(
           {
             ...GitHubPublicationActionSchema.properties,
+            publisher: githubPublishToolDefinition.parameters.properties.publisher,
             pullRequestUrl: Type.Optional(GitHubPullRequestInspectSchema.properties.pullRequestUrl),
-            action: stringEnum(["readiness", "inspect_pr", ...publicationOperatorActions]),
+            action: stringEnum([
+              "readiness",
+              "status",
+              "inspect_pr",
+              ...publicationOperatorActions,
+            ]),
           },
           { additionalProperties: false },
         );
@@ -181,8 +215,10 @@ function resolveGitHubPublishParameters(params: {
 export function createGitHubPublishTool(
   options: {
     publicationAvailable?: boolean;
-    /** Known absent writer configuration: retain credential-free receipt observation only. */
+    /** Force credential-free readiness and receipt observation only. */
     observationOnly?: boolean;
+    /** Shared writer configuration is absent; personal selection remains invocation-owned. */
+    sharedWriterUnavailable?: boolean;
     /** Inventory only: expose conditional action declarations without an execution path. */
     preview?: true;
     sandbox?: SandboxContext | null;
@@ -196,10 +232,15 @@ export function createGitHubPublishTool(
   > = {},
 ): AnyAgentTool {
   const publicationSupported = options.publicationAvailable !== false;
-  const publicationAvailable = !options.observationOnly && publicationSupported;
-  const workspacePreparationAvailable = !options.sandbox;
-  const prepareSupported = options.preview || canPrepareGitHubPullRequest(options.sandbox);
-  const prepareAvailable = !options.observationOnly && prepareSupported;
+  const observationOnly =
+    options.observationOnly === true ||
+    (options.sharedWriterUnavailable === true && !publicationSupported);
+  const personalOnly = !observationOnly && options.sharedWriterUnavailable === true;
+  const publicationAvailable = !observationOnly && publicationSupported;
+  const workspacePreparationAvailable = !personalOnly && !options.sandbox;
+  const prepareSupported =
+    !personalOnly && (options.preview || canPrepareGitHubPullRequest(options.sandbox));
+  const prepareAvailable = !observationOnly && prepareSupported;
   // An unbound sandboxed conversation prepares by yielding and adopting a managed workspace.
   const adopting = prepareAvailable && options.sandbox?.workspaceSource !== "managed-worktree";
   const refreshBaseAvailable = options.preview || canRefreshGitHubPublicationBase(options.sandbox);
@@ -217,7 +258,7 @@ export function createGitHubPublishTool(
   }
   const requestOwners = captureExecRequestOwners(options);
   const tool: AnyAgentTool = {
-    label: options.observationOnly ? "GitHub Publication Readiness" : "GitHub Publish",
+    label: observationOnly ? "GitHub Publication Readiness" : "GitHub Publish",
     name: githubPublishToolDefinition.name,
     // An unbound sandboxed preparation yields this turn. Like sessions_yield, it stays a direct
     // call: a Code Mode exec cannot carry a turn handoff.
@@ -225,29 +266,33 @@ export function createGitHubPublishTool(
     (publicationSupported && workspacePreparationAvailable)
       ? { async: false as const, catalogMode: "direct-only" as const }
       : {}),
-    description: options.observationOnly
+    description: observationOnly
       ? "Observe publication readiness and existing receipts without credentials, refresh, publication, or recovery. Send action readiness and retain the original requestId for accepted or uncertain work; never resubmit it. This listing offers no authenticated GitHub actions; configuration or tool refresh re-evaluates them. For current identity status or setup, ask the operator to check GitHub in Settings → Agents → Tools. Readiness does not establish write authority, authentication, CI, or mergeability."
       : options.preview
         ? "Work with GitHub pull requests through the Gateway."
-        : describeGitHubPublishTool(
+        : personalOnly
+          ? "Shared GitHub publication is not configured. Explicitly select publisher personal to publish as the verified requesting human through their saved My GitHub connection. Omit action to publish; use status with the original requestId to observe it, and confirm only after reviewing its returned confirmation. Missing or expired personal credentials never fall back to another publisher. Personal readiness reads that saved connection; bare action readiness observes publication custody and receipts without credentials. PR actions and workspacePath are unavailable in this mode."
+          : describeGitHubPublishTool(
+              publicationAvailable,
+              prepareAvailable,
+              refreshBaseAvailable,
+              evidenceAvailable,
+            ) +
+            (publicationAvailable && workspacePreparationAvailable
+              ? " For a local task checkout, supply workspacePath after committing its changes. Publication uses a separate task checkout and returns here without changing this conversation's workspace."
+              : ""),
+    parameters: observationOnly
+      ? githubPublicationObservationParameters
+      : personalOnly
+        ? githubPersonalPublicationParameters
+        : resolveGitHubPublishParameters({
             publicationAvailable,
             prepareAvailable,
             refreshBaseAvailable,
             evidenceAvailable,
-          ) +
-          (publicationAvailable && workspacePreparationAvailable
-            ? " For a local task checkout, supply workspacePath after committing its changes. Publication uses a separate task checkout and returns here without changing this conversation's workspace."
-            : ""),
-    parameters: options.observationOnly
-      ? githubPublicationObservationParameters
-      : resolveGitHubPublishParameters({
-          publicationAvailable,
-          prepareAvailable,
-          refreshBaseAvailable,
-          evidenceAvailable,
-          workspacePreparationAvailable,
-          workspaceActions,
-        }),
+            workspacePreparationAvailable,
+            workspaceActions,
+          }),
     execute: async (toolCallId, rawArgs, signal) => {
       if (options.preview) {
         throw new Error("GitHub tool previews cannot execute actions.");
@@ -256,7 +301,10 @@ export function createGitHubPublishTool(
       const input = rawArgs as Omit<SessionGitHubPublishParams, "idempotencyKey" | "sessionKey"> &
         Omit<GitHubPublicationAction, "action"> &
         Omit<GitHubPublicationEdit, "action"> & {
+          publisher?: "shared" | "personal";
           action?:
+            | "status"
+            | "confirm"
             | "readiness"
             | "inspect_pr"
             | "prepare_pr"
@@ -272,7 +320,25 @@ export function createGitHubPublishTool(
           baseCommit?: string;
         };
       const action = input.action ?? "publish";
-      if (options.observationOnly && action !== "readiness") {
+      if (
+        personalOnly &&
+        (!["publish", "readiness", "status", "confirm"].includes(action) ||
+          input.publisher === "shared" ||
+          (action !== "readiness" && input.publisher !== "personal"))
+      ) {
+        throw new Error(
+          "Shared GitHub publication is not configured; explicitly select publisher personal, or use action readiness without credentials.",
+        );
+      }
+      if (
+        input.publisher !== undefined &&
+        !["publish", "readiness", "status", "confirm"].includes(action)
+      ) {
+        throw new Error(
+          "publisher selects publication or its readiness/status only; existing PR actions keep their publisher.",
+        );
+      }
+      if (observationOnly && action !== "readiness") {
         throw new Error(
           "Only publication readiness and existing receipt observation are available.",
         );
@@ -291,6 +357,16 @@ export function createGitHubPublishTool(
       const caller = getGatewayToolCallerIdentity();
       if (!caller?.sessionKey) {
         throw new Error("GitHub publication requires the current Gateway session.");
+      }
+      if (
+        action === "status" ||
+        action === "confirm" ||
+        (action === "readiness" && input.publisher === "personal" && !observationOnly)
+      ) {
+        return executePersonalPublicationControl(action, input, {
+          sessionKey: caller.sessionKey,
+          agentId: caller.agentId,
+        });
       }
       if (action === "readiness") {
         const extra = Object.keys(input).filter(
@@ -605,6 +681,13 @@ export function createGitHubPublishTool(
         ...(input.draft !== undefined ? { draft: input.draft } : {}),
         ...(input.workspacePath !== undefined ? { workspacePath: input.workspacePath } : {}),
       };
+      if (input.publisher === "personal") {
+        publishParams.selection = await selectPersonalPublicationAccount(
+          publishParams,
+          input,
+          caller.agentId,
+        );
+      }
       if (input.workspacePath !== undefined) {
         return handoff("GitHub publication", "sessions.github.publish", publishParams);
       }
@@ -618,6 +701,8 @@ export function createGitHubPublishTool(
   bindAgentToolListingScope(
     tool,
     [
+      observationOnly,
+      personalOnly,
       publicationSupported,
       prepareSupported,
       refreshBaseAvailable,

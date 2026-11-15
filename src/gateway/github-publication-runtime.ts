@@ -65,7 +65,8 @@ export function createGitHubPublicationRuntime(params: {
         updatePending(
           key,
           ((row.status === "requested" || row.status === "publishing") &&
-            row.identity_source !== "personal") ||
+            (row.identity_source !== "personal" ||
+              ("requester_authority_json" in row && row.requester_authority_json !== null))) ||
             ((row.status === "published" || row.status === "failed") &&
               row.reported_at_ms === null),
         );
@@ -80,10 +81,9 @@ export function createGitHubPublicationRuntime(params: {
     try {
       // Read serially so startup can reuse the same state-reader worker.
       const shared = await listSharedGitHubPublicationsAsync({ pending: true });
-      const repository = await listRepositoryGitHubPublicationsAsync({
-        ownerProfileId: null,
-        pending: true,
-      });
+      const repository = (await listRepositoryGitHubPublicationsAsync({ pending: true })).filter(
+        (row) => row.owner_profile_id === null || row.requester_authority_json !== null,
+      );
       pendingRequests.clear();
       for (const row of shared) {
         pendingRequests.add(JSON.stringify(["shared", row.request_id]));

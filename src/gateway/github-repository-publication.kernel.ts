@@ -46,10 +46,18 @@ export function repositoryGitHubPublicationDigest(row: RepositoryGitHubPublicati
 export function checkRepositoryGitHubPublication(
   row: RepositoryGitHubPublicationRow,
 ): RepositoryGitHubPublicationRow {
+  const requester =
+    row.owner_profile_id !== null && row.requester_authority_json !== null
+      ? decodeGitHubPublicationRequester(row.requester_authority_json)
+      : undefined;
   if (
     repositoryGitHubPublicationDigest(row) !== row.request_digest ||
     (row.identity_source === "personal") !== (row.owner_profile_id !== null) ||
-    (row.owner_profile_id !== null && row.requester_authority_json !== null)
+    (row.owner_profile_id !== null &&
+      row.requester_authority_json !== null &&
+      (requester?.version !== 2 ||
+        requester.actor.kind !== "operator" ||
+        requester.actor.profileId !== row.owner_profile_id))
   ) {
     throw new Error("GitHub repository publication receipt is corrupt.");
   }

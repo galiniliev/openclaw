@@ -123,6 +123,8 @@ OpenClaw sandboxes exclude the Gateway's managed GitHub credentials by default; 
 
 The default sandbox tool policy also allows `github_publish` in managed Gateway conversations, including their first turn. The tool uses the same Gateway publisher and does not require `allowInSandbox`, a managed GitHub profile mount, or GitHub credentials inside the sandbox. Explicit tool denies and restrictive custom allowlists still apply. Offering the tool permits a publication request, not publication from an unbound workspace or an unavailable GitHub account: the Gateway checks the current workspace, caller, and selected credential when the tool is invoked. Missing or invalid credentials return the existing retry or reconnect guidance without falling back to another account.
 
+An explicit request to publish as the requesting person uses `github_publish` with `publisher: "personal"` and their saved **My GitHub** connection. Shared publication remains the default. Personal selection does not change shell credentials or the identity of an existing bound PR. Use `action: "status"` with the original `requestId` to observe completion; never publish again just to poll. See [Publish with your account](/concepts/user-model#publish-with-your-account).
+
 Publication may wait until the requesting turn finishes and its workspace is accepted. Its result is appended to the session transcript; this does not start another agent turn. When the authorized task also includes review, CI repair, or landing, the agent must arrange a separate continuation before ending the requesting turn. A draft PR or publication receipt does not complete a landing request.
 
 Use `github_publish` with `action: "inspect_pr"` and `pullRequestUrl` to inspect

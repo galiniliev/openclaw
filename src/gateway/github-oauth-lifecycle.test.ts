@@ -271,7 +271,7 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
-it("offers only receipt observation after native configuration is authoritatively absent", async () => {
+it("offers explicit personal publication after native shared configuration is authoritatively absent", async () => {
   const buildListing = (config = currentConfig) =>
     createOpenClawTools({
       config,
@@ -292,8 +292,10 @@ it("offers only receipt observation after native configuration is authoritativel
   await time.wake();
   const tools = buildListing();
   expect(tools.find((tool) => tool.name === "github_publish")?.parameters).toMatchObject({
-    properties: { action: { enum: ["readiness"] } },
-    required: ["action"],
+    properties: {
+      action: { enum: ["publish", "readiness", "status", "confirm"] },
+      publisher: { const: "personal" },
+    },
   });
   expect(tools.some((tool) => tool.name === "github_identity_status")).toBe(true);
   const configuredCases: OpenClawConfig[] = [

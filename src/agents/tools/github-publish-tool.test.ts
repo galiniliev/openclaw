@@ -454,3 +454,80 @@ it("tells an unbound conversation how to publish, but not when reading a child",
     .details;
   expect(child).toEqual(unbound);
 });
+
+it("publishes as the saved personal account and observes the same receipt", async () => {
+  const f = setup();
+  const personal = {
+    state: "connected",
+    generation: "generation",
+    account: { accountId: 101, login: "alice" },
+  };
+  f.callGateway.mockImplementation(async (method) =>
+    method === "sessions.github.options"
+      ? { personal }
+      : method === "sessions.github.status"
+        ? {
+            result: {
+              ...publication,
+              status: "published",
+              pullRequestUrl: "https://github.com/acme/repo/pull/1",
+            },
+            confirmation: null,
+          }
+        : publication,
+  );
+  expect(Value.Check(f.tool.parameters, { publisher: "personal" })).toBe(true);
+  expect(Value.Check(f.tool.parameters, { publisher: "personal", accountId: 101 })).toBe(false);
+  await f.execute({ publisher: "personal", title: "Repair" });
+  expect(f.callGateway).toHaveBeenCalledWith(
+    "sessions.github.publish",
+    expect.objectContaining({
+      selection: { source: "personal", generation: "generation", account: personal.account },
+      idempotencyKey: "choice",
+      title: "Repair",
+    }),
+  );
+  const status = await f.execute({
+    action: "status",
+    publisher: "personal",
+    requestId: publication.requestId,
+  });
+  expect(status.details).toMatchObject({
+    result: { status: "published", pullRequestUrl: "https://github.com/acme/repo/pull/1" },
+  });
+});
+
+it("requires reconnect instead of falling back to shared publication", async () => {
+  const f = setup();
+  f.callGateway.mockResolvedValue({
+    personal: { state: "disconnected", generation: null, account: null },
+  });
+  await expect(f.execute({ publisher: "personal" })).rejects.toThrow(/connect/i);
+  expect(f.callGateway.mock.calls.map(([method]) => method)).toEqual(["sessions.github.options"]);
+});
+
+it("continues a personal receipt using only the owner's observed confirmation", async () => {
+  const f = setup();
+  const confirmation = {
+    generation: "original-generation",
+    account: { accountId: 101, login: "alice" },
+    requestDigest: "a".repeat(64),
+    repository: "acme/repo",
+  };
+  f.callGateway
+    .mockResolvedValueOnce({ result: publication, confirmation })
+    .mockResolvedValueOnce({ ...publication, status: "published" });
+  await f.execute({ action: "confirm", publisher: "personal", requestId: publication.requestId });
+  expect(f.callGateway).toHaveBeenLastCalledWith("sessions.github.confirm", {
+    sessionKey: caller.sessionKey,
+    agentId: caller.agentId,
+    requestId: publication.requestId,
+    generation: confirmation.generation,
+    account: confirmation.account,
+    requestDigest: confirmation.requestDigest,
+  });
+  expect(f.callGateway.mock.calls.map(([method]) => method)).toEqual([
+    "sessions.github.status",
+    "sessions.github.confirm",
+  ]);
+});

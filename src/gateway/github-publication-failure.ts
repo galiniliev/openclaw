@@ -4,6 +4,7 @@ import {
   type GitHubPublicationSelectionRejectedErrorDetails,
 } from "../../packages/gateway-protocol/src/gateway-error-details.js";
 import type { SessionGitHubPublicationResult } from "../../packages/gateway-protocol/src/schema/session-github-publication.js";
+import { readErrorStackFrames } from "../infra/error-graph-internal.js";
 import { extractErrorCode } from "../infra/errors.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { createCommandError } from "../process/command-error.js";
@@ -201,6 +202,7 @@ export class GitHubPublicationWorkflowChangesError extends GitHubPublicationKnow
 export function recordGitHubPublicationFailure(
   error: unknown,
   row: { request_id: string; session_id: string },
+  stage = "execution",
 ): PublicationFailure {
   const failure = resolveGitHubPublicationFailure(error);
   if (!(error instanceof GitHubPublicationKnownFailure)) {
@@ -210,6 +212,8 @@ export function recordGitHubPublicationFailure(
         sessionId: row.session_id,
         failureCode: failure.code,
         errorCode: extractErrorCode(error),
+        stage,
+        errorStacks: readErrorStackFrames(error),
       });
     } catch {
       // A diagnostic sink cannot change publication settlement.

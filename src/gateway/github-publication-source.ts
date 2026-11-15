@@ -213,9 +213,14 @@ export async function prepareGitHubPublicationSource(params: {
   const releases: Array<() => void> = [];
   let releasing: Promise<void> | undefined;
   let binding: SourceBinding | undefined;
-  const revoke = () => closed.abort(new Error("GitHub publication source authority changed."));
-  const drain = async () => {
-    revoke();
+  const revoke = (reason: string) =>
+    closed.abort(
+      Object.assign(new Error("GitHub publication source authority changed."), {
+        code: `GITHUB_PUBLICATION_REVOKED_${reason}`,
+      }),
+    );
+  const drain = async (reason = "RELEASE") => {
+    revoke(reason);
     await Promise.allSettled(pending);
   };
   const release = () =>
@@ -243,23 +248,23 @@ export async function prepareGitHubPublicationSource(params: {
     registerOpenClawAgentDatabaseAsyncResource({
       agentId: params.selector.agentId,
       path: params.sourcePath,
-      revoke,
-      close: drain,
+      revoke: () => revoke("AGENT_DATABASE"),
+      close: () => drain("AGENT_DATABASE"),
     }),
-    registerOpenClawStateDatabaseAsyncResource({ close: drain }),
+    registerOpenClawStateDatabaseAsyncResource({ close: () => drain("STATE_DATABASE") }),
     registerOpenClawStateDatabaseLifecycleListener((event) => {
       if (event.kind !== "opened" && event.path === context.admission.databasePath) {
-        revoke();
+        revoke("STATE_LIFECYCLE");
       }
     }),
-    onUserProfilesChanged(revoke),
+    onUserProfilesChanged(() => revoke("PROFILE_FACTS")),
     observeUserGitHubConnectionAuthority(({ databasePath, changedOwners }) => {
       if (
         databasePath === context.admission.databasePath &&
         params.selector.personalOwnerProfileId !== undefined &&
         changedOwners.includes(params.selector.personalOwnerProfileId)
       ) {
-        revoke();
+        revoke("GITHUB_CONNECTION");
       }
     }),
     githubPublicationReceipts.subscribeFacts((change, deletionPending) => {
@@ -274,12 +279,12 @@ export async function prepareGitHubPublicationSource(params: {
           change.receipt.source.identity === context.admission.identity.key &&
           [...change.receipt.facts.values()].some((fact) => fact.kind !== "postimage"))
       ) {
-        revoke();
+        revoke("PUBLICATION_FACTS");
       }
     }),
     sessionChanges.subscribeFacts((change) => {
       if ("all" in change || change.sessionKey === params.selector.sessionKey) {
-        revoke();
+        revoke("SESSION_FACTS");
       }
     }),
   );

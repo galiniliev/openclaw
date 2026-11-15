@@ -200,6 +200,23 @@ async function sourceFixture(
   return fixture;
 }
 
+it("keeps the native lifecycle predicate in a source rejection diagnostic", async () => {
+  const { row, source } = await sourceFixture("diagnostic-lifecycle-predicate");
+  await expect(
+    prepareGitHubPublicationSource({
+      sourcePath: resolveOpenClawAgentSqlitePath({ agentId: row.agent_id }),
+      selector: {
+        ...bindGitHubPublicationSource(source).predicate.selector,
+        lifecycleRevision: "different-lifecycle",
+      },
+      signal: new AbortController().signal,
+      assertCurrent() {},
+    }),
+  ).rejects.toMatchObject({
+    code: "GITHUB_PUBLICATION_SOURCE_LIFECYCLE_REVISION",
+  });
+});
+
 it("creates the lazy shared schema and replaces a missing lifecycle binding on insert", async () => {
   const request = {
     sessionKey: "agent:main:first-shared-publication",

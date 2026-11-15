@@ -66,10 +66,53 @@ export function createRepositoryGitHubPublicationExecution(params: {
     if (terminalRepositoryGitHubPublication(row)) {
       return projectGitHubPublicationResult(row);
     }
-    const { assertCustody, action } = context;
+    const { assertCustody } = context;
     assertCustody();
+    const deferredPersonal = row.owner_profile_id !== null && row.requester_authority_json !== null;
+    const retained = deferredPersonal
+      ? context.requester &&
+        isGitHubPublicationRequesterV2(context.requester) &&
+        encodeGitHubPublicationRequester(context.requester.snapshot) ===
+          row.requester_authority_json
+        ? { requester: context.requester, release: () => {} }
+        : await restoreGitHubPublicationRequester(
+            row.requester_authority_json,
+            { sessionKey: row.session_key, agentId: row.agent_id },
+            getCommittedRuntimeConfig,
+          ).then((requester) => ({ requester, release: requester.release }))
+      : undefined;
+    using resources = new DisposableStack();
+    resources.defer(() => retained?.release());
+    let requester: GitHubPublicationRequesterPolicyV2 | undefined = retained?.requester;
+    let releaseRequester: (() => void) | undefined;
+    const action: PersonalGitHubSessionActionV2 | undefined =
+      retained && row.owner_profile_id
+        ? {
+            owner: row.owner_profile_id,
+            sessionId: row.session_id,
+            sessionKey: row.session_key,
+            agentId: row.agent_id,
+            lifecycleRevision: row.session_lifecycle_revision,
+            version: 2,
+            signal: retained.requester.signal,
+            assertCurrent: () => {
+              assertCustody();
+              retained.requester.assertCurrent();
+              context.action?.assertCurrent();
+            },
+            prepareSource: (selector) =>
+              retained.requester.prepareSource({
+                ...selector,
+                personalOwnerProfileId: row.owner_profile_id!,
+              }),
+            prepareDispatchCredential: (input) =>
+              context.action
+                ? context.action.prepareDispatchCredential?.(input)
+                : retained.requester.prepareDispatchCredential?.(input),
+          }
+        : context.action;
     const preparedOwner = await prepareReceiptOwner(row);
-    using _ = { [Symbol.dispose]: () => preparedOwner.release() };
+    resources.defer(() => preparedOwner.release());
     assertCustody();
     context.assertCurrent?.();
     const { loaded } = assertReceiptOwner(row, preparedOwner);
@@ -86,8 +129,6 @@ export function createRepositoryGitHubPublicationExecution(params: {
     ) {
       throw new Error("My GitHub publication owner changed.");
     }
-    let requester: GitHubPublicationRequesterPolicyV2 | undefined;
-    let releaseRequester: (() => void) | undefined;
     const getRequester = () => {
       if (!requester) {
         throw new GitHubPublicationRequesterUnavailableError();
@@ -98,7 +139,7 @@ export function createRepositoryGitHubPublicationExecution(params: {
       // Classify source loss before personal preparation can turn it into a retryable error.
       assertReceiptOwner(row, preparedOwner);
       assertCustody();
-      if (row.owner_profile_id === null) {
+      if (row.owner_profile_id === null || deferredPersonal) {
         getRequester().assertCurrent();
       }
       context.assertCurrent?.();
@@ -265,7 +306,7 @@ export function createRepositoryGitHubPublicationExecution(params: {
       );
     } catch (error) {
       if (
-        row.owner_profile_id === null &&
+        (row.owner_profile_id === null || deferredPersonal) &&
         error instanceof GitHubPublicationRequesterUnavailableError
       ) {
         return await settleDeniedRepositoryGitHubPublication({
