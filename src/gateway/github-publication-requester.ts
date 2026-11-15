@@ -115,8 +115,14 @@ export type GitHubPublicationRequesterPolicyV2 = GitHubPublicationRequesterPolic
       selector: GitHubPublicationSourceSelector,
     ): Promise<GitHubPublicationSourceCapability>;
   }>;
+export type RetainedGitHubPublicationRequester = {
+  requester: GitHubPublicationRequesterPolicyV2;
+  release: () => void;
+};
 export type GitHubPublicationRequesterV2 = GitHubPublicationRequesterPolicyV2 &
-  Pick<GitHubPublicationRequester, "assertInvocationCurrent">;
+  Pick<GitHubPublicationRequester, "assertInvocationCurrent"> & {
+    retainForSettlement?: () => Promise<RetainedGitHubPublicationRequester>;
+  };
 
 /** A System-backed tool bridge cannot widen the selected person's action capability. */
 export function captureGitHubPublicationActionAuthority(
@@ -445,6 +451,56 @@ export async function prepareGitHubPublicationRequesterV2(
     };
     const requester: GitHubPublicationRequesterV2 = Object.freeze({
       version: 2 as const,
+      async retainForSettlement() {
+        requester.assertCurrent();
+        using settlementLifetime = new DisposableStack();
+        const retained = await captureGatewayOperatorRunAuthority({
+          ...options,
+          independentContinuation: true,
+        });
+        settlementLifetime.defer(() => retained?.release());
+        requester.assertCurrent();
+        if (
+          !retained ||
+          snapshot.actor.kind !== "operator" ||
+          retained.authority.profileId !== snapshot.actor.profileId
+        ) {
+          throw new GitHubPublicationRequesterUnavailableError();
+        }
+        const policy = await restoreGitHubPublicationRequester(
+          encodeGitHubPublicationRequester({ ...snapshot, version: 2 }),
+          session,
+          options.context.getCommittedRuntimeConfig ?? options.context.getRuntimeConfig,
+        );
+        settlementLifetime.defer(() => policy.release());
+        requester.assertCurrent();
+        const assertCurrent = () => {
+          policy.assertCurrent();
+          retained.authority.assertCurrent();
+        };
+        assertCurrent();
+        const held: GitHubPublicationRequesterPolicyV2 = {
+          ...policy,
+          assertCurrent,
+          repositoryCredentialSource: retained.authority.repositoryCredentialSource,
+          prepareDispatchCredential: (input) =>
+            repositoryDispatchCredentialReader({
+              client: null,
+              operatorAuthority: retained.authority,
+              agentId: session.agentId,
+              sessionKey: session.sessionKey,
+              sessionId: input.sessionId,
+              requestDigest: input.requestDigest,
+              assertCurrent: () => {
+                assertCurrent();
+                input.assertCurrent();
+              },
+            }),
+        };
+        workerRequesters.set(held, Object.freeze({ ...session }));
+        const custody = settlementLifetime.move();
+        return { requester: held, release: () => custody.dispose() };
+      },
       prepareDispatchCredential: (input: {
         sessionId: string;
         requestDigest: string;

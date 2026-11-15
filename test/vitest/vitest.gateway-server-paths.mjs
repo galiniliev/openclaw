@@ -73,6 +73,7 @@ export const gatewayDatabaseWorkerTestFiles = [
   "src/gateway/gateway.chat-redaction.test.ts",
   "src/gateway/gateway.continuation-skip-bootstrap.integration.test.ts",
   "src/gateway/github-personal-publication-outcomes.test.ts",
+  "src/gateway/github-personal-publication-tool.test.ts",
   "src/gateway/github-personal-publication.lifecycle.test.ts",
   "src/gateway/github-personal-publication.test.ts",
   "src/gateway/github-pr-attribution.test.ts",

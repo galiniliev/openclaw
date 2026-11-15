@@ -470,7 +470,9 @@ export function deferRepositoryGitHubPublicationClaimsInDatabase(
         updated_at_ms: Date.now(),
       })
       .where("request_id", "in", requestIds)
-      .where("owner_profile_id", "is", null)
+      .where((eb) =>
+        eb.or([eb("owner_profile_id", "is", null), eb("requester_authority_json", "is not", null)]),
+      )
       .where("status", "in", ["requested", "publishing"])
       .returningAll(),
   ).rows;

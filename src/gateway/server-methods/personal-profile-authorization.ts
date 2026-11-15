@@ -26,14 +26,36 @@ export function currentPersonalProfileClient(
   scope: PersonalProfileScope,
   owner?: string | { profileId: string; role: string | null; githubLogin?: string | null },
 ) {
+  return currentPersonalProfileClientWithSource(options, scope, owner, () => {
+    const { client, context } = options;
+    if (
+      client?.internal?.remoteIngressPrincipal &&
+      !hasCurrentPersonalGatewaySource(client, context)
+    ) {
+      throw new Error(
+        "Personal profile request connection is no longer current; reconnect and try again.",
+      );
+    }
+  });
+}
+
+/** Scope a host-validated source without replacing role or owner-device policy. */
+export function currentPersonalProfileClientWithSource(
+  options: Request,
+  scope: PersonalProfileScope,
+  owner:
+    | string
+    | { profileId: string; role: string | null; githubLogin?: string | null }
+    | undefined,
+  assertSource: () => void,
+) {
+  assertSource();
   const { client, context } = options;
   if (
     options.signal?.aborted ||
     client?.invalidated ||
     client?.connectionSignal?.aborted ||
     !hasCurrentGatewayOperatorAccess(client?.internal?.operatorAccessAuthority) ||
-    (client?.internal?.remoteIngressPrincipal &&
-      !hasCurrentPersonalGatewaySource(client, context)) ||
     (client?.connId &&
       !isSyntheticGatewayCaller(client) &&
       !context.getClientConnIds?.((current) => current === client).has(client.connId))

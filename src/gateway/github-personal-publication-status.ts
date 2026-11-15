@@ -160,6 +160,7 @@ export async function presentPersonalGitHubPublicationStatusAsync(
 export function createRepositoryPersonalPublicationStatus(
   instanceId: string,
   active: ReadonlyMap<string, string>,
+  hasPendingOwner: (requestId: string) => boolean = () => false,
 ) {
   return (
     row: RepositoryGitHubPublicationStatusRow,
@@ -171,8 +172,9 @@ export function createRepositoryPersonalPublicationStatus(
       { kind: "repository", row, prepared },
       action,
       session,
-      row.execution_id !== null &&
-        row.gateway_instance_id === instanceId &&
-        active.get(row.request_id) === row.execution_id,
+      hasPendingOwner(row.request_id) ||
+        (row.execution_id !== null &&
+          row.gateway_instance_id === instanceId &&
+          active.get(row.request_id) === row.execution_id),
     );
 }

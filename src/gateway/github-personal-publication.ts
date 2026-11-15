@@ -48,8 +48,10 @@ export type PersonalGitHubSessionAction = PersonalGitHubAction & {
   agentId: string;
   lifecycleRevision: string | null;
 };
-export type PersonalGitHubSessionActionV2 = PersonalGitHubSessionAction &
-  Pick<
+export type PersonalGitHubSessionActionV2 = PersonalGitHubSessionAction & {
+  requester?: GitHubPublicationRequesterV2;
+  expectedRunId?: string;
+} & Pick<
     GitHubPublicationRequesterV2,
     "version" | "signal" | "prepareSource" | "prepareDispatchCredential"
   >;

@@ -1,5 +1,16 @@
+import {
+  assertAdmittedRunOperatorAuthority,
+  getAdmittedRunSource,
+} from "../../agents/admitted-run-context.js";
+import { requesterCreatorProfileId } from "../../agents/requester-origin.js";
+import {
+  captureGatewayToolCallerAssertion,
+  getGatewayToolCallerIdentity,
+  resolveGatewayPersonalToolParticipant,
+} from "../../agents/tools/gateway-caller-context.js";
 import { getRuntimeConfigSnapshotMetadata } from "../../config/runtime-snapshot.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { getActiveAgentRunDelegatedAuthority } from "../../infra/agent-run-registry.js";
 import { isIncognitoSessionKey } from "../../routing/session-key.js";
 import { operatorScopeSatisfied } from "../../shared/operator-scope-compat.js";
 import { prepareUserProfileRolePolicyAuthority } from "../../state/user-channel-identity-operations.js";
@@ -17,15 +28,90 @@ import type { SessionMutationTarget } from "../session-mutation-authorization-er
 import { resolveSessionMutationAuthorizationAsync } from "../session-sharing-authorization-async.js";
 import { prepareSessionSharingRead } from "../session-sharing-target-read.js";
 import { createSessionListEntryFilter } from "../session-sharing.js";
-import { hasCurrentPersonalGatewaySource } from "./gateway-personal-caller.js";
 import {
-  currentPersonalProfileClient as currentGitHubClient,
+  hasCurrentPersonalGatewaySource,
+  isSyntheticGatewayCaller,
+} from "./gateway-personal-caller.js";
+import {
+  currentPersonalProfileClient,
+  currentPersonalProfileClientWithSource,
   preparePersonalProfileAction,
 } from "./personal-profile-authorization.js";
 import { readGatewayRequestMutationAuthority } from "./session-mutation-guards.js";
 import type { GatewayRequestHandlerOptions } from "./types.js";
 
 type Request = Pick<GatewayRequestHandlerOptions, "client" | "context" | "signal">;
+
+type PersonalPublicationToolSource = PersonalGitHubAction & { signal: AbortSignal };
+
+/** Publication alone may use the host's current single-human tool participant. */
+function capturePersonalPublicationToolSource(
+  options: Request,
+): PersonalPublicationToolSource | undefined {
+  if (!isSyntheticGatewayCaller(options.client)) {
+    return undefined;
+  }
+  const client = options.client;
+  const caller = getGatewayToolCallerIdentity();
+  const runtime = client?.internal?.agentRuntimeIdentity;
+  const participant = resolveGatewayPersonalToolParticipant(runtime, {
+    requireSingleParticipant: true,
+  });
+  if (!participant) {
+    return undefined;
+  }
+  const authority = client?.internal?.operatorRunAuthority;
+  const assertTool = captureGatewayToolCallerAssertion();
+  const run = runtime?.operationalRunInstance ?? caller?.operationalRunInstance;
+  const assertCurrent = () => {
+    options.signal?.throwIfAborted();
+    participant.assertCurrent();
+    assertAdmittedRunOperatorAuthority(authority);
+    assertAdmittedRunOperatorAuthority(participant.operatorAuthority);
+    authority.assertCurrent();
+    assertTool?.();
+    if (
+      !client ||
+      client.invalidated ||
+      client.connectionSignal?.aborted ||
+      (!runtime && !assertTool) ||
+      getAdmittedRunSource(
+        run ? getActiveAgentRunDelegatedAuthority(run) : caller?.approvalAuthority,
+      ) ||
+      runtime?.cronCreatorAuthorityGrant ||
+      caller?.cronCreatorAuthorityGrant ||
+      authority.source !== participant.operatorAuthority.source ||
+      authority.profileId !== participant.profileId ||
+      client.internal?.operatorRunAuthority !== authority ||
+      requesterCreatorProfileId(participant.requesterOrigin) !== participant.profileId
+    ) {
+      throw new Error(
+        "Publish as me requires the current requesting human; ask in a new signed-in turn.",
+      );
+    }
+  };
+  assertCurrent();
+  return {
+    owner: participant.profileId,
+    assertCurrent,
+    signal: AbortSignal.any([
+      ...(options.signal ? [options.signal] : []),
+      ...(authority?.signal ? [authority.signal] : []),
+      ...(client?.connectionSignal ? [client.connectionSignal] : []),
+    ]),
+  };
+}
+
+function currentGitHubClient(
+  options: Request,
+  scope: Parameters<typeof currentPersonalProfileClient>[1],
+  owner?: Parameters<typeof currentPersonalProfileClient>[2],
+  toolSource?: PersonalPublicationToolSource,
+) {
+  return toolSource
+    ? currentPersonalProfileClientWithSource(options, scope, owner, toolSource.assertCurrent)
+    : currentPersonalProfileClient(options, scope, owner);
+}
 
 type PersonalEligibility =
   | { kind: "eligible"; action: PersonalGitHubAction }
@@ -106,6 +192,8 @@ export async function prepareGitHubPublicationOptionsRead(
   signal?: AbortSignal,
   purpose: "options" | "shared-observation" = "options",
 ) {
+  const toolSource =
+    purpose === "options" ? capturePersonalPublicationToolSource(options) : undefined;
   const authority = readGatewayRequestMutationAuthority(options);
   const client = options.client;
   const profileReference = client?.authenticatedUserProfile?.profileId;
@@ -125,9 +213,10 @@ export async function prepareGitHubPublicationOptionsRead(
     }
   };
   assertConnection();
-  currentGitHubClient(options, "operator.sessions.read");
-  const profile = profileReference
-    ? await prepareUserProfileRolePolicyAuthority(profileReference)
+  currentGitHubClient(options, "operator.sessions.read", undefined, toolSource);
+  const personalProfile = toolSource?.owner ?? profileReference;
+  const profile = personalProfile
+    ? await prepareUserProfileRolePolicyAuthority(personalProfile)
     : undefined;
   assertConnection();
   if (profileReference && !profile) {
@@ -138,20 +227,28 @@ export async function prepareGitHubPublicationOptionsRead(
     if (profile && !profile.isCurrent()) {
       throw new Error("GitHub profile changed; retry publication options.");
     }
-    return currentGitHubClient(options, "operator.sessions.read", profile);
+    return currentGitHubClient(options, "operator.sessions.read", profile, toolSource);
   };
   const eligibleClient = currentClient();
   const personal: PersonalEligibility =
     purpose === "shared-observation" ||
     !eligibleClient ||
-    !hasCurrentPersonalGatewaySource(options.client, options.context) ||
+    (!toolSource && !hasCurrentPersonalGatewaySource(options.client, options.context)) ||
     !operatorScopeSatisfied("operator.read", eligibleClient.connect.scopes ?? [])
       ? { kind: "ineligible" }
       : !profile
         ? { kind: "absent" }
         : {
             kind: "eligible",
-            action: preparePersonalGitHubAction(options, signal),
+            action: toolSource
+              ? {
+                  ...toolSource,
+                  assertCurrent: () => {
+                    toolSource.assertCurrent();
+                    currentClient();
+                  },
+                }
+              : preparePersonalGitHubAction(options, signal),
           };
   const preparedSession =
     purpose === "shared-observation"
@@ -296,6 +393,7 @@ async function bindPersonalGitHubSessionAction(
   options: Request,
   action: PersonalGitHubAction,
   target: SessionMutationTarget,
+  toolSource?: PersonalPublicationToolSource,
 ) {
   const prepared = await prepareGitHubPublicationSession(target.sessionKey, {
     agentId: target.agentId,
@@ -308,6 +406,7 @@ async function bindPersonalGitHubSessionAction(
       "createdActor",
       "visibility",
       "incognito",
+      ...(toolSource ? ["worktree" as const] : []),
     ],
   });
   let releaseAuthorization = () => {};
@@ -317,7 +416,7 @@ async function bindPersonalGitHubSessionAction(
       throw new Error("GitHub publication session was not found.");
     }
     const { authorization, error } = await resolveSessionMutationAuthorizationAsync({
-      client: currentGitHubClient(options, "operator.write", action.owner),
+      client: currentGitHubClient(options, "operator.write", action.owner, toolSource),
       method: "sessions.github.publish",
       requestParams: { sessionKey: initial.canonicalKey, agentId: initial.agentId },
       context: options.context,
@@ -329,8 +428,13 @@ async function bindPersonalGitHubSessionAction(
     }
     const assertCurrent = () => {
       action.assertCurrent();
-      currentGitHubClient(options, "operator.write", action.owner);
+      currentGitHubClient(options, "operator.write", action.owner, toolSource);
       const current = prepared.readCurrent();
+      if (toolSource && current.entry?.worktree?.githubPullRequest) {
+        throw new Error(
+          "This workspace is bound to an existing PR; keep its original publisher and use the existing PR actions.",
+        );
+      }
       if (current.entry?.archivedAt !== undefined) {
         throw new GitHubPublicationSessionChangedError();
       }
@@ -363,8 +467,9 @@ export async function preparePersonalGitHubSessionActionV2(
   options: Request & Parameters<typeof prepareGitHubPublicationRequesterV2>[0],
   target: SessionMutationTarget,
 ): Promise<{ action: PersonalGitHubSessionActionV2; release: () => void }> {
-  const personal = await preparePersonalProfileAction(options, "operator.write");
-  const bound = await bindPersonalGitHubSessionAction(options, personal, target);
+  const toolSource = capturePersonalPublicationToolSource(options);
+  const personal = toolSource ?? (await preparePersonalProfileAction(options, "operator.write"));
+  const bound = await bindPersonalGitHubSessionAction(options, personal, target, toolSource);
   const { action } = bound;
   try {
     const admitted = await prepareGitHubPublicationRequesterV2(options, action);
@@ -374,6 +479,14 @@ export async function preparePersonalGitHubSessionActionV2(
         action: {
           ...action,
           version: 2,
+          requester: admitted.requester,
+          ...(toolSource
+            ? {
+                expectedRunId:
+                  getGatewayToolCallerIdentity()?.operationalRunInstance?.runId ??
+                  options.client?.internal?.agentRuntimeIdentity?.operationalRunInstance.runId,
+              }
+            : {}),
           signal: admitted.requester.signal,
           prepareDispatchCredential: admitted.requester.prepareDispatchCredential,
           prepareSource: (selector) => {
