@@ -18,12 +18,13 @@ import { hydrateCommitObjects, missingCommitObjects } from "./object-hydration.j
 import { collectOrphanWorktreeBranches } from "./orphan-branches.js";
 import { createProvisionedSnapshotWriter } from "./provisioned-snapshot-store.js";
 import {
+  prepareWorktreeRemovalClaimsGuard,
   captureWorktreeRegistryReadGuard,
   prepareWorktreeRegistryGuard,
   readRegistryWorktree,
 } from "./registry-read.js";
 import { deferWorktreeCleanup } from "./registry-retirement.js";
-import { deleteRegistryWorktree, createWorktreeRemovalClaimsGuard } from "./registry.js";
+import { deleteRegistryWorktree } from "./registry.js";
 import { assertExactStateSourceIdentity } from "./removal-git.js";
 import { resolveRepository } from "./repository-paths.js";
 import { captureWorktreeRunEndContext, withWorktreeRunEnd } from "./run-end-lifecycle.js";
@@ -491,9 +492,7 @@ async function retireManagedWorktreeSnapshot(params: {
   }
   const exactRecord = record.snapshotRef?.startsWith("refs/openclaw/snapshots/exact-");
   const expirationToken = exactRecord ? randomUUID() : undefined;
-  const assertClaim = expirationToken
-    ? createWorktreeRemovalClaimsGuard(env, [record.id], expirationToken)
-    : undefined;
+  let assertClaim: (() => void) | undefined;
   let claimed = false;
   const assertCurrent = () => {
     params.assertCurrent();
@@ -527,6 +526,9 @@ async function retireManagedWorktreeSnapshot(params: {
     claimed = true;
   }
   try {
+    if (expirationToken) {
+      assertClaim = await prepareWorktreeRemovalClaimsGuard(env, [record.id], expirationToken);
+    }
     const { expireLocalWorkspaceProjection } =
       await import("../../gateway/worker-environments/local-workspace-projection.js");
     await expireLocalWorkspaceProjection({

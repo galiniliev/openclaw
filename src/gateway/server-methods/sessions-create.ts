@@ -458,6 +458,7 @@ export const sessionCreateHandlers: GatewayRequestHandlers = {
           projectRequester: projectRequesterForClient(client),
           repositoryMutations: context.workerRepositoryWorkspaceMutationService,
           projectGitUrl: requestedProjectGitUrl,
+          gitRequest: { context, client },
           name: normalizeOptionalString(p.worktreeName),
           baseRef: worktreeBaseRef,
           deferWorktree,

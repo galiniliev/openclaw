@@ -57,6 +57,7 @@ import type {
   PrepareGatewaySessionLifecycle,
   PreparedGatewaySessionLifecycle,
 } from "./session-create-service.types.js";
+import type { prepareSessionProjectGitAccess } from "./session-project-git-access.js";
 import {
   resolveSessionProjectRootForRecord,
   resolveSpawnParentWorktreeSource,
@@ -124,6 +125,8 @@ export async function prepareSessionWorktree(params: {
   name?: string;
   baseRef?: string;
   checkoutCommit?: string;
+  gitNetwork?: CreateManagedWorktreeParams["gitNetwork"];
+  prepareGitAccess?: (workspace: string) => ReturnType<typeof prepareSessionProjectGitAccess>;
   label?: string;
   runSetupScript: boolean;
   signal?: AbortSignal;
@@ -333,6 +336,8 @@ export async function prepareSessionWorktree(params: {
           }
         : {}),
     };
+    await using gitAccess =
+      workspace && !params.gitNetwork ? await params.prepareGitAccess?.(workspace) : undefined;
     const {
       record: worktree,
       materialized,
@@ -343,6 +348,7 @@ export async function prepareSessionWorktree(params: {
           repoRoot: workspace,
           baseRef: params.baseRef,
           checkoutCommit: params.checkoutCommit,
+          gitNetwork: params.gitNetwork ?? gitAccess?.gitNetwork,
           runSetupScript: sandboxRequired ? false : params.runSetupScript,
           provisionIgnoredFiles: !sandboxRequired,
         })
@@ -458,6 +464,7 @@ export async function prepareSessionWorktreeCreation(params: {
   projectRequester: ProjectRequester;
   repositoryMutations?: Pick<ReturnType<typeof createRepositoryWorkspaceMutationService>, "fork">;
   projectGitUrl?: string;
+  gitRequest?: Pick<Parameters<typeof prepareSessionProjectGitAccess>[0], "context" | "client">;
   name?: string;
   baseRef?: string;
   deferWorktree: boolean;
@@ -472,7 +479,7 @@ export async function prepareSessionWorktreeCreation(params: {
   onTitleError: (error: unknown) => void;
   onTitleStateChanged: () => void;
 }): ReturnType<PrepareGatewaySessionLifecycle> {
-  const { cfg, target: lifecycleTarget, signal, commitGuard, name, baseRef } = params;
+  const { cfg, target: lifecycleTarget, signal, commitGuard, name, baseRef, gitRequest } = params;
   const waitBudget = { remainingMs: WORKTREE_CREATE_LEASE_WAIT_MS };
   commitGuard();
   const acceptedWorktree = params.inheritParentKey ? lifecycleTarget.entry?.worktree : undefined;
@@ -679,6 +686,23 @@ export async function prepareSessionWorktreeCreation(params: {
     name,
     baseRef,
     checkoutCommit: baseCommit,
+    prepareGitAccess: gitRequest
+      ? async (gitWorkspace) => {
+          const { prepareSessionProjectGitAccess } =
+            await import("./session-project-git-access.js");
+          return prepareSessionProjectGitAccess({
+            ...gitRequest,
+            cfg,
+            workspace: gitWorkspace,
+            baseRef,
+            agentId: lifecycleTarget.agentId,
+            sessionKey: lifecycleTarget.key,
+            sessionId: lifecycleTarget.entry?.sessionId,
+            projectId: lifecycleTarget.projectId,
+            assertCurrent: commitGuard,
+          });
+        }
+      : undefined,
     label: params.label ?? title ?? resolveExplicitSessionName(lifecycleTarget.entry),
     runSetupScript: params.runSetupScript,
     signal,

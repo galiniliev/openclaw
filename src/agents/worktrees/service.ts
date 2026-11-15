@@ -38,6 +38,8 @@ import {
   withWorktreePreparationTiming,
 } from "./preparation-timing.js";
 import {
+  prepareWorktreeRemovalClaimsGuard,
+  prepareWorktreeRemovalAvailability,
   readRegistryWorktrees,
   readRegistryWorktreeForMutation,
   requireActiveWorktreeRecord,
@@ -46,12 +48,7 @@ import {
   readLiveRegistryWorktreeByOwner,
 } from "./registry-read.js";
 import { deferFailedWorktreeRemoval, removalDeferralReason } from "./registry-retirement.js";
-import {
-  assertWorktreeRemovalAvailable,
-  insertRegistryWorktree,
-  createWorktreeRemovalClaimsGuard,
-  updateRegistryWorktree,
-} from "./registry.js";
+import { insertRegistryWorktree, updateRegistryWorktree } from "./registry.js";
 import { assertExactStateOwner } from "./removal-git.js";
 import { removeSettledManagedWorktree, type RemoveWorktreeParams } from "./removal.js";
 import {
@@ -235,39 +232,42 @@ export class ManagedWorktreeService {
     return withWorktreePreparationTiming("managed", () =>
       withWorktreeRunEnd(this.env, async () => {
         const repository = await prepareWorktreeRepository(params, this.env);
-        const outcome = await withWorktreeBasePreparation(repository, async (prepareBase) =>
-          createWithWorktreeAllocation(
-            { ...params, env: this.env },
-            async (guard, publication) =>
-              await withWorktreeSources(this.env, async (retainRepository) => {
-                const retainSources = await retainRepository({ ...params, ...guard, repository });
-                const gitInventory = await readWorktreeGitInventory(
-                  repository.repoRoot,
-                  params.name,
-                );
-                const owned = { ...params, ...guard, retainSources, prepareBase, gitInventory };
-                const creation = await withWorktreeAllocationLease(
-                  { ...owned, env: this.env },
-                  (allocation) =>
-                    reserveOwnedWorktree(
-                      { ...owned, ...allocation },
-                      repository,
-                      this.env,
-                      (current, name, slots) =>
-                        this.reserveForRepository(
-                          owned,
-                          current,
-                          repository,
-                          name,
-                          publication,
-                          slots,
-                        ),
-                    ),
-                );
-                return typeof creation === "function" ? await creation() : creation;
-              }),
-            (record) => this.rollbackPreparation(record, params.withRollback),
-          ),
+        const outcome = await withWorktreeBasePreparation(
+          repository,
+          async (prepareBase) =>
+            createWithWorktreeAllocation(
+              { ...params, env: this.env },
+              async (guard, publication) =>
+                await withWorktreeSources(this.env, async (retainRepository) => {
+                  const retainSources = await retainRepository({ ...params, ...guard, repository });
+                  const gitInventory = await readWorktreeGitInventory(
+                    repository.repoRoot,
+                    params.name,
+                  );
+                  const owned = { ...params, ...guard, retainSources, prepareBase, gitInventory };
+                  const creation = await withWorktreeAllocationLease(
+                    { ...owned, env: this.env },
+                    (allocation) =>
+                      reserveOwnedWorktree(
+                        { ...owned, ...allocation },
+                        repository,
+                        this.env,
+                        (current, name, slots) =>
+                          this.reserveForRepository(
+                            owned,
+                            current,
+                            repository,
+                            name,
+                            publication,
+                            slots,
+                          ),
+                      ),
+                  );
+                  return typeof creation === "function" ? await creation() : creation;
+                }),
+              (record) => this.rollbackPreparation(record, params.withRollback),
+            ),
+          params.gitNetwork,
         );
         return { ...outcome, sourceRoot: repository.sourceRoot };
       }),
@@ -708,7 +708,7 @@ export class ManagedWorktreeService {
           await readRegistryWorktreeForMutation({ ...params, env: this.env }),
         );
         // A session mutation must not wait on a remover that needs its final publication fence.
-        assertWorktreeRemovalAvailable(this.env, record.id, params.claimToken);
+        (await prepareWorktreeRemovalAvailability(this.env, record.id, params.claimToken))();
         if (params.withOwnerMutation && !params.claimToken) {
           // Publish custody before taking the checkout lease: a session delete/restore
           // must reject this claim instead of holding the lifecycle while awaiting us.
@@ -771,8 +771,8 @@ export class ManagedWorktreeService {
       }
     }
     const claimToken = params.claimToken ?? (await claimManagedRemoval(this.env, record, params));
-    createWorktreeRemovalClaimsGuard(this.env, [record.id], claimToken)();
     try {
+      (await prepareWorktreeRemovalClaimsGuard(this.env, [record.id], claimToken))();
       const { withSettledLocalWorkspace } =
         await import("../../gateway/worker-environments/local-workspace-projection.js");
       return await withSettledLocalWorkspace(

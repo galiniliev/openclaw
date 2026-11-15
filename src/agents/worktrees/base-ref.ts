@@ -183,13 +183,15 @@ export async function resolveWorktreeBase(
 export async function withWorktreeBasePreparation<T>(
   repository: { repoRoot: string; commonDir: string },
   run: (resolve: WorktreeBasePreparation) => Promise<T>,
+  network?: CreateManagedWorktreeParams["gitNetwork"],
 ): Promise<T> {
   const key = JSON.stringify(
     [repository.commonDir, repository.repoRoot].map((directory) =>
       process.platform === "win32" ? directory.toLowerCase() : directory,
     ),
   );
-  const cached = remoteDefaults.get(key);
+  // Credentialed requests cannot borrow another caller's network authority or result.
+  const cached = network ? undefined : remoteDefaults.get(key);
   const shared: RemoteDefaultPreparation =
     cached &&
     ((cached.borrowers > 0 && cached.attempt?.refreshedAt === undefined) ||
@@ -197,8 +199,10 @@ export async function withWorktreeBasePreparation<T>(
       ? cached
       : { borrowers: 0 };
   shared.borrowers++;
-  remoteDefaults.set(key, shared);
-  pruneMapToMaxSize(remoteDefaults, 32);
+  if (!network) {
+    remoteDefaults.set(key, shared);
+    pruneMapToMaxSize(remoteDefaults, 32);
+  }
   let active = true;
   const resolutions: Promise<ResolvedWorktreeBase>[] = [];
   const resolve: WorktreeBasePreparation = async ({
@@ -265,7 +269,7 @@ export async function withWorktreeBasePreparation<T>(
           ownsAttempt = true;
           const started: RemoteDefaultAttempt = {
             pending: timeWorktreePreparationPhase("baseRefresh", () =>
-              prepareDefaultBase(repository, options),
+              prepareDefaultBase(repository, options, network),
             ).then(async (base) => {
               // Immutable commits share hydration across refreshes while the Git worker lives.
               const preparationKey = base.commit;
@@ -417,11 +421,16 @@ async function hasOriginDestination(
 async function prepareDefaultBase(
   repository: { repoRoot: string; commonDir: string },
   options: NonNullable<Parameters<typeof runGit>[2]>,
+  network?: CreateManagedWorktreeParams["gitNetwork"],
 ): Promise<ResolvedWorktreeBase & { branch?: string }> {
   const { repoRoot } = repository;
   const remotes = await requireGit(repoRoot, ["remote"], options);
   if (remotes.split("\n").includes("origin") && (await hasOriginDestination(repository, options))) {
-    return await fetchRemoteDefault(repoRoot, options);
+    return await fetchRemoteDefault(repoRoot, {
+      ...options,
+      ...network,
+      env: { ...network?.env, ...options.env },
+    });
   }
   const primary = (await listGitWorktrees(repoRoot, options))[0]?.path ?? repoRoot;
   const commit = await requireGit(primary, ["rev-parse", "--verify", "HEAD^{commit}"], options);

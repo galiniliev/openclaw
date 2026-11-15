@@ -9,6 +9,7 @@ import {
   loadSessionEntry,
   loadTranscriptEventsSync,
 } from "../../config/sessions/session-accessor.js";
+import * as gitExecution from "../../infra/git-exec.js";
 import { refreshProjectClone } from "../../projects/project-clone.js";
 import { registerProjectRegistry } from "../../projects/project-registry.js";
 import { registerClonedProjectRegistry } from "../../projects/project-registry.test-support.js";
@@ -16,6 +17,7 @@ import {
   closeOpenClawStateDatabaseAsync,
   closeOpenClawStateDatabaseForTest,
 } from "../../state/openclaw-state-db.js";
+import * as projectIdentity from "../project-github-identity.js";
 import {
   controlUiClient,
   initializeRepository,
@@ -133,6 +135,7 @@ afterEach(async () => {
   await closeOpenClawStateDatabaseAsync();
   closeOpenClawStateDatabaseForTest();
   testState.agentConfig = undefined;
+  vi.restoreAllMocks();
 });
 
 test.each(["fresh", "retry"] as const)(
@@ -380,3 +383,129 @@ test("sessions.create recovers a failed worktree in the same session with an exp
     await cleanupRun(context, storePath, sessionKey);
   }
 });
+
+test.each(["with-message", "without-message"] as const)(
+  "registered local project default-ref credentials (%s)",
+  async (mode) => {
+    const { root, storePath } = await workspaceFixture("authenticated-default");
+    const { publisher, upstream, projectRoot } = await cloneFixture(root);
+    await fs.writeFile(path.join(publisher, "new-default.txt"), "current upstream default\n");
+    await git(publisher, "add", "new-default.txt");
+    await git(publisher, "commit", "-m", "advance default");
+    const expected = (await git(publisher, "rev-parse", "HEAD")).stdout.trim();
+    await git(publisher, "push", upstream, "main");
+    await git(projectRoot, "remote", "set-url", "origin", gitUrl);
+    await git(projectRoot, "config", `url.${upstream}.insteadOf`, gitUrl);
+    await git(projectRoot, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD");
+    const project = await registerProjectRegistry({
+      path: projectRoot,
+      name: "Credentialed local project",
+    });
+    const token = "synthetic-default-ref-credential";
+    const revoke = vi.fn(async () => {});
+    let active = true;
+    const startCalls = vi.fn();
+    const start = async <T>(run: () => T): Promise<Awaited<T>> => {
+      startCalls();
+      if (!active) {
+        throw new Error("credential scope closed");
+      }
+      return await run();
+    };
+    const identity = vi
+      .spyOn(projectIdentity, "prepareGatewayProjectGitHubIdentity")
+      .mockResolvedValue({
+        token,
+        cacheScope: "fixture-repository-reader",
+        assertSelected: () => {
+          if (!active) {
+            throw new Error("credential scope closed");
+          }
+        },
+        revalidate: async () => {},
+        start,
+        revoke,
+        selection: { source: "system-configured", profileId: "fixture", accountId: 1 },
+      });
+    const execute = gitExecution.executeGitCommand;
+    const network: string[] = [];
+    vi.spyOn(gitExecution, "executeGitCommand").mockImplementation(async (cwd, args, options) => {
+      if (
+        cwd === projectRoot &&
+        (args[0] === "fetch" || (args[0] === "ls-remote" && args.includes("--symref")))
+      ) {
+        network.push(args[0]);
+        // Isolated fetches move resolved policy into a protected config file to
+        // avoid E2BIG. Prove what Git receives at launch across both transports.
+        const effective = await execFileAsync(
+          "git",
+          [
+            "-C",
+            cwd,
+            "config",
+            "--null",
+            "--get-regexp",
+            "^(http\\.https://github\\.com/\\.extraheader|core\\.(hookspath|fsmonitor))$",
+          ],
+          { env: options?.env },
+        );
+        const config = new Map(
+          effective.stdout
+            .split("\0")
+            .filter(Boolean)
+            .map((field): [string, string] => {
+              const separator = field.indexOf("\n");
+              return [field.slice(0, separator), field.slice(separator + 1)];
+            }),
+        );
+        if (
+          config.get("http.https://github.com/.extraheader") !==
+          `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`
+        ) {
+          throw new Error("fixture origin rejected missing credentials");
+        }
+        expect(config.get("core.hookspath")).toBeTruthy();
+        expect(config.get("core.fsmonitor")).toBe("false");
+      }
+      return execute(cwd, args, options);
+    });
+    const context = runContext();
+    const created = await createRun(
+      {
+        ...(mode === "with-message"
+          ? { message: "start" }
+          : { displayName: "No-message creation acceptance" }),
+        projectId: project.id,
+      },
+      { ...controlUiClient, context },
+    );
+    try {
+      await settleWorkspaceRuns(context, storePath, created.key);
+      if (mode === "without-message") {
+        expect(dispatchInboundMessageMock).not.toHaveBeenCalled();
+      }
+      const owned = await managedWorktrees.findLiveByOwner("session", created.key);
+      expect(owned).toBeDefined();
+      expect((await git(owned!.path, "rev-parse", "HEAD")).stdout.trim()).toBe(expected);
+      expect(await fs.readFile(path.join(owned!.path, "new-default.txt"), "utf8")).toBe(
+        "current upstream default\n",
+      );
+      expect(network).toEqual(["ls-remote", "fetch"]);
+      expect(identity).toHaveBeenCalledWith(
+        expect.objectContaining({ requestedRepository: "openclaw/openclaw" }),
+      );
+      expect(startCalls).toHaveBeenCalled();
+      expect(revoke).toHaveBeenCalledOnce();
+      expect(
+        (
+          await git(projectRoot, "config", "--get-regexp", "http.*extraheader").catch(() => ({
+            stdout: "",
+          }))
+        ).stdout,
+      ).toBe("");
+    } finally {
+      active = false;
+      await cleanupRun(context, storePath, created.key);
+    }
+  },
+);
