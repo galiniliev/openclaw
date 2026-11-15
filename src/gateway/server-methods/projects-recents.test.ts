@@ -64,6 +64,47 @@ test("folder recents deduplicate normalized nodes without merging different runn
   expect([...usedSessions]).toEqual([0, 2, 3].map((index) => `agent:main:folder-${index}`));
 });
 
+test("recents hide generated empty sources without hiding user folders or changing sessions", async () => {
+  const state = await createOpenClawTestState({ layout: "state-only", prefix: "recents-empty-" });
+  try {
+    const source = path.join(
+      state.stateDir,
+      "worktree-sources",
+      "empty",
+      "a".repeat(64),
+      "workspace",
+    );
+    const normal = path.join(state.root, "my-project");
+    const similarlyNamed = path.join(
+      state.root,
+      "worktree-sources",
+      "empty",
+      "b".repeat(64),
+      "workspace",
+    );
+    const candidates = [source, normal, similarlyNamed].map((repoRoot, index) => ({
+      key: `agent:main:recent-${index}`,
+      agentId: "main",
+      entry: {
+        sessionId: `recent-${index}`,
+        updatedAt: 10 - index,
+        worktree: { id: `worktree-${index}`, branch: "main", repoRoot },
+        spawnedCwd: path.join(state.root, `session-checkout-${index}`),
+      },
+    }));
+    const before = structuredClone(candidates);
+    const used = new Set<string>();
+    expect(await listProjectRecents(candidates, [], used)).toEqual([
+      { kind: "folder", folder: normal, displayName: "my-project" },
+      { kind: "folder", folder: similarlyNamed, displayName: "workspace" },
+    ]);
+    expect([...used]).toEqual(["agent:main:recent-1", "agent:main:recent-2"]);
+    expect(candidates).toEqual(before);
+  } finally {
+    await state.cleanup();
+  }
+});
+
 test("projects.list returns only the caller's deterministic resolved recents", async () => {
   const state = await createOpenClawTestState({ layout: "state-only", prefix: "projects-rpc-" });
   const memoryLocation = {
