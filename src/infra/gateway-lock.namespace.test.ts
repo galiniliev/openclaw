@@ -12,6 +12,7 @@ import { resolveStateDir } from "../config/paths.js";
 import * as processIdentity from "../shared/pid-alive.js";
 import * as machineIdentity from "./current-machine-identity.js";
 import { mockLinuxNamespace } from "./gateway-lock-namespace.test-support.js";
+import { resolveGatewayOwnerStatus } from "./gateway-lock-owner-status.js";
 import {
   GATEWAY_OWNER_HEARTBEAT_STALE_MS,
   parseGatewayLockPayload,
@@ -24,7 +25,6 @@ import {
   GatewayLockError,
   readActiveGatewayLockIdentity,
   resolveGatewayLockPaths,
-  resolveGatewayOwnerStatus,
 } from "./gateway-lock.js";
 import {
   acquireGatewayStateOwner,

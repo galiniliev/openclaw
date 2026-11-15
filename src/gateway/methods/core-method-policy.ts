@@ -78,6 +78,10 @@ export function isCoreGatewayMethodClassified(method: string): boolean {
   return CORE_GATEWAY_METHOD_SPEC_BY_NAME.has(method);
 }
 
+export function isCoreGatewayRollingRead(method: string): boolean {
+  return CORE_GATEWAY_METHOD_SPEC_BY_NAME.get(method)?.rollingRead === true;
+}
+
 export function createCoreGatewayMethodDescriptors(
   handlers: Record<string, GatewayMethodHandler>,
 ): GatewayMethodDescriptorInput[] {

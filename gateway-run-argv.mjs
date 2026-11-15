@@ -12,6 +12,8 @@ export const GATEWAY_RUN_VALUE_FLAGS = new Set([
   "--tailscale",
   "--ws-log",
   "--raw-stream-path",
+  "--rolling-standby",
+  "--rolling-contract",
 ]);
 
 export const GATEWAY_RUN_BOOLEAN_FLAGS = new Set([

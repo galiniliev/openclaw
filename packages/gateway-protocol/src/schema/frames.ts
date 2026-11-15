@@ -110,6 +110,7 @@ export const HelloOkSchema = closedObject({
   }),
   features: closedObject({
     methods: Type.Array(NonEmptyString),
+    plannedHandoffReadMethods: Type.Optional(Type.Array(NonEmptyString)),
     events: Type.Array(NonEmptyString),
     capabilities: Type.Optional(Type.Array(NonEmptyString)),
   }),
@@ -142,6 +143,7 @@ export const HelloOkSchema = closedObject({
     deviceToken: Type.Optional(NonEmptyString),
     recoveryMigrationAllowed: Type.Optional(Type.Literal(true)),
     recoveryScope: Type.Optional(NonEmptyString),
+    storeIdentity: Type.Optional(NonEmptyString),
     role: NonEmptyString,
     scopes: Type.Array(NonEmptyString),
     // Presentation only: device approval cannot exceed this authenticated role ceiling.

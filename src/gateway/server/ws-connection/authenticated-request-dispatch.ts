@@ -23,7 +23,10 @@ import {
   runWithDiagnosticTraceContext,
 } from "../../../infra/diagnostic-trace-context.js";
 import { isOperatorAuthorityUnavailable } from "../../../infra/operator-authority-error.js";
-import { runOutsideGatewayRootWorkAdmission } from "../../../process/gateway-work-admission.js";
+import {
+  runOutsideGatewayRootWorkAdmission,
+  getGatewayRollingAdmission,
+} from "../../../process/gateway-work-admission.js";
 import { createDeferredCore } from "../../../shared/deferred.js";
 import { createLazyPromise } from "../../../shared/lazy-runtime.js";
 import {
@@ -43,6 +46,7 @@ import { hasCurrentGatewayOperatorAccess } from "../../operator-access-policy.js
 import { onOperatorRolePolicyChanged } from "../../operator-role-policy.js";
 import { bindWebSocketRequestMutationAuthority } from "../../server-methods/session-mutation-guards.js";
 import type { GatewayRequestEntry } from "../../server-request-entry.js";
+import { gatewayRollingReadInterruptionError } from "../../server-request-lifecycle.js";
 import { SharedGatewaySessionGenerationState } from "../../server-shared-auth-generation.js";
 import { classifyGatewayStaleInstall } from "../../stale-install.js";
 import { formatForLog, logWs, summarizeSessionListForWsLog } from "../../ws-log.js";
@@ -137,6 +141,8 @@ export function createGatewayAuthenticatedRequestDispatcher(params: {
     }
     const req = parsed;
     const context = buildRequestContext();
+    const rollingReleaseId =
+      getGatewayRollingAdmission()?.releaseId ?? context.getPendingRollingReleaseId?.();
     const sourceContext = context.resolveGatewayContext?.() ?? context;
     let committedAuthPolicy = client.authPolicy;
     const isCommittedGrantCurrent = () => {
@@ -619,7 +625,16 @@ export function createGatewayAuthenticatedRequestDispatcher(params: {
           respondWithAuthority(
             false,
             undefined,
-            staleInstall?.error ??
+            gatewayRollingReadInterruptionError({
+              method: req.method,
+              context,
+              methodRegistry: getMethodRegistry?.(),
+              releaseId: rollingReleaseId,
+              signal: params.handler.connectionWork.signal,
+              connectionSignal: client.connectionSignal,
+              error: err,
+            }) ??
+              staleInstall?.error ??
               errorShapeFromError(ErrorCodes.UNAVAILABLE, err, {
                 message: formatForLog(err),
                 ...(err instanceof GatewayClientRequestError

@@ -13,7 +13,13 @@ export function resolveCliStartupPolicy(params: {
   nativeUpdateExecutorCheck?: boolean;
 }) {
   const commandPolicy = resolveCliCommandPathPolicy(params.commandPath);
-  const nativeCheck = params.nativeUpdateExecutorCheck === true;
+  const rollingStandby =
+    params.commandPath[0] === "gateway" &&
+    (params.commandPath.length === 1 || params.commandPath[1] === "run") &&
+    (params.argv ?? []).some(
+      (arg) => arg === "--rolling-standby" || arg.startsWith("--rolling-standby="),
+    );
+  const nativeCheck = params.nativeUpdateExecutorCheck === true || rollingStandby;
   const machineOutputMode =
     nativeCheck || params.jsonOutputMode || params.machineOutputMode === true;
   // Protocol commands own stdout from process startup, before their action installs later routing.

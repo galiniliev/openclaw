@@ -275,7 +275,16 @@ export const systemHandlers: GatewayRequestHandlers = {
     if (!assertValidParams(params, validateSystemInfoParams, "system.info", respond)) {
       return;
     }
-    respond(true, await collectSystemInfo(context, hasGatewayAdminScope(client)), undefined);
+    respond(
+      true,
+      {
+        ...(await collectSystemInfo(context, hasGatewayAdminScope(client))),
+        ...(params.includeRollingRelease === true && context.readRollingCompatibility
+          ? { rollingRelease: await context.readRollingCompatibility() }
+          : {}),
+      },
+      undefined,
+    );
   },
   "system-event": async (options) => {
     const { params, respond, context, client } = options;
