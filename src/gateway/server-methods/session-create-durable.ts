@@ -76,9 +76,10 @@ async function prepareCreation(request: GatewayRequestHandlerOptions) {
     }
   };
   assertCurrent();
+  const { defaultProfileId: _defaultProfileId, ...intent } = p;
   const operation: SessionCreationOperation = {
     digest: sha256Hex(JSON.stringify(["session.create", owner, p.idempotencyKey])),
-    fingerprint: sha256Hex(stableStringify(p)),
+    fingerprint: sha256Hex(stableStringify(intent)),
     authorization: {
       role: request.client?.connect.role ?? null,
       scopes: request.client?.connect.scopes?.toSorted() ?? [],

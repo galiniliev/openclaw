@@ -88,7 +88,8 @@ export function idempotentSessionCreate(
       }
     }
     let entries = entriesByOwner.get(owner);
-    const requestIdentity = sha256Hex(stableStringify(request.params));
+    const { defaultProfileId: _defaultProfileId, ...intent } = request.params;
+    const requestIdentity = sha256Hex(stableStringify(intent));
     const authorization: SessionCreateAuthorization = {
       role: request.client?.connect.role ?? null,
       scopes: request.client?.connect.scopes?.toSorted() ?? [],

@@ -1398,7 +1398,7 @@ var External = [
     /(^type$|^actorType$|^source$|^id$)/u,
     /(^emoji$|^count$|^identities$)/u,
     /(^id$|^label$)/u,
-    /(^key$|^idempotencyKey$|^agentId$|^surface$|^label$|^displayName$|^titleSource$|^category$|^model$|^agentRuntime$|^contextWindow$|^thinkingLevel$|^cyberAccessProgram$|^fastMode$|^permissionMode$|^communication$|^toolOverrides$|^incognito$|^visibility$|^catalogId$|^parentSessionKey$|^spawnDepth$|^fork$|^forkFrom$|^emitCommandHooks$|^succeedsParent$|^timeoutMs$|^task$|^message$|^mentions$|^attachments$|^projectId$|^projectGitUrl$|^repository$|^deviceFolder$|^worktree$|^worktreeSource$|^worktreeBaseRef$|^worktreeName$|^execNode$|^cwd$)/u,
+    /(^key$|^idempotencyKey$|^profileId$|^defaultProfileId$|^agentId$|^surface$|^label$|^displayName$|^titleSource$|^category$|^model$|^agentRuntime$|^contextWindow$|^thinkingLevel$|^cyberAccessProgram$|^fastMode$|^permissionMode$|^communication$|^toolOverrides$|^incognito$|^visibility$|^catalogId$|^parentSessionKey$|^spawnDepth$|^fork$|^forkFrom$|^emitCommandHooks$|^succeedsParent$|^timeoutMs$|^task$|^message$|^mentions$|^attachments$|^projectId$|^projectGitUrl$|^repository$|^deviceFolder$|^worktree$|^worktreeSource$|^worktreeBaseRef$|^worktreeName$|^execNode$|^cwd$)/u,
     /(^send$|^receive$)/u,
     /(^mcpServers$|^mcpToolsDeny$|^skills$|^webSearch$)/u,
     /(^url$|^ref$)/u,
@@ -15479,6 +15479,10 @@ var External = [
     (value.idempotencyKey === void 0 ||
       !("idempotencyKey" in value) ||
       check_63(value.idempotencyKey)) &&
+    (value.profileId === void 0 || !("profileId" in value) || check_63(value.profileId)) &&
+    (value.defaultProfileId === void 0 ||
+      !("defaultProfileId" in value) ||
+      check_63(value.defaultProfileId)) &&
     (value.agentId === void 0 || !("agentId" in value) || check_63(value.agentId)) &&
     (value.surface === void 0 || !("surface" in value) || check_2323(value.surface)) &&
     (value.label === void 0 || !("label" in value) || check_94(value.label)) &&

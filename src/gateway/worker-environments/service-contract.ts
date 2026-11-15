@@ -222,6 +222,7 @@ export type WorkerPlacementDispatchRequest = WorkerSessionPlacementDispatchIdent
   executionMode: WorkerPlacementExecutionMode;
   /** Initial mandatory admission cannot cancel the input it is preparing. Never exposed over RPC. */
   requiredProfile?: string;
+  preparingSession?: true;
   /** Current dispatch caller's setup authority; never inherited by a new caller. */
   runSetupScript?: boolean;
   /** Current request only; never persisted or sent over RPC. */

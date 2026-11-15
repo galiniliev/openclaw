@@ -22,6 +22,10 @@ export {
 export const SessionsCreateParamsSchema = closedObject({
   key: Type.Optional(NonEmptyString),
   idempotencyKey: Type.Optional(NonEmptyString),
+  /** Select a worker destination at creation under the existing dispatch policy. */
+  profileId: Type.Optional(NonEmptyString),
+  /** Creation-only fallback, ignored when replaying an accepted idempotency key. */
+  defaultProfileId: Type.Optional(NonEmptyString),
   agentId: Type.Optional(NonEmptyString),
   surface: Type.Optional(
     Type.Literal("plugin-dock", {
