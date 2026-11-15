@@ -1,14 +1,26 @@
-import { operatorReadShareKey } from "./read-share-keys.js";
+import { cronListShareKey, operatorReadShareKey } from "./read-share-keys.js";
 
+export const ROLLING_READ = { rollingRead: true } as const;
 export const CONTROL_PLANE_WRITE = { controlPlaneWrite: true } as const;
 export const SIDECAR_CONTROL_PLANE_WRITE = { startup: true, controlPlaneWrite: true } as const;
 export const UNADVERTISED = { advertise: false } as const;
 export const PROFILE_DEPENDENT = { profileAccess: "required" } as const;
 export const PROFILE_STARTUP = { startup: true, ...PROFILE_DEPENDENT } as const;
 export const SESSION_METADATA_READ = {
+  rollingRead: true,
   shareKey: operatorReadShareKey,
   shareMaxAgeMs: 1_000,
   shareInvalidationEvents: ["sessions.changed", "chat.metadata.changed"],
+} as const;
+export const CRON_LIST_READ = {
+  ...ROLLING_READ,
+  shareKey: cronListShareKey,
+  shareMaxAgeMs: 1_000,
+  shareInvalidationEvents: ["cron", "sessions.changed"],
+} as const;
+export const CRON_STATUS_READ = {
+  ...SESSION_METADATA_READ,
+  shareInvalidationEvents: ["cron"],
 } as const;
 export const OBSERVATION = { lifetime: "observation" } as const;
 export const UNADVERTISED_OBSERVATION = { ...UNADVERTISED, ...OBSERVATION } as const;

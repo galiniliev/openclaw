@@ -1,7 +1,9 @@
 // Control-plane rate limiting bounds write-side RPC attempts per device/IP and
 // caps bucket growth against unique-key memory pressure.
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import { ErrorCodes, errorShape } from "../../packages/gateway-protocol/src/index.js";
 import { pruneMapToMaxSize } from "../infra/map-size.js";
+import { formatControlPlaneActor, resolveControlPlaneActor } from "./control-plane-audit.js";
 import type { GatewayClient } from "./server-methods/types.js";
 
 export const CONTROL_PLANE_RATE_LIMIT_MAX_REQUESTS = 30;
@@ -96,4 +98,36 @@ export function pruneStaleControlPlaneBuckets(nowMs = Date.now()): number {
     }
   }
   return pruned;
+}
+
+/** Projects the admitted budget outcome as the standard control-plane RPC failure. */
+export function consumeControlPlaneWriteBudgetError({
+  client,
+  method,
+  log,
+}: {
+  client: GatewayClient | null;
+  method: string;
+  log: { warn: (message: string) => void };
+}): ReturnType<typeof errorShape> | undefined {
+  const budget = consumeControlPlaneWriteBudget({ client, method });
+  if (budget.allowed) {
+    return undefined;
+  }
+  const actor = resolveControlPlaneActor(client);
+  log.warn(
+    `control-plane write rate-limited method=${method} ${formatControlPlaneActor(actor)} retryAfterMs=${budget.retryAfterMs} key=${budget.key}`,
+  );
+  return errorShape(
+    ErrorCodes.UNAVAILABLE,
+    `rate limit exceeded for ${method}; retry after ${Math.ceil(budget.retryAfterMs / 1000)}s`,
+    {
+      retryable: true,
+      retryAfterMs: budget.retryAfterMs,
+      details: {
+        method,
+        limit: `${CONTROL_PLANE_RATE_LIMIT_MAX_REQUESTS} per ${CONTROL_PLANE_RATE_LIMIT_WINDOW_MS / 1000}s`,
+      },
+    },
+  );
 }

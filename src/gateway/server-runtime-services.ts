@@ -35,6 +35,7 @@ import {
 import type { GatewayCronState } from "./server-cron-contract.js";
 import type { GatewayCronReconciliation } from "./server-cron-reconciled.js";
 import { scheduleGatewayIdleTask } from "./server-idle-task.js";
+import type { GatewayKernelRuntime } from "./server-kernel-request-runtime.js";
 import {
   clearGatewayMaintenanceHandles,
   type GatewayMaintenanceHandles,
@@ -554,4 +555,67 @@ export function activateGatewayScheduledServices(params: {
     stopScheduledServices,
     stopDeliveryRecovery,
   };
+}
+
+/** Register retained boot artifacts with the same lifetime and idle owner as maintenance. */
+export function scheduleGatewayRetainedPluginCleanup({
+  runtime,
+  waitForPostReadyWork,
+  log,
+}: {
+  runtime: Pick<
+    GatewayKernelRuntime,
+    | "pluginMetadataSnapshot"
+    | "cfgAtStart"
+    | "lifecycle"
+    | "scheduler"
+    | "connectionWork"
+    | "registerGatewayLifetimeSidecars"
+  >;
+  waitForPostReadyWork: () => Promise<void>;
+  log: GatewayPostReadyLogger;
+}): void {
+  const { pluginMetadataSnapshot, cfgAtStart, lifecycle, registerGatewayLifetimeSidecars } =
+    runtime;
+  // This Gateway may still import boot-generation code after an install retires
+  // it. Capture those paths before the idle delay; cleanup also protects the new ledger.
+  const startupInstallPaths = [
+    ...Object.values(pluginMetadataSnapshot?.index.installRecords ?? {}).flatMap((record) =>
+      record.installPath ? [record.installPath] : [],
+    ),
+    ...(pluginMetadataSnapshot?.plugins.flatMap((record) =>
+      record.setupSource
+        ? [record.rootDir, record.source, record.setupSource]
+        : [record.rootDir, record.source],
+    ) ?? []),
+  ];
+  registerGatewayLifetimeSidecars(
+    scheduleGatewayIdleTask({
+      id: "maintenance:retained-plugin-generations",
+      scheduler: runtime.scheduler,
+      delayMs: 30_000,
+      retryDelayMs: 30_000,
+      repeatDelayMs: 60 * 60_000,
+      isClosing: () => lifecycle.closePreludeStarted,
+      isBusy: () => getActiveGatewayRootWorkCount({ excludeCurrent: true }) > 0,
+      run: async () => {
+        await waitForPostReadyWork();
+        const { cleanupGatewayRetiredPluginArtifacts } =
+          await import("./server-retained-plugin-cleanup.js");
+        await cleanupGatewayRetiredPluginArtifacts({
+          log,
+          startupInstallPaths,
+          startupConfig: cfgAtStart,
+          signal: runtime.connectionWork.signal,
+          assertCurrent: () => {
+            if (lifecycle.closePreludeStarted) {
+              throw runtime.connectionWork.signal.reason ?? new Error("Gateway is closing");
+            }
+          },
+        });
+      },
+      log,
+      errorMessage: "retained npm generation cleanup failed",
+    }),
+  );
 }

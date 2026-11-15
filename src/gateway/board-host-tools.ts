@@ -81,8 +81,9 @@ export function captureBoardCapabilityAuthority(
   ticket: string,
   invocation: GatewayHandlerInvocation,
   capability: string | BoardWidgetDataQuery,
+  access: "read" | "write" = "write",
 ): BoardCapabilityAuthority {
-  const authority = captureBoardRequestAuthority(invocation);
+  const authority = captureBoardRequestAuthority(invocation, access);
   const claims = verifyBoardViewTicket(ticket);
   if (!claims) {
     throw new BoardValidationError("invalid_operation", "board widget view ticket is invalid");
@@ -91,7 +92,12 @@ export function captureBoardCapabilityAuthority(
   const resolveSession = (target: BoardSessionTarget) => {
     authority.assertActive();
     const cfg = invocation.context.getRuntimeConfig();
-    const selected = resolveRequestedSessionStoreTarget(cfg, target.sessionKey, target.agentId);
+    const selected = resolveRequestedSessionStoreTarget(
+      cfg,
+      target.sessionKey,
+      target.agentId,
+      access,
+    );
     if (!selected.ok || selected.value.sessionKey !== target.sessionKey) {
       throw new BoardValidationError(
         "invalid_operation",
@@ -148,6 +154,7 @@ export function captureBoardCapabilityAuthority(
 
 export function captureBoardRequestAuthority(
   invocation: GatewayHandlerInvocation,
+  access: "read" | "write" = "write",
 ): BoardRequestAuthority {
   const context = invocation.context;
   const resolveGatewayContext = context.resolveGatewayContext;
@@ -171,7 +178,7 @@ export function captureBoardRequestAuthority(
         invocation.signal?.throwIfAborted();
         assertSources();
         if (
-          isGatewaySubordinateWorkAdmissionClosed() ||
+          isGatewaySubordinateWorkAdmissionClosed(access) ||
           resolveGatewayContext() !== context ||
           context.resolveGatewayContext !== resolveGatewayContext ||
           (methodRegistry && context.getGatewayMethodRegistry?.() !== methodRegistry) ||

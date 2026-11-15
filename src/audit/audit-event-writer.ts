@@ -2,7 +2,9 @@
 import { randomUUID } from "node:crypto";
 import type { DecisionReceiptV1 } from "../../packages/gateway-protocol/src/index.js";
 import { resolveStateDir } from "../config/paths.js";
+import { isDatabaseEngineReadOnlyAdmission } from "../infra/database-engine/context.js";
 import type { GatewayScheduler } from "../infra/gateway-scheduler.js";
+import { beginLifecycleWriteCustody } from "../infra/lifecycle-write-custody.js";
 import { hasSqliteWorkerOutcomeUnknown } from "../infra/sqlite-worker-contract.js";
 import { OPENCLAW_SQLITE_BUSY_TIMEOUT_MS } from "../state/openclaw-state-db.js";
 import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
@@ -56,6 +58,8 @@ export function createAuditEventWriter(options: {
   maxPending?: number;
   onContention?: (message: string) => void;
   onError?: (error: string) => void;
+  /** The trusted host opens mutation admission before starting this lifetime. */
+  deferStart?: (start: () => void) => void;
 }): AuditEventWriter {
   const { scheduler } = options;
   const database = {
@@ -67,7 +71,17 @@ export function createAuditEventWriter(options: {
   let stopped = false;
   let draining = false;
   let shutdownExpired = false;
+  let started = false;
   let maintenancePending = true;
+  let releaseCustody: (() => void) | undefined;
+  const reconcileCustody = () => {
+    if (started && (queue.length > 0 || draining || maintenancePending)) {
+      releaseCustody ??= beginLifecycleWriteCustody("audit-persistence");
+    } else {
+      releaseCustody?.();
+      releaseCustody = undefined;
+    }
+  };
   let scheduled: ReturnType<typeof setImmediate> | undefined;
   let batchTimer: ReturnType<typeof setTimeout> | undefined;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -165,6 +179,7 @@ export function createAuditEventWriter(options: {
     }
   };
   const finishStop = () => {
+    reconcileCustody();
     if (stopTimer) {
       clearTimeout(stopTimer);
       stopTimer = undefined;
@@ -174,6 +189,7 @@ export function createAuditEventWriter(options: {
     finish?.();
   };
   const schedule = (delayMs = 0) => {
+    reconcileCustody();
     if (draining || shutdownExpired) {
       return;
     }
@@ -241,7 +257,8 @@ export function createAuditEventWriter(options: {
         maintenancePending = false;
         const maintenance = await reportMaintenance();
         resolveReady();
-        maintenancePending ||= maintenance !== "settled";
+        // A late result may report more rows; shutdown still forbids another pass.
+        maintenancePending ||= !shutdownExpired && maintenance !== "settled";
         if (maintenance === "retry") {
           retry = true;
           return;
@@ -275,6 +292,7 @@ export function createAuditEventWriter(options: {
       }
     } finally {
       draining = false;
+      reconcileCustody();
       if (shutdownExpired) {
         finishStop();
       } else if (retry) {
@@ -291,20 +309,43 @@ export function createAuditEventWriter(options: {
       }
     }
   }
-  const maintenanceJob = scheduler.schedule({
-    id: "audit:maintenance",
-    atMs: scheduler.now() + AUDIT_MAINTENANCE_INTERVAL_MS,
-    everyMs: AUDIT_MAINTENANCE_INTERVAL_MS,
-    run: () => {
-      maintenancePending = true;
-      schedule();
-    },
-  });
-  schedule();
+  let maintenanceJob: ReturnType<GatewayScheduler["schedule"]> | undefined;
+  const startWriter = () => {
+    if (started || stopped) {
+      return;
+    }
+    started = true;
+    maintenanceJob = scheduler.schedule({
+      id: "audit:maintenance",
+      atMs: scheduler.now() + AUDIT_MAINTENANCE_INTERVAL_MS,
+      everyMs: AUDIT_MAINTENANCE_INTERVAL_MS,
+      run: () => {
+        if (isDatabaseEngineReadOnlyAdmission()) {
+          return;
+        }
+        maintenancePending = true;
+        schedule();
+      },
+    });
+    schedule();
+  };
+  if (options.deferStart) {
+    options.deferStart(startWriter);
+  } else {
+    startWriter();
+  }
 
   const enqueue = (message: AuditWriterRequest): boolean => {
     const rows = message.type === "record-run" ? 2 : 1;
-    if (stopped || pendingRows + rows > maxPending) {
+    if (
+      !started ||
+      stopped ||
+      isDatabaseEngineReadOnlyAdmission() ||
+      pendingRows + rows > maxPending
+    ) {
+      if (!started || isDatabaseEngineReadOnlyAdmission()) {
+        return false;
+      }
       if (!stopped) {
         fail(`audit event queue is full (${maxPending}); dropping metadata`);
       }
@@ -350,8 +391,14 @@ export function createAuditEventWriter(options: {
         return stopPromise;
       }
       stopped = true;
-      maintenanceJob.cancel();
-      maintenancePending = true;
+      if (!started) {
+        resolveReady();
+        return (stopPromise = Promise.resolve());
+      }
+      maintenanceJob?.cancel();
+      // Quiescent entry already joined accepted persistence. Do not start a new
+      // destructive maintenance pass while retiring the predecessor's readers.
+      maintenancePending = !isDatabaseEngineReadOnlyAdmission();
       stopPromise = new Promise<void>((resolve) => {
         resolveStop = resolve;
         stopTimer = setTimeout(() => {

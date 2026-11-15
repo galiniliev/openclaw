@@ -1,11 +1,7 @@
 import os from "node:os";
 import path from "node:path";
-import {
-  GatewayLockError,
-  readLockPayload,
-  resolveGatewayLockPaths,
-  resolveGatewayOwnerStatus,
-} from "./gateway-lock.js";
+import { resolveGatewayOwnerStatus } from "./gateway-lock-owner-status.js";
+import { GatewayLockError, readLockPayload, resolveGatewayLockPaths } from "./gateway-lock.js";
 
 /** Published 2026.6.33 Gateways predate state-local locks and SQLite coordinators. */
 export async function readLegacyGatewayLockIdentity(env: NodeJS.ProcessEnv) {

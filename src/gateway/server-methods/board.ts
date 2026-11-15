@@ -76,7 +76,7 @@ export function createBoardHandlers(store: BoardStore): GatewayRequestHandlers {
     "board.get": defineBoardMethod("board.get", validateBoardGetParams, async (invocation) => {
       const { params: boardParams, respond, context, client } = invocation;
       const ingress = client?.remoteControlUiIngress;
-      const authority = captureBoardRequestAuthority(invocation);
+      const authority = captureBoardRequestAuthority(invocation, "read");
       const boardSession = resolveBoardSession(boardParams, context, respond, "read");
       if (!boardSession) {
         return;
@@ -653,6 +653,7 @@ export function createBoardHandlers(store: BoardStore): GatewayRequestHandlers {
           boardParams.ticket,
           invocation,
           boardDataBindingCapability(boardParams.bindingId, bindingParams),
+          "read",
         );
         await readBoardDataBinding(
           boardParams.bindingId,

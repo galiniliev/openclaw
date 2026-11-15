@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+import { readLifecycleWriteCustody } from "../infra/lifecycle-write-custody.js";
 import { withSqliteWorkerCleanupFailure } from "../infra/sqlite-worker-broker-reply.js";
 import { SqliteWorkerError, type SqliteWorkerCommand } from "../infra/sqlite-worker-contract.js";
 import { closeOpenClawStateDatabaseAsync } from "../state/openclaw-state-db.js";
@@ -96,6 +97,24 @@ async function advanceDispatch() {
 }
 
 describe("audit writer async settlement", () => {
+  it("releases persistence custody when shutdown drops a waiting retry", async () => {
+    mockEventRequests(async () => ({ status: "retry" }));
+    const writer = startWriter();
+    try {
+      await advanceDispatch();
+      await writer.ready;
+      writer.record(event("retrying"));
+      await advanceDispatch();
+      expect(readLifecycleWriteCustody()).toContainEqual({ phase: "audit-persistence", count: 1 });
+      const stopping = writer.stop();
+      await vi.advanceTimersByTimeAsync(10_000);
+      await stopping;
+      expect(readLifecycleWriteCustody()).toEqual([]);
+    } finally {
+      await stopWriter(writer);
+    }
+  });
+
   it.each([false, true])("coalesces neighboring turns (early shutdown: %s)", async (stopEarly) => {
     const first = createDeferred<AuditWriterResult>();
     const requests = mockEventRequests(async (id) =>
@@ -236,10 +255,12 @@ describe("audit writer async settlement", () => {
       expect(errors).toEqual([
         "audit event writer shutdown timed out; pending metadata may be lost",
       ]);
+      expect(readLifecycleWriteCustody()).toContainEqual({ phase: "audit-persistence", count: 1 });
       finish.resolve([{ status: "settled", deleted: 1 }]);
       await stopping;
       await writer.ready;
       expect(stopped).toBe(true);
+      expect(readLifecycleWriteCustody()).toEqual([]);
       await vi.advanceTimersByTimeAsync(60 * 60_000);
       expect(execute).toHaveBeenCalledTimes(1);
       expect(errors).toHaveLength(1);
