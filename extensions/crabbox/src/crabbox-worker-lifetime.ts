@@ -30,7 +30,7 @@ export async function prepareCrabboxCaptureLifetime(
   dependencies: {
     observe: (inspect: ParsedInspect) => void;
   },
-): Promise<void> {
+): Promise<ParsedInspect> {
   const assertCurrent = () => {
     context.signal?.throwIfAborted();
     context.assertCurrent?.();
@@ -84,7 +84,7 @@ export async function prepareCrabboxCaptureLifetime(
     dependencies.observe({ ...observed, lifetime: { ...observed.lifetime, policyNotice: notice } });
   }
   if ((observed.lifetime?.expiresAtMs ?? 0) - Date.now() >= windowMs) {
-    return;
+    return observed;
   }
 
   const totalDeadline = async (current: ParsedInspect): Promise<number | undefined> => {
@@ -133,7 +133,7 @@ export async function prepareCrabboxCaptureLifetime(
     deadline = observed.lifetime?.expiresAtMs;
   }
   if (deadline !== undefined && deadline - Date.now() >= windowMs) {
-    return;
+    return observed;
   }
   const lifetime = observed.lifetime;
   if (lifetime?.runtimeExtension === false || context.provider === "daytona") {
@@ -225,8 +225,9 @@ export async function prepareCrabboxCaptureLifetime(
     deadline = await totalDeadline(observed);
     assertCurrent();
     if (deadline !== undefined && deadline - Date.now() >= windowMs) {
-      return;
+      return observed;
     }
     failure("extension did not confirm sufficient remaining total lifetime", observed);
   }
+  return observed;
 }

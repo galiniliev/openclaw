@@ -32,6 +32,38 @@ Before capture, scrubbing tolerates recorded node processes that have exited or 
 
 Environment status reports `stopping` while teardown is pending. Stop cloud worker can finish after session shutdown and a claimed warm-image capture, while the environment remains `destroying`. Capture and confirmed lease release continue under the environment lifecycle owner; only confirmed release changes the environment to `destroyed`. Failures remain visible and retryable. If the Gateway exits mid-capture, Crabbox's idle timeout or TTL can reap the lease, and the next Gateway reconciles the retained cleanup request.
 
+### Azure Sandbox snapshots
+
+Azure Sandbox capture uses the profile's preinstalled snapshot SDK runtime and
+canonical clean-image verifier. Configure `sdkPython`, `configFile`, `sdkIdentity`,
+and `snapshotVerifier` as described in the
+[Crabbox profile reference](/gateway/config-cloud-workers#crabbox-profile).
+The Gateway must supply the complete explicit Crabbox routing environment:
+`CRABBOX_AZURE_SANDBOX_REGION`, `CRABBOX_AZURE_SANDBOX_SUBSCRIPTION_ID`,
+`CRABBOX_AZURE_SANDBOX_RESOURCE_GROUP`, and `CRABBOX_AZURE_SANDBOX_GROUP`.
+These existing Crabbox inputs override file configuration and bind SDK snapshot
+operations to the same provider scope. Scope stored only in a Crabbox config file
+is insufficient for snapshot preparation; OpenClaw does not parse private YAML
+or infer missing routing fields.
+The verifier runs on the clean worker before node enrollment. Capture waits for
+the exact snapshot to become readable in its original provider scope before
+publishing it for reuse.
+
+Before capture, the native project owner rechecks the admitted source and completed
+workspace manifests. The verifier receives that exact root set and the current
+runtime artifact descriptors over bounded private stdin. It checks credential and
+session-state absence in both machine and prepared homes, rejects unknown cache
+roots, and verifies the current installed runtime with the native cache predicate.
+The baked runtime remains separate base-image provenance after a runtime top-up.
+Verifier failures report closed phase/process metadata, never child output or
+repository content. A capture without a current verification owner fails closed;
+an optional teardown capture is skipped visibly.
+
+Provider scope and the selected source disk participate in compatibility. Snapshot
+deletion retains its original route and remains pending until a scoped read
+confirms absence. An interrupted capture keeps its recorded source and operation
+ownership; a lost response never triggers another capture automatically.
+
 ### Later sessions and refresh
 
 A matching ready worker skips provisioning, even when the repository has advanced. Exact-commit workers are preferred; otherwise, OpenClaw refreshes the unbound workspace to the requested commit before session binding, using the same content preparation as snapshot forks. When no ready worker is available, a compatible snapshot starts a new machine and New Session shows **Starting from snapshot…**. The fork updates its checkout to the requested commit and installs the current runtime when needed before enrollment. Profile setup is already captured; post-create/start commands run after session binding.
@@ -132,8 +164,9 @@ Preparation timings include retained Git identity and manifest checks, inspectio
 seed verification and checkout, seed manifests, workspace copy or Git update, toolchain preparation,
 recipe commands, and prepared-manifest capture. Skipped steps are absent; repeated steps are summed.
 These timings measure work inside the preparation scripts, excluding provider boot and transport
-round trips. Completed worker-owned Git stores are not scanned again with `git fsck`; incoming
-packs still require size, SHA-256, object and connectivity verification. Reuse still verifies the
+round trips. Ordinary prepared-worker reuse does not scan completed Git stores again with `git fsck`; incoming
+packs still require size, SHA-256, object and connectivity verification. Explicit snapshot
+publication separately verifies the prepared checkout and seed before admitting a clean image. Reuse still verifies the
 completed workspace manifest and its Git identity. Lazy snapshot storage must still read directory
 and file metadata, changed content, newly transferred objects, and files used by setup or tools.
 
@@ -207,3 +240,7 @@ openclaw doctor --fix
 ```
 
 This recovery deletes only the unchanged legacy row matching that selector. It does not establish provider absence or clean up a machine for you. Keep the row when cleanup is uncertain. Checkpoints already forgotten by older code are not rediscovered; reconcile those manually through Crabbox. Do not run older and newer writers against the same state or downgrade while allocations, captures, or retirements remain unresolved.
+
+### Upgrade warm-image records
+
+Warm-image records use version 4 so pending snapshot retirement can remain recorded independently of a new capture. When upgrading version 3 records, run `openclaw doctor --fix` under its normal stopped-Gateway custody. The plugin-owned migration preserves current and previous images, allocation holds, unfinished captures, and exact retirement debt; it does not contact the cloud provider or discard those obligations.

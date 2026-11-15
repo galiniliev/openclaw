@@ -127,3 +127,63 @@ it.each([
 it.each([false, true])("accepts the core-owned setup policy %s", (runSetupScript) => {
   expect(parseCrabboxProfile({ ...PROFILE, runSetupScript })).toEqual(parseCrabboxProfile(PROFILE));
 });
+
+const SANDBOX = { provider: "azure-sandbox", ttl: "24h", idleTimeout: "60m" };
+it("preserves explicit Sandbox types through placement and preparation and preparation", () => {
+  const configured = { ...SANDBOX, type: "4cpu-8gib" };
+  const resolved = resolveCrabboxProvisionProfile(configured, undefined).profile;
+  expect(resolved).toMatchObject({ class: "4cpu-8gib", type: "4cpu-8gib", warmImage: true });
+  const args = buildCrabboxAllocationArgs(resolved, "cbx_size", "sizing");
+  expect(args).toContain("--type");
+  expect(args).toContain("4cpu-8gib");
+  expect(args).not.toContain("--class");
+  const smaller = resolveCrabboxProvisionProfile(configured, "2cpu-4gib").profile;
+  expect(smaller.type).toBe("2cpu-4gib");
+  const generic = resolveCrabboxProvisionProfile(configured, "small").profile;
+  expect(generic.type).toBeUndefined();
+  expect(buildCrabboxAllocationArgs(generic, "cbx_small", "small")).toContain("--class");
+  const target = resolveCrabboxPreparationTarget(configured);
+  expect(target?.machineClass).toBe("4cpu-8gib");
+  expect(target?.profileKey).toBe(resolveCrabboxWarmImageProfileKey(resolved));
+  expect(target?.profileKey).not.toBe(
+    resolveCrabboxPreparationTarget(configured, "2cpu-4gib")?.profileKey,
+  );
+  expect(target?.profileKey).not.toBe(
+    resolveCrabboxPreparationTarget({ ...SANDBOX, class: "small" })?.profileKey,
+  );
+});
+it.each([
+  { type: "unknown" },
+  { type: "4cpu-8gib", class: "small" },
+  { type: "4cpu-8gib", provider: "aws" },
+])("rejects ambiguous or unsupported explicit sizing %j", (overrides) => {
+  expect(() => parseCrabboxProfile({ ...SANDBOX, ...overrides })).toThrow();
+});
+
+it.each([
+  ["XS", "0.25cpu-0.5gib"],
+  ["s", "0.5cpu-1gib"],
+  ["M", "1cpu-2gib"],
+  ["l", "2cpu-4gib"],
+  ["XL", "4cpu-8gib"],
+  ["2xl", "8cpu-16gib"],
+  ["3XL", "16cpu-32gib"],
+])("normalizes Azure tier %s for allocation and preparation identity", (alias, canonical) => {
+  const profile = { ...SANDBOX, type: alias };
+  const resolved = resolveCrabboxProvisionProfile(profile, undefined).profile;
+  expect(resolved.type).toBe(canonical);
+  expect(resolved.class).toBe(canonical);
+  const args = buildCrabboxAllocationArgs(resolved, "cbx_tier", "tier");
+  expect(args.slice(args.indexOf("--type"), args.indexOf("--type") + 2)).toEqual([
+    "--type",
+    canonical,
+  ]);
+  const canonicalTarget = resolveCrabboxPreparationTarget({
+    ...SANDBOX,
+    type: canonical.toUpperCase(),
+  });
+  expect(resolveCrabboxPreparationTarget(profile)).toEqual(canonicalTarget);
+  expect(resolveCrabboxPreparationTarget({ ...SANDBOX, type: "4cpu-8gib" }, alias)).toEqual(
+    canonicalTarget,
+  );
+});

@@ -365,6 +365,7 @@ export const databaseWorkerExtensionTestFiles = [
   "extensions/crabbox/src/crabbox-worker-provision-cancellation.test.ts",
   "extensions/crabbox/src/crabbox-worker-stop-lifetime.test.ts",
   "extensions/crabbox/src/crabbox-worker-warm-image-allocation.test.ts",
+  "extensions/crabbox/src/crabbox-worker-warm-image-azure-snapshot.test.ts",
   "extensions/crabbox/src/crabbox-worker-warm-image-cli.test.ts",
   "extensions/crabbox/src/crabbox-worker-warm-image-lifecycle.test.ts",
   "extensions/crabbox/src/crabbox-worker-warm-image-maintenance.test.ts",

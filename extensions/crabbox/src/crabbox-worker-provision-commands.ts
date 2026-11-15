@@ -3,8 +3,13 @@ import { createSubsystemLogger } from "openclaw/plugin-sdk/logging-core";
 import {
   WorkerProviderError,
   type WorkerDesktopEndpoint,
+  type WorkerProfile,
   type WorkerProvider,
 } from "openclaw/plugin-sdk/plugin-entry";
+import {
+  prepareCrabboxAzureSnapshotContext,
+  type AzureSandboxSnapshotContext,
+} from "./crabbox-worker-azure-snapshot.js";
 import {
   crabboxCommandError,
   crabboxCommandOutput,
@@ -22,10 +27,28 @@ import {
 } from "./crabbox-worker-desktop-setup.js";
 import { withCrabboxWorkerEnvProfile } from "./crabbox-worker-env-profile.js";
 import { parseInspectJson, type ParsedInspect } from "./crabbox-worker-inspect.js";
-import { buildCrabboxAllocationArgs, type parseCrabboxProfile } from "./crabbox-worker-profile.js";
-import { assertCrabboxResourceReceipt } from "./crabbox-worker-resource-receipt.js";
-import { runCrabboxSetupEgress } from "./crabbox-worker-setup-egress.js";
 import {
+  buildCrabboxAllocationArgs,
+  resolveCrabboxProvisionProfile,
+  supportsCrabboxProjectPreparation,
+  type parseCrabboxProfile,
+} from "./crabbox-worker-profile.js";
+import { assertCrabboxResourceReceipt } from "./crabbox-worker-resource-receipt.js";
+import {
+  assertCrabboxRetentionSupport,
+  prepareCrabboxRetention,
+} from "./crabbox-worker-retention.js";
+import {
+  assertCrabboxSetupEgressSupport,
+  runCrabboxSetupEgress,
+} from "./crabbox-worker-setup-egress.js";
+import {
+  CrabboxSnapshotBindingRejectedError,
+  isCrabboxSnapshotBindingRejection,
+} from "./crabbox-worker-snapshot-rejection.js";
+import {
+  CRABBOX_DESKTOP_WARMUP_TIMEOUT_MS,
+  CRABBOX_WARMUP_TIMEOUT_MS,
   CRABBOX_LIFECYCLE_TIMEOUT_MS,
   CRABBOX_MACHINE0_READY_WAIT_TIMEOUT,
   CRABBOX_SETUP_TIMEOUT_MS,
@@ -200,6 +223,9 @@ export async function runProvisionWarmup(
   if (result.termination === "exit" && result.code === 0) {
     return;
   }
+  if (params.profile.azureSandboxSnapshotId && isCrabboxSnapshotBindingRejection(result)) {
+    throw new CrabboxSnapshotBindingRejectedError();
+  }
   // Crabbox internal/cli/run.go rejects this capability before Warmup/Acquire.
   if (isFixedLeaseIdUnsupported(result, params.provider)) {
     throw new WorkerProviderError(
@@ -316,7 +342,7 @@ export async function runProvisionSetup(
     forwardedEnv?: Record<string, string>;
     assertCurrent?: () => void;
   },
-): Promise<void> {
+): Promise<string> {
   try {
     const run =
       params.phase === "profile setup" ||
@@ -349,6 +375,7 @@ export async function runProvisionSetup(
               args: leaseRunArgs({ ...params, id: params.inspect.id }, names, profilePath),
               binary: params.binary,
               env: childEnv,
+              providerEnv: params.providerEnv,
               input: params.setup,
               signal: params.signal,
               timeoutMs: remainingProvisionTimeout(
@@ -371,11 +398,12 @@ export async function runProvisionSetup(
         `Cloud worker ${params.inspect.id}: using unlocked runtime install (${match[1]})`,
       );
     }
+    params.signal?.throwIfAborted();
+    return result.stdout;
   } catch (error) {
     params.signal?.throwIfAborted();
     return await failProvisionAfterCleanup({ ...params, id: params.inspect.id }, error);
   }
-  params.signal?.throwIfAborted();
 }
 
 export async function prepareProvisionDesktop(
@@ -420,4 +448,122 @@ export async function failProvisionAfterCleanup(
     throw WorkerProviderError.cleanupIndeterminate(params.id, provisionError, cleanupError);
   }
   throw WorkerProviderError.cleanupComplete(params.id, provisionError);
+}
+
+/** Prepare placement, runtime, receipt, and cancellation policy before allocation. */
+export function prepareCrabboxProvisionProfile(
+  profile: WorkerProfile,
+  options: Parameters<WorkerProvider["provision"]>[2],
+  providerSignal: AbortSignal,
+  signal?: AbortSignal,
+) {
+  const executionMode: unknown = options?.executionMode;
+  if (
+    executionMode !== undefined &&
+    executionMode !== "worker-turn" &&
+    executionMode !== "remote-exec"
+  ) {
+    throw new WorkerProviderError("Crabbox execution mode is unsupported");
+  }
+  const { profile: parsed } = resolveCrabboxProvisionProfile(
+    profile,
+    options?.machineClass,
+    options?.os,
+  );
+  const retention = options?.retention && prepareCrabboxRetention(parsed, options.retention);
+  const receiptRequired = parsed.provider === "azure-sandbox";
+  const recordResourceReceipt = options?.recordResourceReceipt;
+  if (receiptRequired && !recordResourceReceipt) {
+    throw new WorkerProviderError(
+      "Crabbox Azure Sandbox requires Gateway resource receipt persistence",
+    );
+  }
+  if (
+    options?.resourceReceipt &&
+    (!receiptRequired || options.resourceReceipt.identity.provider !== parsed.provider)
+  ) {
+    throw new Error("Crabbox resource receipt does not match the selected provider");
+  }
+  const nodeRuntimeIdentity = options?.nodeRuntimeIdentity;
+  if (parsed.warmImage && !nodeRuntimeIdentity) {
+    throw new WorkerProviderError("Crabbox warm images require a prepared node runtime identity");
+  }
+  const warmupTimeoutMs = parsed.desktop
+    ? CRABBOX_DESKTOP_WARMUP_TIMEOUT_MS
+    : CRABBOX_WARMUP_TIMEOUT_MS;
+  const protectedSetup = Object.keys(parsed.setupSecrets ?? {}).length > 0;
+  const project = supportsCrabboxProjectPreparation(profile, options?.machineClass, options?.os)
+    ? options?.project
+    : undefined;
+  if (options?.project?.preparation && !project) {
+    throw new WorkerProviderError(
+      "Crabbox prepared workers require warm images, protected setup, or a configured Linux Sandbox disk",
+    );
+  }
+  const preparationSignal = AbortSignal.any([
+    providerSignal,
+    ...(signal ? [signal] : []),
+    ...(project?.signal ? [project.signal] : []),
+  ]);
+  return {
+    parsed,
+    retention,
+    receiptRequired,
+    recordResourceReceipt,
+    nodeRuntimeIdentity,
+    warmupTimeoutMs,
+    protectedSetup,
+    project,
+    preparationSignal,
+  };
+}
+
+/** Qualify the provider's runtime and protected setup before allocation starts. */
+export async function prepareCrabboxProvisionEnvironment({
+  binary,
+  parsed,
+  retention,
+  project,
+  protectedSetup,
+  preparationSignal,
+  assertCurrent,
+  snapshotHelperPath,
+}: Pick<
+  ReturnType<typeof prepareCrabboxProvisionProfile>,
+  "parsed" | "retention" | "project" | "protectedSetup" | "preparationSignal"
+> & { binary: string; assertCurrent: () => void; snapshotHelperPath?: string }) {
+  let azureSnapshot: AzureSandboxSnapshotContext | undefined;
+  if (parsed.sdkPython) {
+    const helperPath = snapshotHelperPath;
+    if (!helperPath) {
+      throw new WorkerProviderError(
+        "Snapshot helper is missing; reinstall the qualified Crabbox provider package",
+      );
+    }
+    azureSnapshot = await prepareCrabboxAzureSnapshotContext({
+      binary,
+      profile: parsed,
+      helperPath,
+      signal: preparationSignal,
+      assertCurrent,
+    });
+  }
+  if (azureSnapshot) {
+    parsed.azureSandboxScope = azureSnapshot.providerScope;
+  }
+  preparationSignal?.throwIfAborted();
+  if (retention) {
+    await assertCrabboxRetentionSupport({ binary, signal: preparationSignal });
+    assertCurrent();
+  }
+  if (protectedSetup) {
+    await assertCrabboxSetupEgressSupport({
+      binary,
+      target: parsed.target,
+      assertCurrent,
+      signal: preparationSignal,
+      projectPrepared: project ? Boolean(project.preparation) : undefined,
+    });
+  }
+  return azureSnapshot;
 }

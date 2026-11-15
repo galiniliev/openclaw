@@ -11,7 +11,14 @@ export type CrabboxOfflineRuntimeSetupOptions = {
     manifestSha256: string;
     enabledPluginIds: readonly string[];
   };
-  workerBundle: { localPath: string; sha256: string; bytes: number; packageRelativePath: string };
+  workerBundle: {
+    localPath: string;
+    sha256: string;
+    bytes: number;
+    packageRelativePath: string;
+    bundleHash?: string;
+    protocolFeatures?: readonly string[];
+  };
   target?: CrabboxOperatingSystem;
 };
 

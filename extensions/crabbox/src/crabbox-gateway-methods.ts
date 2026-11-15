@@ -99,7 +99,7 @@ function profileStatus(settings: Readonly<Record<string, unknown>>) {
               : "Enabled by default for Linux with a known machine class.";
     return {
       backend: configured.provider,
-      machineClass: configured.class,
+      machineClass: configured.type ?? configured.class,
       os: configured.target,
       warmImages,
       reason,

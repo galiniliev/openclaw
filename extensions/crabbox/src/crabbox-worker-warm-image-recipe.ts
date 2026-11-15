@@ -31,22 +31,7 @@ export function normalizeRecipePreparation(value: unknown): RecipePreparation | 
   }
   if (isRecord(value.phaseDurationsMs)) {
     const durations: NonNullable<RecipePreparation["phaseDurationsMs"]> = {};
-    for (const phase of [
-      "onCreate",
-      "updateContent",
-      "detectedInstall",
-      "retainedGit",
-      "retainedManifest",
-      "inspection",
-      "seedPreparation",
-      "seedTransfer",
-      "seedVerification",
-      "seedCheckout",
-      "seedManifest",
-      "gitUpdate",
-      "toolchainPreparation",
-      "preparedManifest",
-    ] as const) {
+    for (const phase of ["onCreate", "updateContent", "detectedInstall"] as const) {
       const duration = value.phaseDurationsMs[phase];
       if (typeof duration === "number" && Number.isFinite(duration) && duration >= 0) {
         durations[phase] = duration;

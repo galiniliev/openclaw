@@ -29,7 +29,11 @@ function fixture(
   failCreate = false,
   onCommand?: (argv: string[]) => ReturnType<typeof commandResult> | void,
   policy?: CrabboxWarmImagePolicy,
-  prepareCapture: ManagerOptions["prepareCapture"] = async () => {},
+  prepareCapture: ManagerOptions["prepareCapture"] = async ({ id }) => ({
+    id,
+    state: "ready",
+    tailscaleEnabled: false,
+  }),
 ) {
   vi.stubEnv("OPENCLAW_STATE_DIR", tempDirs.make("openclaw-crabbox-allocation-"));
   const calls: string[][] = [];
@@ -185,6 +189,7 @@ it("admits lifetime only for a claimed capture before preparing or scrubbing its
       phase: "scrubbing",
     });
     events.push("lifetime");
+    return { id: "cbx_lifetime", state: "ready", tailscaleEnabled: false };
   });
   const { owner, context } = fixture(false, undefined, undefined, prepareCapture);
   const source = await enroll(owner, context("cbx_lifetime"));
@@ -231,6 +236,7 @@ it.each(["runtime grant", "lifetime admission"])(
       if (phase === "lifetime admission") {
         await gate.wait();
       }
+      return { id: "cbx_recovered_admission", state: "ready", tailscaleEnabled: false };
     });
     const { owner, context, calls } = fixture(false, undefined, undefined, prepareCapture);
     const source = await enroll(owner, context("cbx_recovered_admission"));
@@ -377,8 +383,8 @@ it.each([
 
     const failed = context("cbx_failed");
     await expect(owner.allocate(failed)).rejects.toThrow("not found");
-    expect(record()?.operation).toEqual(
-      retired ? { type: "retire", checkpointId: CHECKPOINT_ID } : undefined,
+    expect(record()?.retirements).toEqual(
+      retired ? [{ type: "retire", checkpointId: CHECKPOINT_ID }] : undefined,
     );
 
     if (!retired) {
@@ -478,13 +484,13 @@ it("keeps one predecessor and retires the older previous only after its borrower
   expect(openWarmImageStore().entries()).toHaveLength(1);
   expect(record()).toMatchObject({
     image: { checkpointId: `${CHECKPOINT_ID}_3` },
-    operation: { type: "retire", checkpointId: CHECKPOINT_ID },
+    retirements: [{ type: "retire", checkpointId: CHECKPOINT_ID }],
   });
   expect(calls.some((argv) => argv[2] === "delete")).toBe(false);
   await owner.release(borrower);
   const deleted = calls.filter((argv) => argv[2] === "delete").map((argv) => argv[3]);
   expect(deleted).toEqual([CHECKPOINT_ID]);
-  expect(record()?.operation).toBeUndefined();
+  expect(record()?.retirements).toBeUndefined();
   expect(record()?.previous?.checkpointId).toBe(`${CHECKPOINT_ID}_2`);
 });
 
@@ -513,7 +519,10 @@ it("preserves exact preparation replay and cache compatibility across reopen", a
     id: "cbx_compatible",
     preparation: { ...source.preparation, key: "c".repeat(64), purpose: "session" as const },
   };
-  expect(await restarted.allocate(compatible)).toEqual(checkpointChoice);
+  expect(await restarted.allocate(compatible)).toEqual({
+    ...checkpointChoice,
+    baseCommit: "a".repeat(40),
+  });
   expect(
     await restarted.allocate({
       ...compatible,

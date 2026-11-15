@@ -8,6 +8,7 @@ import type { createCrabboxHeartbeatManager } from "./crabbox-worker-heartbeat.j
 import {
   assertCrabboxLeaseId,
   parseCrabboxCleanupProfile,
+  resolveCrabboxProfileCommandEnv,
   type parseCrabboxProfile,
 } from "./crabbox-worker-profile.js";
 import type { createCrabboxWorkerBinaryResolver } from "./crabbox-worker-provider-binary.js";
@@ -50,6 +51,7 @@ export function createCrabboxWorkerLeaseLifecycle(options: {
         id: lease.leaseId,
         idleTimeout: profile.idleTimeout,
         provider: profile.provider,
+        providerEnv: resolveCrabboxProfileCommandEnv(profile),
         ...(retention ? { retention } : {}),
         ...(lease.resourceReceipt ? { resourceReceipt: lease.resourceReceipt } : {}),
       },
@@ -128,6 +130,7 @@ export function createCrabboxWorkerLeaseLifecycle(options: {
       }
       const result = await runCrabboxCommand({
         binary: context.binary,
+        providerEnv: context.providerEnv,
         action: operation.action,
         args: [
           operation.action,

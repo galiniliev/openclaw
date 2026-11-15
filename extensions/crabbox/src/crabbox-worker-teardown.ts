@@ -1,5 +1,9 @@
 import { coerceErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import type { WorkerProvider } from "openclaw/plugin-sdk/plugin-entry";
+import {
+  prepareCrabboxAzureSnapshotContext,
+  type AzureSandboxSnapshotContext,
+} from "./crabbox-worker-azure-snapshot.js";
 import { stopCrabboxLease, type LeaseCommandContext } from "./crabbox-worker-command.js";
 import type { createCrabboxHeartbeatManager } from "./crabbox-worker-heartbeat.js";
 import {
@@ -14,6 +18,7 @@ export function createCrabboxWorkerTeardown(dependencies: {
   heartbeats: ReturnType<typeof createCrabboxHeartbeatManager>;
   warmImages: ReturnType<typeof createCrabboxWarmImageManager>;
   providerSignal: AbortSignal;
+  snapshotHelperPath?: string;
   warn: (message: string) => void;
   resolveLeaseContext: (lease: Parameters<WorkerProvider["inspect"]>[0]) => Promise<{
     context: LeaseCommandContext;
@@ -82,6 +87,9 @@ export function createCrabboxWorkerTeardown(dependencies: {
       }
       let onCleanupAccepted = lease.onCleanupAccepted;
       try {
+        if (await warmImages.releaseRejectedSnapshot({ ...context, retention: lease.retention })) {
+          return;
+        }
         const allocation = await warmImages.lookupLease(context.id);
         const captureProfile = resolveCrabboxWarmImageProfile(
           profile,
@@ -89,7 +97,31 @@ export function createCrabboxWorkerTeardown(dependencies: {
           allocation ? (allocation.os ?? "linux") : profile.target,
         );
         if (captureProfile.warmImage) {
+          let azureSnapshot: AzureSandboxSnapshotContext | undefined;
+          if (captureProfile.sdkPython) {
+            if (!dependencies.snapshotHelperPath) {
+              throw new Error(
+                "Snapshot helper is missing; reinstall the qualified Crabbox provider package",
+              );
+            }
+            azureSnapshot = await prepareCrabboxAzureSnapshotContext({
+              binary: context.binary,
+              profile: captureProfile,
+              helperPath: dependencies.snapshotHelperPath,
+              signal: lease.signal
+                ? AbortSignal.any([providerSignal, lease.signal])
+                : providerSignal,
+              assertCurrent: () => {
+                providerSignal.throwIfAborted();
+                lease.signal?.throwIfAborted();
+                lease.assertCurrent?.();
+              },
+            });
+            captureProfile.azureSandboxScope = azureSnapshot.providerScope;
+          }
           await warmImages.capture({
+            azureSnapshot,
+            timingIdentity: allocation?.timingIdentity,
             ...context,
             signal: lease.signal ? AbortSignal.any([providerSignal, lease.signal]) : providerSignal,
             profile: captureProfile,
