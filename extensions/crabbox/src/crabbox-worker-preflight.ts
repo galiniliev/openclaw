@@ -7,17 +7,20 @@ import {
   crabboxCommandOutput,
   parseCrabboxJson,
   runCrabboxCommand,
+  type CrabboxProviderEnvironment,
 } from "./crabbox-worker-command.js";
 import { CRABBOX_CONFIG_TIMEOUT_MS } from "./crabbox-worker-timeouts.js";
 
 export async function loadCrabboxConfigShow(params: {
   binary: string;
+  providerEnv?: CrabboxProviderEnvironment;
   signal?: AbortSignal;
 }): Promise<unknown> {
   const result = await runCrabboxCommand({
     action: "config show",
     args: ["config", "show", "--json"],
     binary: params.binary,
+    providerEnv: params.providerEnv,
     signal: params.signal,
     timeoutMs: CRABBOX_CONFIG_TIMEOUT_MS,
   });
@@ -26,6 +29,7 @@ export async function loadCrabboxConfigShow(params: {
 
 export async function assertAwsWorkerHasNoInstanceProfile(params: {
   binary: string;
+  providerEnv?: CrabboxProviderEnvironment;
   signal?: AbortSignal;
 }): Promise<void> {
   const config = await loadCrabboxConfigShow(params);
@@ -41,6 +45,7 @@ export async function assertAwsWorkerHasNoInstanceProfile(params: {
 
 export async function assertHetznerDesktopHasManagedCoordinator(params: {
   binary: string;
+  providerEnv?: CrabboxProviderEnvironment;
   signal?: AbortSignal;
 }): Promise<void> {
   const config = await loadCrabboxConfigShow(params);

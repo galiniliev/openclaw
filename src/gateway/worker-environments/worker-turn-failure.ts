@@ -1,16 +1,18 @@
 import { logWarn } from "../../logger.js";
 import { createDeferredCore } from "../../shared/deferred.js";
+import { assertRepositoryWorkspaceDiskIdentity } from "../../state/session-repository-workspaces.authority.js";
 import { WORKER_ADMISSION_DEADLINE_MS } from "../../worker/worker-connection-contract.js";
 import { WorkerNodeLostError } from "../../worker/worker-node-loss.js";
-import { reportPlacementTransition } from "./placement-record.js";
+import { isCurrentPlacementTurnClaim, reportPlacementTransition } from "./placement-record.js";
 import type {
   WorkerSessionPlacementRecord,
   WorkerSessionPlacementStore,
   WorkerSessionTurnClaim,
 } from "./placement-store.js";
-import { matchesWorkerPlacementTarget } from "./placement-target.js";
+import { isExactAttachedEnvironment, matchesWorkerPlacementTarget } from "./placement-target.js";
 import { findPendingWorkerWorkspaceResult } from "./placement-workspace-result.js";
 import type { WorkerEnvironmentService } from "./service.js";
+import type { WorkerSessionWorkspace } from "./session-workspace.js";
 import { boundedWorkerError } from "./worker-error.js";
 import { releaseClaimIfOwned, type WorkerTurnAdmissionOptions } from "./worker-turn-admission.js";
 import { AcceptedWorkspacePublicationIndeterminateError } from "./workspace-accepted-publication.js";
@@ -52,7 +54,11 @@ export class WorkerWorkspaceReconciliationError extends Error {
 const TERMINAL_WORKER_CLEANUP_GRACE_MS = 30_000;
 
 export async function prepareWorkerTurnFailure(
-  options: WorkerTurnAdmissionOptions & { environments: WorkerTurnEnvironmentService },
+  options: WorkerTurnAdmissionOptions & {
+    environments: WorkerTurnEnvironmentService &
+      Pick<WorkerEnvironmentService, "fenceWorkerTurnForRecovery">;
+    handedOffWorkspace?: WorkerSessionWorkspace;
+  },
   placement: ActiveWorkerPlacement,
   claim: WorkerTurnPartialIdentity & WorkerSessionTurnClaim,
   error: unknown,
@@ -74,6 +80,32 @@ export async function prepareWorkerTurnFailure(
     );
   }
   const pendingWorkspaceResult = await findPendingWorkerWorkspaceResult(placements, claim);
+  const diskAuthority =
+    options.handedOffWorkspace?.kind === "repository"
+      ? options.handedOffWorkspace.repository.diskAuthority
+      : undefined;
+  if (!nodeLoss && !pendingWorkspaceResult && diskAuthority && claim.owner.kind === "worker") {
+    const assertRecoveryCurrent = () => {
+      const current = placements.get(placement.sessionId);
+      const environment = options.environments.get(placement.environmentId);
+      if (
+        current?.state !== "active" ||
+        !matchesWorkerPlacementTarget(current, placement) ||
+        !isCurrentPlacementTurnClaim(current, claim) ||
+        !isExactAttachedEnvironment(environment, current)
+      ) {
+        throw new Error("Failed retained worker lost its exact workspace recovery owner");
+      }
+      assertRepositoryWorkspaceDiskIdentity(diskAuthority, environment);
+    };
+    assertRecoveryCurrent();
+    // Cancellation ends execution, not disk custody. The result owner must join
+    // physical stop/drain before releasing even an unconfirmed worker process.
+    options.environments.fenceWorkerTurnForRecovery(claim);
+    await placements.retainInterruptedTurnWorkspace(claim, assertRecoveryCurrent);
+    await options.reconcileActivePlacement(placement.environmentId);
+    throw error;
+  }
   if (pendingWorkspaceResult) {
     if (claim.owner.kind === "local") {
       // Record terminal reconciliation before teardown releases the claim.

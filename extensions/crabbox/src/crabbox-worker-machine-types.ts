@@ -70,6 +70,7 @@ export function parseCrabboxMachineType(
   profile: Readonly<Record<string, unknown>>,
   provider: string | undefined,
 ) {
+  // For a pinned snapshot this declares inherited sizing, never a resize request.
   const machineType = resolveCrabboxMachineType(nonEmptyString(profile.type));
   if (profile.type !== undefined && (provider !== "azure-sandbox" || !machineType)) {
     throw new WorkerProviderError(
@@ -78,11 +79,6 @@ export function parseCrabboxMachineType(
   }
   if (machineType && profile.class !== undefined) {
     throw new WorkerProviderError("Crabbox profile must select type or class, not both");
-  }
-  if (machineType && profile.azureSandboxSnapshotId !== undefined) {
-    throw new WorkerProviderError(
-      "Crabbox configured snapshots inherit captured sizing; select a disk for an explicit type",
-    );
   }
   return machineType;
 }

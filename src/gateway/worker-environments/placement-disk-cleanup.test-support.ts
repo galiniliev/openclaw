@@ -44,27 +44,30 @@ export async function openDiskCleanupTransport(options: NodeRegistryOptions = {}
     platform: "test",
     commands: [NODE_WORKER_ENVIRONMENT_STOP_COMMAND, NODE_WORKER_WORKSPACE_EXEC_COMMAND],
   });
-  nodeRegistry.register(nodeClient, {
-    pairingIdentity: "disk-cleanup-pairing",
-    pairingGeneration: "disk-cleanup-generation",
-  });
-  updateNodeRunnerInventory({
-    registry: nodeRegistry,
-    nodeId,
-    connId,
-    declaration: {
-      protocolFeatures: [NODE_WORKER_SUPERVISOR_PROTOCOL_FEATURE],
-      workerHost: {
-        enabled: true,
-        capacity: { total: 1, available: 1 },
-        environmentSession: 1,
-        capturedExecPolicy: true,
-        promptContext: 1,
-        workspaceQuiescence: 1,
-        workspaceResultVersion: 2,
+  const reconnect = () => {
+    nodeRegistry.register(nodeClient, {
+      pairingIdentity: "disk-cleanup-pairing",
+      pairingGeneration: "disk-cleanup-generation",
+    });
+    updateNodeRunnerInventory({
+      registry: nodeRegistry,
+      nodeId,
+      connId,
+      declaration: {
+        protocolFeatures: [NODE_WORKER_SUPERVISOR_PROTOCOL_FEATURE],
+        workerHost: {
+          enabled: true,
+          capacity: { total: 1, available: 1 },
+          environmentSession: 1,
+          capturedExecPolicy: true,
+          promptContext: 1,
+          workspaceQuiescence: 1,
+          workspaceResultVersion: 2,
+        },
       },
-    },
-  });
+    });
+  };
+  reconnect();
   let endpoint: {
     workspace: NodeWorkerWorkspaceRuntime;
     events: string[];
@@ -153,6 +156,8 @@ export async function openDiskCleanupTransport(options: NodeRegistryOptions = {}
     transport: nodeWorkerSupervisorTransport,
     commands,
     errors,
+    disconnect: () => nodeRegistry.unregister(connId),
+    reconnect,
     bind(next: typeof endpoint) {
       endpoint = next;
       commands.length = 0;

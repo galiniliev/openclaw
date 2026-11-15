@@ -22,6 +22,10 @@ Gateway does not capture/upload a workspace checkpoint after every turn. Explici
 publication and Move still capture fresh immutable exports. The first hydration
 checkpoint is only initialization history, never a current recovery fallback.
 
+If a worker process fails before returning its result, OpenClaw retains its disk
+and finishes the old process's cleanup before admitting another turn. Unconfirmed
+cleanup keeps the session held for its original runner.
+
 Acquisition policy is committed before allocation. Each lifecycle operation records
 its ID, action, and expected provider claim revision before effects. Restart and
 lost-reply recovery keep that operation and resource; uncertain observations never
@@ -37,6 +41,11 @@ settlement keeps its existing owner. The internal **ensureRetainedRunning** oper
 checks resource identity, environment epoch, and current caller authority, waits for
 the original enrolled node, and verifies runtime admission through the existing
 supervisor and bundle installer. Provider resume alone is not usable readiness.
+If the node is unreachable during pause, the exact provider must confirm disk
+suspension before local transport cleanup can finish. A timeout or expired window
+alone is insufficient. A subsequent authorized wake upgrades the original attached
+node to the current runtime before admitting new work; it keeps its disk, device
+identity, workspace, and transcript without replaying an interrupted turn.
 If initial provisioning stopped after recording the resource receipt but before
 node enrollment, retry the original creation request with the same idempotency key
 and retention policy. The fresh request revalidates caller and source authority,
@@ -49,6 +58,11 @@ Crabbox checks Linux Azure Sandbox retention capabilities, owner binding, policy
 window, and independent lifecycle readback. One unavailable provider cannot prevent
 unrelated environments from recovering. Cold-boot reconnect requires a separately
 qualified node/controller release; Crabbox 0.80.0 capability metadata is not that proof.
+An existing receipt-bound retained lease keeps its acquisition policy even if its
+saved creation profile enabled reusable images. Inspection and retained lifecycle
+operations never capture that private disk as a reusable image. New retained
+allocations still require `settings.warmImage: false`; explicit snapshot bindings
+remain available with that setting.
 
 Shared-state schema 39 adds nullable lifecycle custody after disk-authority schema 38.
 Older environments remain unretained. Package-only downgrade is refused; restore the

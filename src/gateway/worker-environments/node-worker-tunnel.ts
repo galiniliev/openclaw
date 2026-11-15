@@ -522,9 +522,9 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
       // source of the retired scope; bundle metadata is not cleanup authority.
       const record = options.getEnvironment(environmentId);
       if (record?.nodeDeviceId && (ownerEpoch === undefined || record.ownerEpoch === ownerEpoch)) {
-        if (reason === "provider-destroying" || reason === "provider-destroyed") {
-          // Provider teardown owns the whole dedicated machine. No remote session tuple is
-          // needed for local transfer cleanup; durable ownership remains until its proof.
+        if (reason !== undefined) {
+          // Exact provider teardown or confirmed disk suspension owns compute.
+          // Local transfer cleanup does not need an unreachable remote session tuple.
           operations.push(options.workspaceTransfer.close(environmentId));
         } else {
           const owner = await restoreNodeWorkerWorkspaceDrainOwner(record, resolveWorkspaceBinding);

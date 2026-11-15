@@ -33,9 +33,9 @@ async function replay(
     leaseId,
     ...(desktop ? { desktop: true, target: "macos" as const } : {}),
     enrollment: {
-      mode: "connect",
-      setupCode: "synthetic-code",
-      setupId: "synthetic-setup",
+      ...(platform === "linux"
+        ? { mode: "resume" as const, deviceId: "synthetic-device" }
+        : { mode: "connect" as const, setupCode: "synthetic-code", setupId: "synthetic-setup" }),
       openclawVersion: "2026.8.1",
       nodeBootstrap: createNodeBootstrapFixture(),
       displayName,
@@ -316,7 +316,7 @@ describe.each(["linux", "darwin"] as const)("%s node enrollment replay", (platfo
     expect(await replay(platform, variant)).toEqual({
       code: 0,
       output:
-        "CRABBOX_PHASE:openclaw-bootstrap-preparation\nCRABBOX_TIMING:openclaw-bootstrap-preparation:0\nCRABBOX_PHASE:openclaw-bootstrap-complete",
+        'CRABBOX_PHASE:openclaw-bootstrap-preparation\nCRABBOX_TIMING:openclaw-bootstrap-preparation:0\nCRABBOX_PHASE:openclaw-bootstrap-complete\n{"runnerPhases":[]}',
     });
   });
   it.each(["argv", "cwd", "state", "unavailable"])(

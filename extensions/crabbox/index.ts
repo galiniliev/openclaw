@@ -18,6 +18,10 @@ const workerWallpaperPath = fileURLToPath(
   new URL("./assets/openclaw-worker-wallpaper.png", import.meta.url),
 );
 
+const snapshotHelperPath = fileURLToPath(
+  new URL("./assets/azure-sandbox-checkpoint.py", import.meta.url),
+);
+
 export default definePluginEntry({
   id: "crabbox",
   name: "Crabbox Worker Provider",
@@ -71,6 +75,7 @@ export default definePluginEntry({
       state: api.runtime.state,
       openclawRoot: resolveOpenClawRoot(api.rootDir),
       wallpaperPath: workerWallpaperPath,
+      snapshotHelperPath,
       warn: (message) => api.logger.warn(message),
       info: (message) => api.logger.info(message),
       warmImagePolicy: resolveCrabboxWarmImagePolicy(api.pluginConfig),

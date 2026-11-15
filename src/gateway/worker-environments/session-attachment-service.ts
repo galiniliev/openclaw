@@ -260,10 +260,8 @@ export function createWorkerEnvironmentSessionAttachments(
   ) => {
     await store.ready();
     assertCurrent();
-    await store.touchSessionAttachment(
-      store.getSessionAttachmentRecord(binding.sessionId)!,
-      assertCurrent,
-    );
+    const attachment = store.getSessionAttachmentRecord(binding.sessionId)!;
+    await store.touchSessionAttachment(attachment, assertCurrent);
     assertCurrent();
   };
   const close = async (
@@ -305,8 +303,7 @@ export function createWorkerEnvironmentSessionAttachments(
   };
   const attachments = {
     captureSessionAttachment(identity: WorkerEnvironmentSessionIdentity) {
-      // Admission already read the canonical session. Its identity plus synchronous
-      // retirement fences avoid repeating that SQLite read on each proxy connection.
+      // Prepared session identity and retirement fences avoid SQLite reads per proxy connection.
       const binding = project(store.getSessionAttachmentRecord(identity.sessionId), identity);
       if (!binding) {
         throw new Error("No current environment is attached to this conversation");
@@ -438,6 +435,7 @@ export function createWorkerEnvironmentSessionAttachments(
               request.idempotencyKey,
             ]);
             const intent = await providerLifecycle.prepareIntent(request.profileId, {
+              conversation: true,
               machineClass: request.machineClass,
               os: request.os,
               signal,

@@ -9,22 +9,20 @@ import {
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { findCrabboxBinary } from "./crabbox-binary.js";
 import * as managedBinary from "./crabbox-managed-binary.js";
+import { CRABBOX_WORKER_PROVIDER_ID } from "./crabbox-worker-profile.js";
 import {
-  CRABBOX_WORKER_PROVIDER_ID,
   isReservedCrabboxSetupSecretName,
   parseCrabboxSetupSecrets,
-} from "./crabbox-worker-profile.js";
+} from "./crabbox-worker-setup-profile.js";
 import {
+  projectCrabboxWarmImage,
   crabboxWarmImageRecoveryHint,
   CRABBOX_WARM_IMAGE_WAIT_HINT,
   WARM_IMAGE_MAX_ENTRIES,
   crabboxWarmImageHoldingLeaseIds,
   type WarmProfileRecord,
 } from "./crabbox-worker-warm-image-records.js";
-import {
-  admitCrabboxWarmImageProfile,
-  projectCrabboxWarmImage,
-} from "./crabbox-worker-warm-image-store.js";
+import { admitCrabboxWarmImageProfile } from "./crabbox-worker-warm-image-store.js";
 
 export const CRABBOX_CLOUD_WORKER_PROFILE_CHECK_ID = "crabbox/cloud-worker-profiles";
 const CRABBOX_SETUP_SECRETS_CHECK_ID = "crabbox/setup-secrets";

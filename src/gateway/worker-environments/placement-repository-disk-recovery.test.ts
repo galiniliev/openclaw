@@ -253,7 +253,14 @@ describe("disk recovery through the private node cleanup transport", () => {
   });
   afterEach(() => vi.unstubAllEnvs());
 
-  it.for(["original", "other-session", "activeWriterRunId", "lifecycleRevision"] as const)(
+  const recoveryCases = [
+    "original",
+    "startup-claim-only",
+    "other-session",
+    "activeWriterRunId",
+    "lifecycleRevision",
+  ] as const;
+  it.for(recoveryCases)(
     "settles only the retained disk/session owner: %s",
     async (condition, { signal }) => {
       const { root, stateDb: database, store } = support.testState;
@@ -365,6 +372,10 @@ describe("disk recovery through the private node cleanup transport", () => {
           return result;
         },
       );
+      const startupClaim =
+        condition === "startup-claim-only"
+          ? await placements.claimTurn(makeClaimInput(active, "interrupted-startup-claim"))
+          : undefined;
       const harness = await createHarness(database, placements, {
         environmentService: service,
         withPreparedRecovery: createWorkerWorkspaceRecoveryPreparer({
@@ -380,9 +391,12 @@ describe("disk recovery through the private node cleanup transport", () => {
           events.push("publish");
         },
       });
-      const claim = await placements.claimTurn(makeClaimInput(active, "disk-wire-result"));
-      await placements.markWorkspaceResultPending(claim);
-      await placements.handoffWorkspaceResultRecovery(claim);
+      const claim =
+        startupClaim ?? (await placements.claimTurn(makeClaimInput(active, "disk-wire-result")));
+      if (!startupClaim) {
+        await placements.markWorkspaceResultPending(claim);
+        await placements.handoffWorkspaceResultRecovery(claim);
+      }
       const pending = await placements.listPendingWorkspaceResultsAsync();
       if (condition === "other-session") {
         // A nearest-neighbor durable fault, not a legal reattachment (which advances
@@ -454,7 +468,9 @@ describe("disk recovery through the private node cleanup transport", () => {
           signal,
         );
         events.push("child:ready");
-        recovery = harness.service.reconcileActive();
+        recovery = startupClaim
+          ? harness.service.reconcile("startup")
+          : harness.service.reconcileActive();
         if (revoked) {
           await withinTest(
             Promise.race([
@@ -497,10 +513,10 @@ describe("disk recovery through the private node cleanup transport", () => {
         }
         await withinTest(receipts.waitForExit(root), signal);
         expect(await placements.listPendingWorkspaceResultsAsync()).toEqual(
-          condition === "original" ? [] : pending,
+          condition === "original" || condition === "startup-claim-only" ? [] : pending,
         );
         expect((await placements.getAsync(REQUEST.sessionId))?.turnClaim?.claimId ?? null).toBe(
-          condition === "original" ? null : claim.claimId,
+          condition === "original" || condition === "startup-claim-only" ? null : claim.claimId,
         );
         expect(await repositories.get(bound.workspaceId)).toEqual(bound);
         const transcript = await loadTranscriptEvents(scope);

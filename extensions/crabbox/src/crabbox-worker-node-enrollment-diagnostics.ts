@@ -1,6 +1,11 @@
 import { redactToolPayloadText } from "openclaw/plugin-sdk/logging-core";
 import { truncateUtf8Prefix } from "openclaw/plugin-sdk/text-utility-runtime";
-import { crabboxCommandOutput, leaseRunArgs, runCrabboxCommand } from "./crabbox-worker-command.js";
+import {
+  crabboxCommandOutput,
+  leaseRunArgs,
+  runCrabboxCommand,
+  type LeaseCommandContext,
+} from "./crabbox-worker-command.js";
 import type { CrabboxOperatingSystem } from "./crabbox-worker-profile.js";
 import {
   createCrabboxWorkerStateDirScript,
@@ -10,13 +15,12 @@ import { CRABBOX_NODE_ENROLLMENT_DIAGNOSTIC_TIMEOUT_MS } from "./crabbox-worker-
 
 const MAX_NODE_ENROLLMENT_EVIDENCE_BYTES = 2_048;
 
-export async function collectCrabboxNodeEnrollmentEvidence(params: {
-  provider: string;
-  binary: string;
-  id: string;
-  target?: CrabboxOperatingSystem;
-  signal?: AbortSignal;
-}): Promise<string> {
+export async function collectCrabboxNodeEnrollmentEvidence(
+  params: LeaseCommandContext & {
+    target?: CrabboxOperatingSystem;
+    signal?: AbortSignal;
+  },
+): Promise<string> {
   let label = "box evidence";
   let detail: string;
   try {
@@ -24,6 +28,7 @@ export async function collectCrabboxNodeEnrollmentEvidence(params: {
       action: "enrollment diagnostics",
       args: leaseRunArgs(params),
       binary: params.binary,
+      providerEnv: params.providerEnv,
       input: wrapCrabboxNodeScript(
         `const fs = require("node:fs");
 const path = require("node:path");

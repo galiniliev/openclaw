@@ -8,6 +8,7 @@ import type { WorkerProviderLifecycleOptions } from "./provider-lifecycle.types.
 import type { createWorkerRuntimeRefresher } from "./provider-runtime-refresh.js";
 import { requireWorkerLeaseStatus, requireWorkerProfile } from "./service-validation.js";
 import type { WorkerEnvironmentRecord } from "./store.js";
+import { WorkerTunnelOwnerDisconnectedError } from "./tunnel-contract.js";
 
 export type WorkerRetainedRequest = {
   environmentId: string;
@@ -129,9 +130,19 @@ export function createWorkerRetainedLifecycle(
     if (!provider.setRetainedState || !provider.supportsResourceReceipts) {
       throw new Error("Worker provider cannot replay retained lifecycle operations");
     }
+    let disconnected = false;
     if (action === "pause") {
       // Join native command settlement before asking the provider to suspend compute.
-      await options.tunnelManager?.stop(live.environmentId, live.ownerEpoch);
+      try {
+        await options.tunnelManager?.stop(live.environmentId, live.ownerEpoch);
+      } catch (error) {
+        if (!(error instanceof WorkerTunnelOwnerDisconnectedError)) {
+          throw error;
+        }
+        // Idle Disk suspension may already have removed compute. Only the exact
+        // provider's completed pause below can settle this unreachable owner.
+        disconnected = true;
+      }
       current(live, assertCurrent, signal);
     }
     const mutationSignal = AbortSignal.any([signal, AbortSignal.timeout(240_000)]);
@@ -156,7 +167,7 @@ export function createWorkerRetainedLifecycle(
       240_000,
     );
     current(live, assertCurrent, signal);
-    return options.store.recordRetentionObservation({
+    const observed = await options.store.recordRetentionObservation({
       environmentId: live.environmentId,
       expectedOwnerEpoch: live.ownerEpoch,
       observation: requireWorkerRetentionObservation(observation),
@@ -164,6 +175,14 @@ export function createWorkerRetainedLifecycle(
         current(live, assertCurrent, signal);
       },
     });
+    if (disconnected) {
+      if (observed.retention!.operation || observed.retention!.observation?.state !== "suspended") {
+        throw new Error("Retained suspension remains unconfirmed; node cleanup is still pending");
+      }
+      await options.tunnelManager?.stop(live.environmentId, live.ownerEpoch, "provider-suspended");
+      current(observed, assertCurrent, signal);
+    }
+    return observed;
   };
   const reconcile = async (record: WorkerEnvironmentRecord, signal: AbortSignal) => {
     let live = await observe(record, () => {}, signal);
@@ -290,6 +309,7 @@ export function createWorkerRetainedLifecycle(
         await setRuntimeAdmission(resumed, request.assertCurrent, signal, false);
         const reconnectSignal = AbortSignal.any([signal, AbortSignal.timeout(120_000)]);
         await options.resumeNode(resumed.environmentId, {
+          ...(resumed.state === "attached" ? { upgradeRuntime: true } : {}),
           signal: reconnectSignal,
           assertCurrent: assertRunning,
         });

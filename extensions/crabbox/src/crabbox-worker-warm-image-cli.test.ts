@@ -48,7 +48,7 @@ const recover = (selector = SELECTOR, ...args: string[]) =>
   runCli("--recover", selector, "--acknowledge-provider-cleanup", ...args);
 const retiring = warmRecord({
   image: warmImage("chk_replacement"),
-  operation: { type: "retire", checkpointId: "chk_predecessor" },
+  retirements: [{ type: "retire", checkpointId: "chk_predecessor" }],
 });
 
 it("prints cold-only guidance for unsupported capture without changing local state", async () => {

@@ -145,6 +145,27 @@ it("admits the actual plugin RPC through ambient run authority and fences a reta
   );
 });
 
+it("creates a temporary conversation box from a retained repository profile without a repository", async () => {
+  const profile = support.getDevelopmentProfile();
+  profile.workspaceDurability = { mode: "retained-disk", computeWindowSeconds: 14_400 };
+  const configured = structuredClone(profile);
+  const { respond, invoke } = createRpc({ machineClass: "tiny", os: "linux" });
+  await runAsCaller(invoke);
+  expectReply(respond, { environment: { status: "available" }, reused: false });
+  const attachment = service.getSessionAttachment(identity.sessionId)!;
+  const environment = state.store.get(attachment.environmentId)!;
+  expect(environment.retention).toBeNull();
+  expect(environment.profileSnapshot).toMatchObject({
+    workspaceDurability: { mode: "mirrored" },
+    machineClass: "tiny",
+    os: "linux",
+  });
+  expect(profile).toEqual(configured);
+  await expect(
+    service.createWithRequest({ profileId: request.profileId, idempotencyKey: "ordinary" }),
+  ).rejects.toThrow("Retained disk durability requires a repository");
+});
+
 it("opens a portal through ambient plugin authority and closes an unused carrier when that authority ends", async () => {
   const { attachment } = await create();
   const { environmentId, ownerEpoch } = attachment;
