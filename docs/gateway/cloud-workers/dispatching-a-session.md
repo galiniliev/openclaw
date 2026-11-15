@@ -24,6 +24,13 @@ In the Control UI, open **New session** and choose a **Cloud** destination. A cl
 
 Without an explicitly selected folder, project, or worktree, remote sessions default to **New workspace**: an empty, isolated working directory. You can also choose **New workspace** from the project picker. No repository, initial commit, or Gateway folder is required. OpenClaw uses a private backing repository for each fresh session so workspace snapshots, recovery, and cleanup keep their normal behavior; sessions do not share Git remotes or history. Existing local files are not copied into the new workspace.
 
+Registered GitHub projects selected with a cloud profile start from their remote
+repository directly. The Gateway does not prepare a local checkout first. Origin
+tracking refs are normalized for GitHub; local-only refs fail visibly at dispatch
+without falling back to Gateway execution. Choosing a Gateway or paired-device
+source retains its normal checkout behavior. Generated empty-workspace backing
+repositories do not appear in recent projects.
+
 With a repository selected, the branch picker shows **From main** (or the selected branch); before a ref is selected, it shows **Starting branch**. With a GitHub repository selected, it lets you choose the source ref without cloning on the Gateway. With a Gateway folder selected, cloud selection enables its managed worktree and still requires that folder to be a usable Git checkout. Selecting a destination does not discard an explicit source while Git discovery is pending; choose **New workspace** to start empty instead. The Gateway creates the session, finishes dispatch, and only then sends the first turn. The server badge in the session sidebar shows the durable placement state. Startup recovery retains the workspace selection along with the destination and first message.
 
 When preparing a Gateway folder on a node, OpenClaw preserves its credential-free HTTP, HTTPS, or Git transport `origin` if the node checkout has none. Existing node origins remain unchanged. Origins with embedded credentials, query strings, fragments, or other schemes are not forwarded. Full workspace replacement retains the existing [Git metadata recovery limits](/gateway/cloud-workers/session-lifecycle#accept-a-completed-turn).

@@ -165,6 +165,11 @@ export class DraftPlaceState {
         agentId: this.agentIdValue,
         agents: this.agents(),
         remotePlacement: this.remotePlacement,
+        cloudRepository:
+          Boolean(this.cloudProfileId) &&
+          !this.freshWorkspace &&
+          !catalog.isTarget(this.read().data),
+        githubHost: this.browser.githubHost,
         selectedProject: this.browser.selectedProject(),
         remoteProject: this.browser.remoteProject,
         folder: this.folderValue,
@@ -718,14 +723,6 @@ export class DraftPlaceState {
 
   setWorktreeName(worktreeName: string) {
     this.repositoryState.setDetail("worktreeName", worktreeName, this.read().submitting);
-  }
-
-  captureSubmittedWorktreeName(
-    params: Parameters<DraftRepositoryStateOwner["captureSubmittedName"]>[0],
-    agentId: string,
-    recovered = false,
-  ) {
-    return this.repositoryState.captureSubmittedName(params, { agentId, recovered });
   }
 
   restorePreferenceSelections() {
