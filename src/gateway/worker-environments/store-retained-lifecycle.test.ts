@@ -320,3 +320,22 @@ it("settles an observed expired resume without granting runtime admission", asyn
     ).retention?.operation?.action,
   ).toBe("pause");
 });
+
+it("preserves retained orphan custody without a placement until explicit cleanup", async () => {
+  const f = await fixture();
+  await f.store.createIntent(intent);
+  await f.allocate();
+  await f.store.transition({
+    environmentId: intent.environmentId,
+    from: "ready",
+    to: "orphaned",
+  });
+  await f.reopen();
+  expect(await f.store.pruneTerminalEnvironments({ nowMs: 100 * 86400_000 })).toBe(0);
+  expect(f.current()).toMatchObject({
+    state: "orphaned",
+    leaseId: receipt.leaseId,
+    resourceReceipt: receipt,
+    retention: { policy: intent.retention },
+  });
+});
