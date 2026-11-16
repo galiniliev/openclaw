@@ -115,6 +115,7 @@ import { prepareSessionPublicShareGrant } from "./session-publication-grant.js";
 import * as sessionAgent from "./session-request-agent.js";
 import {
   invalidSessionRequest,
+  sessionCreationCommitFailure,
   sessionCreationFailure,
   unavailableSessionRequest,
 } from "./session-request-error.js";
@@ -198,7 +199,6 @@ async function createGatewaySessionInScope(
   const parentSessionKey = normalizeOptionalString(params.parentSessionKey);
   const projectId = normalizeOptionalString(params.projectId);
   const pendingProjectGitUrl = normalizeOptionalString(params.pendingProjectGitUrl);
-  const requestedToolOverrides = params.toolOverrides !== undefined;
   const catalogModel = normalizeOptionalString(params.catalogTarget?.model);
   const catalogAgentRuntime = normalizeOptionalAgentRuntimeId(params.catalogTarget?.agentRuntime);
   const catalogPluginOwnerId = normalizeOptionalString(params.catalogTarget?.pluginOwnerId);
@@ -243,6 +243,7 @@ async function createGatewaySessionInScope(
   }
   const explicitTarget = await readRequestedSessionCreateTarget(params, agentId, explicitTargetKey);
   const initialTargetEntry = explicitTarget?.entry;
+  const requestedSessionId = params.creationOperation?.requestedSessionId;
   if (params.deferInitialization && initialTargetEntry) {
     return invalidSessionRequest("deferred initialization requires a new ordinary session");
   }
@@ -250,6 +251,7 @@ async function createGatewaySessionInScope(
     explicitTargetKey,
     initialTargetEntry,
     authorizedHarnessCreation,
+    requestedSessionId,
   );
   if (initialTargetError) {
     return initialTargetError;
@@ -408,7 +410,7 @@ async function createGatewaySessionInScope(
     agentId,
     parentIncognito,
     requestedKey,
-    requestedToolOverrides,
+    requestedToolOverrides: params.toolOverrides !== undefined,
     commitGuard,
   });
   if (reset) {
@@ -674,6 +676,7 @@ async function createGatewaySessionInScope(
           target.canonicalKey,
           existingEntry,
           authorizedHarnessCreation,
+          requestedSessionId,
         );
         if (targetError) {
           return targetError;
@@ -786,6 +789,7 @@ async function createGatewaySessionInScope(
           : undefined;
         const initializedEntry: InternalSessionEntry = {
           ...patched.entry,
+          ...(requestedSessionId !== undefined ? { sessionId: requestedSessionId } : {}),
           ...inheritedWorkspace,
           ...(createdNewEntry && displayName ? { displayName } : {}),
           ...projectSessionCreateSpawnModelSelection({
@@ -967,6 +971,7 @@ async function createGatewaySessionInScope(
             entry,
             params.initialAssistantMessage,
             runtimeCwd,
+            requestedSessionId !== undefined,
           );
         }
         if (!canonicalParentSessionKey || !currentParentSessionEntry || !parentSessionTarget) {
@@ -1044,12 +1049,7 @@ async function createGatewaySessionInScope(
         },
         ...(runtimeCwd ? { cwd: runtimeCwd } : {}),
       },
-    ).catch((error: unknown) => {
-      if (error instanceof Error && error.name === "SessionLabelConflictError") {
-        return { ...invalidSessionRequest(error.message), phase: "entry" as const };
-      }
-      throw error;
-    });
+    ).catch(sessionCreationCommitFailure);
     if (!created.ok) {
       const failure = sessionCreationFailure(created);
       return params.initialCatalogContinuation && params.atomicInitialization

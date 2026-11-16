@@ -22,6 +22,13 @@ export {
 export const SessionsCreateParamsSchema = closedObject({
   key: Type.Optional(NonEmptyString),
   idempotencyKey: Type.Optional(NonEmptyString),
+  /** Fresh durable creation only; never selects an existing physical transcript. */
+  sessionId: Type.Optional(
+    Type.String({
+      format: "uuid",
+      pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    }),
+  ),
   /** Select a worker destination at creation under the existing dispatch policy. */
   profileId: Type.Optional(NonEmptyString),
   /** Creation-only fallback, ignored when replaying an accepted idempotency key. */

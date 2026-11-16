@@ -34,11 +34,29 @@ type ReplayPublication = {
   assertCurrent?: () => void;
 };
 
-/** Binds the existing public idempotency key; no deployment-specific inputs or session IDs. */
+/** Bind the public creation intent to its authenticated owner and current retry receipt. */
 async function prepareCreation(request: GatewayRequestHandlerOptions) {
   const p = request.params;
+  if (!validateSessionsCreateParams(p)) {
+    return undefined;
+  }
   if (
-    !validateSessionsCreateParams(p) ||
+    p.sessionId !== undefined &&
+    (!p.key?.trim() ||
+      !p.idempotencyKey ||
+      p.fork ||
+      p.incognito ||
+      isIncognitoSessionKey(p.key) ||
+      isIncognitoSessionKey(p.parentSessionKey))
+  ) {
+    return {
+      error: errorShape(
+        ErrorCodes.INVALID_REQUEST,
+        "sessionId requires an explicit durable key and idempotencyKey, without fork or incognito",
+      ),
+    };
+  }
+  if (
     !p.idempotencyKey ||
     p.incognito ||
     isIncognitoSessionKey(p.key) ||
@@ -80,6 +98,7 @@ async function prepareCreation(request: GatewayRequestHandlerOptions) {
   const operation: SessionCreationOperation = {
     digest: sha256Hex(JSON.stringify(["session.create", owner, p.idempotencyKey])),
     fingerprint: sha256Hex(stableStringify(intent)),
+    ...(p.sessionId !== undefined ? { requestedSessionId: p.sessionId } : {}),
     authorization: {
       role: request.client?.connect.role ?? null,
       scopes: request.client?.connect.scopes?.toSorted() ?? [],
