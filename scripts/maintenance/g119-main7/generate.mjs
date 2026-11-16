@@ -10,7 +10,7 @@ import vm from "node:vm";
 const pins = {
   source: "fdd4a988929c653a24f1ac791837d65f98f7a0ec",
   target: "88e813334f08ac0abb4171f199819d15271f40e2",
-  runtime: "f1e20ef5cbdac6969ed45a45fa9616696556a873",
+  runtime: "c60205cbe0d4d1f13471eeedd807058aa19525a2",
 };
 const appVersion = "2026.11.3";
 const args = new Map();

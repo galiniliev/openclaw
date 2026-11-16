@@ -9,7 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadRetainedEvidence, prepareRetainedProjection } from "./bindings.mjs";
 
-const runtimeCommit = "f1e20ef5cbdac6969ed45a45fa9616696556a873";
+const runtimeCommit = "c60205cbe0d4d1f13471eeedd807058aa19525a2";
 const schemaCommit = "88e813334f08ac0abb4171f199819d15271f40e2";
 const quote = (name) => `"${name.replaceAll('"', '""')}"`;
 const literal = (value) => `'${value.replaceAll("'", "''")}'`;
@@ -360,7 +360,7 @@ async function main() {
     assert.equal(
       build.commit,
       runtimeCommit,
-      "Use the qualified runtimef1e20e and its matching workers",
+      "Use the qualified runtimec60205 and its matching workers",
     );
     const manifest = fs.readFileSync(input.backupManifest.path);
     assert.equal(sha256(manifest), input.backupManifest.sha256, "Fresh backup receipt changed");

@@ -1,7 +1,7 @@
 # One-time G119 to Main7 maintenance artifact
 
 This tool converts the exact G119 qualified state37 and agent39 dialects to
-standard Main7 state41 and agent42 through runtimef1e20e's Native engine SDK.
+standard Main7 state41 and agent42 through runtimec60205's Native engine SDK.
 It does not change ordinary runtime admission or require rebuilding OpenClaw.
 
 The tool supports the explicitly approved archival retirement of exactly five
@@ -28,10 +28,10 @@ The production artifact contains `migrate.mjs`, `bindings.mjs`, `validators.mjs`
 `schemas.json`, and `manifest.json`;
 the generator also emits a historical rich-agent fixture for the rehearsal.
 Preserve their hashes together with the source commit. The installed runtime must be the
-qualified Linux/x64 runtimef1e20e with its existing matching worker artifacts.
+qualified Linux/x64 runtimec60205 with its existing matching worker artifacts.
 The schema descriptors remain pinned to schema-owner88e813; the later runtime
 adds the retained-orphan pruning rule without changing those schemas. Validator
-module bodies come from runtimef1e20e, with only imports, exports, and erasable
+module bodies come from runtimec60205, with only imports, exports, and erasable
 TypeScript removed. Their source and generated hashes are recorded separately.
 The SDK and `pg` dependency resolve from that runtime, without private chunk
 exports or a new dependency installation.
