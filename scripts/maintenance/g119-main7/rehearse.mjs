@@ -8,6 +8,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
+import { rehearseRetainedBindings } from "./rehearse-retained.mjs";
 
 const [artifact, runtimeRoot, directory] = process.argv
   .slice(2)
@@ -393,6 +394,18 @@ try {
   cases.push(
     "exact five live receipts archived and retired; changed tuple or sixth live receipt blocks all stores; sessions and resume preserved",
   );
+  await rehearseRetainedBindings({
+    fixture,
+    client,
+    snapshot,
+    run,
+    directory,
+    artifact,
+    runtimeRoot,
+    cases,
+    sha,
+    quote,
+  });
   const receipt = {
     outcome: "success",
     node: process.version,
@@ -401,7 +414,7 @@ try {
     postgres: 17,
     cases,
     scope:
-      "Receipt retirement plus schema branch; unapproved live receipts and unqualified retained bindings block. No Gateway/model/cloud proof.",
+      "Schema, five-receipt retirement and retained JSON conversion through actual Native PG17 admission. Synthetic evidence only; no Gateway/model/cloud proof.",
   };
   fs.writeFileSync(path.join(directory, "rehearsal.json"), `${JSON.stringify(receipt, null, 2)}\n`);
   console.log(JSON.stringify(receipt));

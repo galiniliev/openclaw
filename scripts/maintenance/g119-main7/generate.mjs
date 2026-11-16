@@ -10,6 +10,7 @@ import vm from "node:vm";
 const pins = {
   source: "fdd4a988929c653a24f1ac791837d65f98f7a0ec",
   target: "88e813334f08ac0abb4171f199819d15271f40e2",
+  runtime: "f1e20ef5cbdac6969ed45a45fa9616696556a873",
 };
 const appVersion = "2026.11.3";
 const args = new Map();
@@ -229,6 +230,20 @@ for (const role of ["source", "target"]) {
   }
 }
 const bytes = `${JSON.stringify(schemas, null, 2)}\n`;
+// Reuse the exact qualified Native boundary validators, including their constraints.
+// Only imports, exports and erasable TypeScript are removed; no validator is reimplemented.
+const validatorModules = [
+  "src/plugins/worker-retention.ts",
+  "src/plugins/worker-resource-receipt.ts",
+  "src/state/session-repository-workspaces.authority.ts",
+].map((file) =>
+  stripTypeScriptTypes(
+    read("runtime", file)
+      .replace(/^import[\s\S]*?;\n/gm, "")
+      .replace(/\bexport /g, ""),
+  ),
+);
+const validatorBytes = `// Generated from exact pinned Native owners; see manifest.json.\nexport function bindNativeValidators({z,isRecord}) {\n${validatorModules.join("\n")}\nreturn {requireWorkerEnvironmentRetention,requireWorkerResourceReceipt,requireRepositoryWorkspaceDiskAuthority};\n}\n`;
 // Rehearsal-only historical DDL. Create this fresh, then let Native verify and seal it;
 // never edit an installed store's seal to manufacture a historical fixture.
 const searchOwner = pure("source", "src/infra/database-engine/postgres-search-schema.ts", [
@@ -267,6 +282,11 @@ const manifest = {
   ),
   sourceHashes,
   schemas: { file: "schemas.json", sha256: sha(bytes), size: Buffer.byteLength(bytes) },
+  validators: {
+    file: "validators.mjs",
+    sha256: sha(validatorBytes),
+    size: Buffer.byteLength(validatorBytes),
+  },
   sourceStateLayout: "qualified-v33",
   agentMigrationVersions: [40, 41, 42],
   sourceAfterReceiptRemovalEqualsCanonicalAgent39: true,
@@ -275,6 +295,7 @@ const manifest = {
 };
 fs.mkdirSync(out, { recursive: true });
 fs.writeFileSync(path.join(out, "schemas.json"), bytes, { flag: "wx", mode: 0o600 });
+fs.writeFileSync(path.join(out, "validators.mjs"), validatorBytes, { flag: "wx", mode: 0o600 });
 fs.writeFileSync(path.join(out, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, {
   flag: "wx",
   mode: 0o600,

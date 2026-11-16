@@ -7,8 +7,10 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { loadRetainedEvidence, prepareRetainedProjection } from "./bindings.mjs";
 
-const runtimeCommit = "88e813334f08ac0abb4171f199819d15271f40e2";
+const runtimeCommit = "f1e20ef5cbdac6969ed45a45fa9616696556a873";
+const schemaCommit = "88e813334f08ac0abb4171f199819d15271f40e2";
 const quote = (name) => `"${name.replaceAll('"', '""')}"`;
 const literal = (value) => `'${value.replaceAll("'", "''")}'`;
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
@@ -106,7 +108,7 @@ function columns(sql, table) {
 }
 
 // Every SELECT below runs after the normal Native source-schema admission. Values stay private.
-function inspectSource(db, store, cutoff, retirements) {
+function inspectSource(db, store, cutoff, retirements, retainedEvidence, validators) {
   const tables = new Set(
     db
       .prepare("SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = ?")
@@ -147,22 +149,16 @@ function inspectSource(db, store, cutoff, retirements) {
       rows[table] = db.prepare(`SELECT * FROM ${quote(table)} ORDER BY 1`).all();
     }
   }
-  // The schema-only branch must never silently discard or invent retained-resource custody.
   assert(
-    !(rows.worker_environments ?? []).some((row) => row.session_retention_json !== null),
-    "Retained environments need qualified provider evidence before conversion",
+    !(rows.worker_workspace_pending_results ?? []).some((row) => row.disk_authority_json !== null),
+    "Pending legacy disk custody needs its owning recovery before conversion",
   );
-  for (const table of ["session_repository_workspaces", "worker_workspace_pending_results"]) {
-    assert(
-      !(rows[table] ?? []).some((row) => row.disk_authority_json !== null),
-      "Retained repository custody needs qualified provider evidence before conversion",
-    );
-  }
   assert(
     !(rows.worker_session_placements ?? []).some((row) => row.repository_preparation !== null),
     "Historical repository preparation needs its owning recovery before conversion",
   );
-  return { tables, digest: sha256(JSON.stringify(rows)), expiredReceipts: 0 };
+  const projection = prepareRetainedProjection(rows, retainedEvidence, validators);
+  return { tables, digest: sha256(JSON.stringify(rows)), expiredReceipts: 0, projection };
 }
 
 function stateMigration(db, store, source, target, inspected) {
@@ -205,6 +201,35 @@ function stateMigration(db, store, source, target, inspected) {
     const current = columns(sql, table);
     const original = columns(before, table);
     const select = current.names.map((name) => {
+      // disk_authority_json keeps its name but changes its contract. Map it before
+      // the generic same-name copy so old bindings never bypass Native validation.
+      const projection =
+        table === "worker_environments"
+          ? {
+              key: "environment_id",
+              entries: inspected.projection.environments,
+              field:
+                name === "resource_receipt_json"
+                  ? "resourceReceiptJson"
+                  : name === "retention_json"
+                    ? "retentionJson"
+                    : undefined,
+            }
+          : table === "session_repository_workspaces" && name === "disk_authority_json"
+            ? {
+                key: "workspace_id",
+                entries: inspected.projection.workspaces,
+                field: "diskAuthorityJson",
+              }
+            : undefined;
+      if (projection?.field) {
+        const { key, entries, field } = projection;
+        return entries.size
+          ? `CASE ${quote(key)} ${[...entries]
+              .map(([id, value]) => `WHEN ${literal(id)} THEN ${literal(value[field])}`)
+              .join(" ")} ELSE NULL END`
+          : "NULL";
+      }
       if (original.names.includes(name)) {
         return quote(name);
       }
@@ -335,7 +360,7 @@ async function main() {
     assert.equal(
       build.commit,
       runtimeCommit,
-      "Use the qualified runtime88e813 and its matching workers",
+      "Use the qualified runtimef1e20e and its matching workers",
     );
     const manifest = fs.readFileSync(input.backupManifest.path);
     assert.equal(sha256(manifest), input.backupManifest.sha256, "Fresh backup receipt changed");
@@ -344,7 +369,8 @@ async function main() {
       fs.readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
     );
     assert.equal(schemaManifest.pins.source, "fdd4a988929c653a24f1ac791837d65f98f7a0ec");
-    assert.equal(schemaManifest.pins.target, runtimeCommit);
+    assert.equal(schemaManifest.pins.target, schemaCommit);
+    assert.equal(schemaManifest.pins.runtime, runtimeCommit);
     assert.equal(schemaManifest.schemas.sha256, sha256(schemasBytes));
     const schemas = JSON.parse(schemasBytes);
     const connection = process.env.OPENCLAW_MAINTENANCE_PG_URL;
@@ -355,6 +381,19 @@ async function main() {
       ).href
     );
     const requireRuntime = createRequire(path.join(input.runtimeRoot, "package.json"));
+    const validatorUrl = new URL("./validators.mjs", import.meta.url);
+    assert.equal(sha256(fs.readFileSync(validatorUrl)), schemaManifest.validators.sha256);
+    const { bindNativeValidators } = await import(validatorUrl.href);
+    const { isRecord } = await import(
+      pathToFileURL(path.join(input.runtimeRoot, "dist/plugin-sdk/string-coerce-runtime.js")).href
+    );
+    const validators = bindNativeValidators({ z: requireRuntime("zod").z, isRecord });
+    const retainedEvidence = input.retainedEvidence
+      ? await loadRetainedEvidence(
+          input.retainedEvidence,
+          input.stores.find((store) => store.family === "state"),
+        )
+      : undefined;
     const { Client } = requireRuntime("pg");
     const router = new Client({ connectionString: connection });
     const versions = new Map();
@@ -432,7 +471,14 @@ async function main() {
             }
             return { store, alreadyCurrent: true };
           }
-          const inspected = inspectSource(db, store, cutoff, retirements);
+          const inspected = inspectSource(
+            db,
+            store,
+            cutoff,
+            retirements,
+            retainedEvidence,
+            validators,
+          );
           return { store, inspected, schema: bridgeSchema(db, store, schemas, inspected, cutoff) };
         }),
       );
@@ -443,6 +489,7 @@ async function main() {
       mode,
       inputSha256: sha256(inputBytes),
       schemasSha256: sha256(schemasBytes),
+      validatorsSha256: schemaManifest.validators.sha256,
       retirementManifestSha256: input.retirementManifest?.sha256,
       stores: plans.map(({ store, inspected, alreadyCurrent }) => ({
         family: store.family,
@@ -451,8 +498,18 @@ async function main() {
         alreadyCurrent: alreadyCurrent === true,
         expiredReceipts: inspected?.expiredReceipts ?? 0,
         retiredReceipts: inspected?.retirements?.length ?? 0,
+        retainedEnvironments: inspected?.projection?.environments.size ?? 0,
+        diskBindings: inspected?.projection?.workspaces.size ?? 0,
       })),
     };
+    const originals = plans.flatMap(({ inspected }) => inspected?.projection?.originals ?? []);
+    if (originals.length) {
+      saveReceipt(outputDirectory, "retained-originals.private.json", {
+        version: 1,
+        evidence: input.retainedEvidence,
+        entries: originals,
+      });
+    }
     if (retirements.length) {
       // Named private archival artifact, durable BEFORE any store commit. On resume the input
       // retains the originals, while exact canonical admission reconciles already committed stores.
@@ -480,7 +537,14 @@ async function main() {
                   ? ["session_creation_operations"]
                   : changedStateTables.filter((table) => plan.inspected.tables.has(table));
               db.exec(`LOCK TABLE ${locking.map(quote).join(",")} IN ACCESS EXCLUSIVE MODE`);
-              const current = inspectSource(db, plan.store, cutoff, retirements);
+              const current = inspectSource(
+                db,
+                plan.store,
+                cutoff,
+                retirements,
+                retainedEvidence,
+                validators,
+              );
               assert.equal(
                 current.digest,
                 plan.inspected.digest,
