@@ -35,6 +35,18 @@ minimumReleaseAgeExclude:
   - "@openclaw/fs-safe-win32-arm64-msvc@0.27.1"
   - "@openclaw/fs-safe-win32-x64-msvc@0.27.1"
   - "@openclaw/fs-safe@0.27.1"
+  # Unchanged npm tarballs mirrored into Lobster on 2026-11-16; original SHA-512 verified.
+  # Mirror import timestamps reset the cooldown; remove after 2026-11-23T02:33:00Z.
+  # Originally published on npm: 2026-10-27T08:31:59.890Z.
+  - "@modelcontextprotocol/ext-apps@2.1.0"
+  # Originally published on npm: 2026-10-30T18:45:32.211Z.
+  - "@openclaw/fs-safe@0.26.15"
+  # Originally published on npm: 2026-10-30T18:39:14.396Z.
+  - "@openclaw/fs-safe-darwin-arm64@0.26.15"
+  # Originally published on npm: 2026-10-30T18:33:55.520Z.
+  - "@openclaw/fs-safe-linux-x64-gnu@0.26.15"
+  # Originally published on npm: 2024-03-26T13:41:58.053Z.
+  - "@resvg/resvg-js-darwin-x64@2.6.2"
 
 # Isolated installs let pnpm reuse whole-package APFS clones instead of relinking every file.
 nodeLinker: isolated
