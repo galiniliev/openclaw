@@ -1,6 +1,69 @@
 # One-time G119 to Main7 maintenance artifact
 
-This tool converts the exact G119 qualified state37 and agent39 dialects to
+## Empty-control-plane node SQLite repair
+
+`repair-node-state.mjs` handles the separately observed retained-node SQLite37
+dialect. It requires the exact pinned legacy worker table, empty worker control
+tables (the repository table may be absent), and no pending/running native launch.
+It refuses nonempty retained-control data; the PostgreSQL converter below remains
+a different operation. Ordinary runtime admission is unchanged.
+
+Use the **installed current node runtime**, not the guest's older global CLI.
+Its root is `realpath(STATE_DIR/runtime)/node_modules/openclaw`; the tool verifies
+AC660's exact build commit and loads the public
+`openclaw/plugin-sdk/doctor-repair-runtime` API from that root. No OpenClaw build,
+image replacement, model call, or task replay is needed.
+
+Root owns live execution. Before quiescence, verify the original claim/resource,
+session/lease/device binding and existing private backup. The Linux `quiesce`
+operation uses the existing Crabbox process-retirement contract: the saved PID,
+supplied current start ticks, process group, UID, CLI invocation/title, runtime cwd and
+state environment must all match before SIGTERM. It waits for group exit without
+escalating or deleting PID/runtime/identity files. A failed check holds repair.
+
+```sh
+node repair-node-state.mjs quiesce DATABASE CURRENT_RUNTIME PID START_TICKS NEW_STOP_RECEIPT
+node repair-node-state.mjs preflight DATABASE CURRENT_RUNTIME NEW_PRIVATE_PROOF_DIR
+```
+
+Preflight only reads the source. It saves a consistent SQLite backup and any
+existing node identity/client credential files, rehearses the one nullable-column
+bridge and unchanged canonical Doctor on private copies, and checks original row
+bags and identity/credential rows. Copy `source.sqlite` and every `identityBackups`
+entry to durable private NFS, verify their receipt hashes, and retain every writer's
+quiescence before applying:
+
+```sh
+node repair-node-state.mjs apply NEW_PRIVATE_PROOF_DIR/preflight.json NEW_APPLY_RECEIPT
+```
+
+Apply requires the same tool bytes as preflight and an absent saved node PID.
+It rechecks the exact source digest, empty control plane and private identity.
+It adds only `resource_receipt_json TEXT`, then invokes the normal state37-to41
+Doctor migrations. It never directly stamps a schema version or drops legacy
+retention. The receipt distinguishes a committed bridge from completed migration;
+if execution is interrupted or Doctor refuses, inspect that same database and
+receipt before another action. No automatic restore or forced clearance occurs.
+
+After completion, use authenticated `sessions.files.list` on the exact existing
+session to resume its original enrolled node through the normal owner. Verify the
+same lease/disk/device/epoch, current bootstrap receipt, runtime readiness and
+unchanged transcript/input cursors. Do not use `node stop` for a bare cloud node,
+reclaim its claim, delete its state, or replace its workspace.
+
+The operator rehearsal uses the pinned historical Git object (or its hash-verified
+SQL file) and the actual installed Doctor. It covers interrupted launch/turn row
+preservation, private credentials, absent repository storage, source immutability,
+and refusal of active launches, nonempty control data, reused output, changed PID
+or mismatched state. Linux additionally exercises a real isolated process group:
+
+```sh
+node scripts/maintenance/g119-main7/rehearse-node-state.mjs CURRENT_RUNTIME NEW_OUTPUT [PINNED_LEGACY_SQL]
+```
+
+## Shared PostgreSQL repair
+
+`migrate.mjs` converts the exact G119 qualified state37 and agent39 dialects to
 standard Main7 state41 and agent42 through runtimec60205's Native engine SDK.
 It does not change ordinary runtime admission or require rebuilding OpenClaw.
 
