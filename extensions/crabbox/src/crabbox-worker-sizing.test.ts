@@ -115,6 +115,19 @@ it("keeps the snapshot tier as default and selects disk capacity before allocati
   const legacy = resolveCrabboxProvisionProfile(profile, "beast").profile;
   expect(legacy.azureSandboxSnapshotId).toBeUndefined();
   expect(buildCrabboxAllocationArgs(legacy, "cbx_legacy", "legacy")).toContain("--class");
+  const tiny = resolveCrabboxProvisionProfile(
+    { ...profile, warmImage: false },
+    "tiny",
+    "linux",
+  ).profile;
+  expect(tiny).toMatchObject({ class: "tiny", type: undefined, warmImage: false });
+  const tinyArgs = buildCrabboxAllocationArgs(tiny, "cbx_temporary", "temporary");
+  expect(tinyArgs.slice(tinyArgs.indexOf("--class"), tinyArgs.indexOf("--class") + 2)).toEqual([
+    "--class",
+    "tiny",
+  ]);
+  expect(tinyArgs).not.toContain("--type");
+  expect(tinyArgs).not.toContain("--azure-sandbox-snapshot-id");
   // The saved input and its private-owner/retry selection are never rewritten.
   expect(profile.azureSandboxSnapshotId).toBe("snapshot");
   expect(profile.azureSandboxSnapshotGeneration).toBe("a".repeat(64));

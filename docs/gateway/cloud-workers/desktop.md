@@ -13,6 +13,11 @@ The agent can attach a temporary environment to the current conversation, run
 the application there, and open its view in the chat side panel. The agent's
 primary workspace and session placement stay unchanged.
 
+A conversation attachment is temporary even when its selected profile uses
+retained-disk durability for repository sessions. It needs no repository and uses
+mirrored allocation semantics without changing the saved profile or an existing
+repository disk.
+
 Attached environments install and verify the worker bundle for remote app
 commands, but skip prewarming the agent runtime because the agent stays on the
 current execution host. OpenClaw worker turns still prewarm their agent runtime.

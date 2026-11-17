@@ -39,10 +39,18 @@ export function createCrabboxWorkerLeaseLifecycle(options: {
   ): Promise<{ context: LeaseHeartbeatContext; profile: CrabboxProfile }> => {
     const profile = parseCrabboxCleanupProfile(lease.profile);
     assertCrabboxLeaseId(lease.leaseId);
-    const retention = lease.retention && prepareCrabboxRetention(profile, lease.retention);
-    if (retention && (!lease.resourceReceipt || lease.resourceReceipt.leaseId !== lease.leaseId)) {
+    if (
+      lease.retention &&
+      (!lease.resourceReceipt || lease.resourceReceipt.leaseId !== lease.leaseId)
+    ) {
       throw new Error("Crabbox retained lifecycle requires the original resource receipt");
     }
+    // The acquired private disk owns retention. A creation-time reusable-image
+    // preference cannot enable capture or prevent its exact inspection/pause.
+    if (lease.retention) {
+      profile.warmImage = false;
+    }
+    const retention = lease.retention && prepareCrabboxRetention(profile, lease.retention);
     return {
       context: {
         binary: (await resolveBinary(profile.binary, lease.signal)).binary,

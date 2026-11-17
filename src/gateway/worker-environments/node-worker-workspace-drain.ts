@@ -78,10 +78,7 @@ export async function stopNodeWorkerWorkspaceOwner(
       : undefined;
   const stopped = joinWorkerTunnelStops([remoteStop, owner.drainLocalWork?.()]);
   // Older nodes can still drain workspace work when native environment stop is unavailable.
-  const drain = () =>
-    reason !== "provider-destroying" && reason !== "provider-destroyed"
-      ? run("drain", drainNodeWorkerWorkspace)
-      : undefined;
+  const drain = () => (reason === undefined ? run("drain", drainNodeWorkerWorkspace) : undefined);
   await joinWorkerTunnelStops([stopped, stopped.then(drain, drain)]);
 }
 

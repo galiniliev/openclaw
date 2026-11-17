@@ -286,16 +286,16 @@ export function createCrabboxWorkerProvider(
         timeoutMs: () => remainingProvisionTimeout(deadline, warmupTimeoutMs),
       };
       const allocationChoice =
-        options?.retention && !parsed.sdkPython
+        retention && !parsed.sdkPython
           ? await (async () => {
-              await runProvisionWarmup({ ...allocationContext, retention: options.retention });
+              await runProvisionWarmup({ ...allocationContext, retention });
               return { kind: "cold" as const };
             })()
           : await warmImages.allocate({
               ...allocationContext,
               profileId: options?.profileId,
               nodeRuntimeIdentity,
-              ...(options?.retention ? { retention: options.retention } : {}),
+              ...(retention ? { retention } : {}),
               ...(projectImage
                 ? {
                     projectKey: projectImage.key,
