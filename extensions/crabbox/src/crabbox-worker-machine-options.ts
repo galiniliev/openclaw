@@ -139,11 +139,7 @@ export function createCrabboxMachineOptionsResolver(
     async listMachineOptions(profile) {
       const { parsed, catalog } = await resolveCatalog(profile);
       const sandbox = parsed.provider === "azure-sandbox";
-      const shapes = sandbox
-        ? parsed.azureSandboxSnapshotId
-          ? []
-          : CRABBOX_SANDBOX_TYPES
-        : catalog?.machines;
+      const shapes = sandbox ? CRABBOX_SANDBOX_TYPES : catalog?.machines;
       return listCrabboxMachineOptions(
         parsed.type ?? (sandbox && parsed.class ? "2cpu-4gib" : parsed.class),
         catalog && shapes?.filter(({ os }) => isCrabboxSetupTargetCompatible(parsed, os)),

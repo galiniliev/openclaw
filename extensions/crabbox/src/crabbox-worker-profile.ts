@@ -432,15 +432,19 @@ export function resolveCrabboxWarmImageProfile(
   }
   const machineType =
     profile.provider === "azure-sandbox" ? resolveCrabboxMachineType(machineClass) : undefined;
-  if (machineType && profile.azureSandboxSnapshotId) {
-    throw new WorkerProviderError(
-      "Crabbox configured snapshots inherit captured sizing; select a disk for an explicit type",
-    );
+  const selectedClass = machineType ?? machineClass;
+  let selectedProfile = profile;
+  if (profile.azureSandboxSnapshotId && selectedClass !== (profile.type ?? profile.class)) {
+    // Select the ordinary disk path before allocation; retries keep their saved class.
+    selectedProfile = { ...profile };
+    delete selectedProfile.azureSandboxSnapshotId;
+    delete selectedProfile.azureSandboxSnapshotReceipt;
+    delete selectedProfile.azureSandboxSnapshotGeneration;
   }
   return {
-    ...profile,
+    ...selectedProfile,
     type: machineType,
-    class: machineType ?? machineClass,
+    class: selectedClass,
     target,
     warmImage: target === "linux" && (profile.warmImage ?? machineClass !== undefined),
   };
