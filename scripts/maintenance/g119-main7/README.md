@@ -105,6 +105,30 @@ can retain observed identity but remain held; the tool never creates a journal.
 If the live Gateway changes captured facts, refresh evidence under stopped-writer
 custody rather than weakening a comparison.
 
+Collect the G119 identities through the maintained read-only collector, using
+the qualified runtime's existing `pg` dependency and the secret
+`OPENCLAW_MAINTENANCE_PG_URL` environment variable:
+
+```sh
+node scripts/maintenance/g119-main7/collect-identities.mjs /app ORIGINAL_STATE_NAMESPACE /mnt/factory/crabbox /private/NEW-identities.json
+```
+
+Root supplies the original namespace, actual Crabbox state root, and a new output
+in a private directory. The collector uses a repeatable-read, read-only PG
+transaction and reads immutable claim files without invoking a provider. It
+publishes a private 0600 identity file and only counts plus its SHA-256 on stdout.
+The result remains unqualified until the migration owner's current checks pass;
+provider observations must still be collected separately.
+
+Retention and disk authority are the complete `JSON.parse` of their original
+text columns. Do not select or rebuild a subset: an absent optional field must
+remain absent, and an explicit null must remain null. PostgreSQL OID 20 values
+use Native's safe-integer decoding, including `destroy_requested_at_ms`; unsafe
+integers refuse collection before output. Computed boolean facts such as
+`has_turn_claim` retain their boolean type. These contracts prevent the observed
+collector-only `retention-selection-changed` and `environment-owner-changed`
+failures without weakening the migrator's exact comparisons.
+
 ```sh
 node /run/maintenance/migrate.mjs --preflight /run/maintenance/input.json /mnt/maintenance/preflight-NEW
 node /run/maintenance/migrate.mjs --apply /run/maintenance/input.json /mnt/maintenance/apply-NEW
