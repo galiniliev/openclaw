@@ -282,11 +282,12 @@ it.skipIf(!connection)(
 );
 
 it.skipIf(!connection)(
-  "previews config backup recovery under Gateway PostgreSQL admission without publishing files",
+  "previews and applies config backup recovery under Gateway PostgreSQL admission",
   async () => {
     await withHistoricalPostgresState({}, async ({ state }) => {
       expect(threadId).toBe(0);
       expect(() => assertEngineStoreExecutionAllowed()).toThrow("must run in a worker");
+      const configDirectory = path.dirname(state.configPath);
       const authored = await fs.readFile(state.configPath, "utf8");
       // The parsed backup is unchanged; its size makes the existing recovery policy inspect it.
       const backup = authored + " ".repeat(authored.length * 2);
@@ -303,9 +304,20 @@ it.skipIf(!connection)(
       expect(plan?.snapshot).toMatchObject({ valid: true, raw: backup });
       expect(await fs.readFile(state.configPath, "utf8")).toBe(authored);
       expect(await fs.readFile(`${state.configPath}.bak`, "utf8")).toBe(backup);
-      expect((await fs.readdir(state.root)).filter((name) => name.includes(".clobbered."))).toEqual(
-        [],
+      expect(
+        (await fs.readdir(configDirectory)).filter((name) => name.includes(".clobbered.")),
+      ).toEqual([]);
+      const recovered = await runStartupConfigPreflight({ gateway: true, observe: false });
+      await using caches = new AsyncDisposableStack();
+      caches.use(recovered.pluginCache);
+      expect(recovered.snapshot.valid).toBe(true);
+      expect(await fs.readFile(state.configPath, "utf8")).toBe(backup);
+      expect(await fs.readFile(`${state.configPath}.bak`, "utf8")).toBe(backup);
+      const archived = (await fs.readdir(configDirectory)).filter((name) =>
+        name.includes(".clobbered."),
       );
+      expect(archived).toHaveLength(1);
+      expect(await fs.readFile(path.join(configDirectory, archived[0]!), "utf8")).toBe(authored);
       expect(() => assertEngineStoreExecutionAllowed()).toThrow("must run in a worker");
     });
   },
