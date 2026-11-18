@@ -385,6 +385,7 @@ export function createPlacementRecoveryActions(
     if (deps.isShuttingDown?.()) {
       return;
     }
+    const failedEnvironments = new Set<string>();
     // Cancel old setup before environment reconciliation can perform provider work.
     // Existing allocations, staged results, and move journals retain their cleanup owners.
     if (mode === "startup") {
@@ -457,24 +458,28 @@ export function createPlacementRecoveryActions(
       }
       // Drain the bounded environment pass before recovering placement authority or results.
       // Unowned teardown remains in the service-owned sweep.
-      const reconciled = await runTasksWithConcurrency({
+      await runTasksWithConcurrency({
         tasks: (await placements.readRecoveryCandidates()).flatMap(({ environmentId, state }) =>
           environmentId && state !== "failed" && state !== "local" && state !== "reclaimed"
             ? [
                 async () => {
                   if (!deps.isShuttingDown?.()) {
-                    await environments.reconcileEnvironment(environmentId);
+                    try {
+                      await environments.reconcileEnvironment(environmentId);
+                    } catch (error) {
+                      // A refused lease retains its owner without blocking unrelated recovery.
+                      failedEnvironments.add(environmentId);
+                      log.warn(
+                        `Worker placement startup recovery held (${environmentId}): ${String(error)}`,
+                      );
+                    }
                   }
                 },
               ]
             : [],
         ),
         limit: 8,
-        errorMode: "stop",
       });
-      if (reconciled.hasError) {
-        throw reconciled.firstError;
-      }
     } else {
       await environments.reconcileOnce();
     }
@@ -499,9 +504,12 @@ export function createPlacementRecoveryActions(
             }
           : undefined;
     }
-    for (const { sessionId } of candidates) {
+    for (const { sessionId, environmentId } of candidates) {
       if (deps.isShuttingDown?.()) {
         return;
+      }
+      if (environmentId && failedEnvironments.has(environmentId)) {
+        continue;
       }
       await admit([sessionId], () => recoverSession(sessionId, mode ?? "restart"));
     }

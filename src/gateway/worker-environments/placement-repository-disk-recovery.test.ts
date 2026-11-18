@@ -31,7 +31,10 @@ import { REQUEST, seedActivePlacement } from "./placement-dispatch-test-fixtures
 import { createHarness } from "./placement-dispatch-test-harness.js";
 import { makeClaimInput } from "./placement-lifecycle.test-support.js";
 import { createWorkerSessionPlacementStore } from "./placement-store.js";
-import { writePlacementEnvironmentFixture } from "./placement-test-fixtures.js";
+import {
+  advancePlacementFixtureToActive,
+  writePlacementEnvironmentFixture,
+} from "./placement-test-fixtures.js";
 import * as support from "./service.test-support.js";
 import { createWorkerEnvironmentStore } from "./store.js";
 
@@ -256,6 +259,7 @@ describe("disk recovery through the private node cleanup transport", () => {
   const recoveryCases = [
     "original",
     "startup-claim-only",
+    "startup-unrelated-inspection-failure",
     "other-session",
     "activeWriterRunId",
     "lifecycleRevision",
@@ -303,6 +307,23 @@ describe("disk recovery through the private node cleanup transport", () => {
         ownerEpoch: attached.ownerEpoch,
       });
       assert(active.state === "active" && bootstrapping.leaseId);
+      const unrelated =
+        condition === "startup-unrelated-inspection-failure"
+          ? await advancePlacementFixtureToActive(
+              placements,
+              database,
+              { ...REQUEST, sessionId: "unrelated-session", sessionKey: "agent:main:unrelated" },
+              { environmentId: "unrelated-environment" },
+            )
+          : undefined;
+      if (unrelated) {
+        await placements.claimTurn({
+          ...makeClaimInput(unrelated, "unrelated-claim"),
+          sessionId: unrelated.sessionId,
+          sessionKey: unrelated.sessionKey,
+        });
+      }
+      const unrelatedPlacement = unrelated && (await placements.getAsync(unrelated.sessionId));
       const resourceReceipt: WorkerResourceReceipt = {
         version: 1,
         leaseId: bootstrapping.leaseId,
@@ -314,6 +335,29 @@ describe("disk recovery through the private node cleanup transport", () => {
         receipt: resourceReceipt,
         assertCurrent,
       });
+      if (unrelated) {
+        for (const id of [environmentId, unrelated.environmentId]) {
+          const environment = store.get(id);
+          assert(environment?.leaseId);
+          writePlacementEnvironmentFixture(database, {
+            ...environment,
+            nodeDeviceId: environment.nodeDeviceId ?? "unrelated-node",
+            sharedHost: false,
+            resourceReceipt: environment.resourceReceipt ?? {
+              version: 1,
+              leaseId: environment.leaseId,
+              identity: { diskId: "unrelated-disk" },
+            },
+            retention: {
+              policy: { version: 1, ownerBinding: "a".repeat(64), computeWindowSeconds: 14_400 },
+              runtimeReady: false,
+              operation: null,
+              observation: null,
+            },
+          });
+        }
+      }
+      const unrelatedEnvironment = unrelated && store.get(unrelated.environmentId);
       const bound = await repositories.bindDisk({
         workspaceId: repository.workspaceId,
         expectedRevision: repository.revision,
@@ -353,9 +397,33 @@ describe("disk recovery through the private node cleanup transport", () => {
           .launch,
         validateWorkerTurn: (claim) => placements.validateTurnClaim(claim),
       });
-      const service = support.createService(support.createProvider(), {
-        nodeTunnelManager: tunnels,
+      const inspect = vi.fn(
+        async ({ leaseId, resourceReceipt: inspectedReceipt }: support.WorkerLifecycleLease) => {
+          if (unrelatedEnvironment && leaseId === unrelatedEnvironment.leaseId) {
+            throw new Error("strict claim identifier mismatch");
+          }
+          return {
+            status: "dormant" as const,
+            resourceReceipt: inspectedReceipt,
+            retention: {
+              claimRevision: "original-revision",
+              state: "suspended" as const,
+              computeExpiresAtMs: 1_000,
+            },
+          };
+        },
+      );
+      const setRetainedState = vi.fn(async () => {
+        throw new Error("Startup recovery cannot start or suspend retained compute");
       });
+      const service = support.createService(
+        support.createProvider(
+          unrelated ? { inspect, supportsResourceReceipts: true, setRetainedState } : {},
+        ),
+        {
+          nodeTunnelManager: tunnels,
+        },
+      );
       const prohibited = ["destroy", "reclaim", "startTunnel", "createWithRequest"] as const;
       const prohibitedCalls = prohibited.map((method) => vi.spyOn(service, method));
       // Observe real database effects without supplying their decisions or results.
@@ -373,7 +441,7 @@ describe("disk recovery through the private node cleanup transport", () => {
         },
       );
       const startupClaim =
-        condition === "startup-claim-only"
+        condition === "startup-claim-only" || condition === "startup-unrelated-inspection-failure"
           ? await placements.claimTurn(makeClaimInput(active, "interrupted-startup-claim"))
           : undefined;
       const harness = await createHarness(database, placements, {
@@ -513,11 +581,19 @@ describe("disk recovery through the private node cleanup transport", () => {
         }
         await withinTest(receipts.waitForExit(root), signal);
         expect(await placements.listPendingWorkspaceResultsAsync()).toEqual(
-          condition === "original" || condition === "startup-claim-only" ? [] : pending,
+          condition === "original" || startupClaim ? [] : pending,
         );
         expect((await placements.getAsync(REQUEST.sessionId))?.turnClaim?.claimId ?? null).toBe(
-          condition === "original" || condition === "startup-claim-only" ? null : claim.claimId,
+          condition === "original" || startupClaim ? null : claim.claimId,
         );
+        if (unrelated && unrelatedEnvironment) {
+          expect(inspect).toHaveBeenCalledWith(
+            expect.objectContaining({ leaseId: unrelatedEnvironment.leaseId }),
+          );
+          expect(await placements.getAsync(unrelated.sessionId)).toEqual(unrelatedPlacement);
+          expect(store.get(unrelated.environmentId)).toEqual(unrelatedEnvironment);
+          expect(setRetainedState).not.toHaveBeenCalled();
+        }
         expect(await repositories.get(bound.workspaceId)).toEqual(bound);
         const transcript = await loadTranscriptEvents(scope);
         if (condition === "other-session") {
