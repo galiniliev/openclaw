@@ -40,7 +40,10 @@ import {
   advancePlacementFixtureToActive,
   createPlacementTurnClaimFixtureOps,
 } from "./worker-environments/placement-test-fixtures.js";
-import { admitWorkerTurnInput } from "./worker-environments/placement-turn-claim-events.js";
+import {
+  admitWorkerTurnInput,
+  getWorkerTurnExecutionIdentityCapability,
+} from "./worker-environments/placement-turn-claim-events.js";
 import { createWorkerSessionPlacementGate } from "./worker-environments/placement-worker-gate.js";
 import type { WorkerTurnTunnelHandle } from "./worker-environments/tunnel-contract.js";
 import { createWorkerSessionTurnPlacementProvider } from "./worker-environments/worker-turn-launcher.js";
@@ -286,6 +289,8 @@ export function registerWorkerGoalChatCases(
       );
       const prepared = createDeferred();
       const promote = createDeferred();
+      const startAckReturned = createDeferred();
+      const resumeAckReturned = createDeferred();
       const request = createGoalChatStartRequest(
         scope(),
         "Finish a native worker checklist",
@@ -370,6 +375,13 @@ export function registerWorkerGoalChatCases(
           () => placements.validateTurnClaim(launch.turnClaim),
         );
         expect(admitted).toMatchObject({ ok: true, result: { outcome: "allow" } });
+        if (mode === "continue" && runEmbeddedAgent.mock.calls.length <= 2) {
+          await (runEmbeddedAgent.mock.calls.length === 1 ? startAckReturned : resumeAckReturned)
+            .promise;
+          const owner = getWorkerTurnExecutionIdentityCapability(placements, launch.turnClaim);
+          expect(owner, "Goal ACK must retain the worker receipt owner").toBeDefined();
+          expect(() => owner?.receiptAuthority()).not.toThrow();
+        }
         await runModel();
         const manager = await SessionManager.openAsync({
           ...scope(),
@@ -454,6 +466,7 @@ export function registerWorkerGoalChatCases(
         }
         promote.resolve();
         const started = await starting;
+        startAckReturned.resolve();
         if (mode !== "continue") {
           expect(started.mock.calls[0]?.[0]).toBe(false);
           await waitForDispatchEnd();
@@ -509,6 +522,7 @@ export function registerWorkerGoalChatCases(
           undefined,
           operator,
         );
+        resumeAckReturned.resolve();
         expectAccepted(resumed, { action: "resume", goalId: first.id });
         expect((await waitForGatewayActiveWork(30_000)).drained).toBe(true);
         expect(loadSessionEntry(scope())?.goal).toMatchObject({
@@ -529,6 +543,8 @@ export function registerWorkerGoalChatCases(
         expect(replay.mock.calls[0]?.[1]).toMatchObject({ replayed: true, goalId: first.id });
         expect(runEmbeddedAgent).toHaveBeenCalledTimes(4);
       } finally {
+        startAckReturned.resolve();
+        resumeAckReturned.resolve();
         promote.resolve();
         await starting;
         await waitForDispatchEnd();
