@@ -22,6 +22,10 @@ Gateway does not capture/upload a workspace checkpoint after every turn. Explici
 publication and Move still capture fresh immutable exports. The first hydration
 checkpoint is only initialization history, never a current recovery fallback.
 
+If a worker process fails before returning its result, OpenClaw retains its disk
+and finishes the old process's cleanup before admitting another turn. Unconfirmed
+cleanup keeps the session held for its original runner.
+
 Acquisition policy is committed before allocation. Each lifecycle operation records
 its ID, action, and expected provider claim revision before effects. Restart and
 lost-reply recovery keep that operation and resource; uncertain observations never

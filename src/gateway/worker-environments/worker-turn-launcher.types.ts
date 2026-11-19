@@ -11,7 +11,7 @@ import type { WorkerWorkspaceOperationCoordinator } from "./workspace-operation-
 
 export type WorkerTurnLauncherOptions = WorkerTurnAdmissionOptions & {
   environments: WorkerTurnEnvironmentService &
-    Pick<WorkerEnvironmentService, "ensureRetainedRunning">;
+    Pick<WorkerEnvironmentService, "ensureRetainedRunning" | "fenceWorkerTurnForRecovery">;
   /** Read-only resolution; a cancelled turn may stop waiting for these facts. */
   resolveWorkspace: (identity: {
     sessionId: string;

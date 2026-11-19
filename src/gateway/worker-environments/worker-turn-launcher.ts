@@ -364,7 +364,7 @@ export function createWorkerSessionTurnPlacementProvider(options: WorkerTurnLaun
             placement = admitted.placement;
             turnClaim = admitted.turnClaim;
             let activeWorkerTurn: workerTurnOwner.ActiveWorkerTurn | undefined;
-            let handedOff = false;
+            let handedOffWorkspace: WorkerSessionWorkspace | undefined;
             let terminalReceiptRequired = false;
             let terminalAtMs: number | undefined;
             let workspaceResolutionFailed = false;
@@ -447,7 +447,7 @@ export function createWorkerSessionTurnPlacementProvider(options: WorkerTurnLaun
               const executionOptions = {
                 environments: options.environments,
                 onHandoff: (custody?: { requiresTerminalReceipt: true }) => {
-                  handedOff = true;
+                  handedOffWorkspace = workspace;
                   terminalReceiptRequired = custody?.requiresTerminalReceipt === true;
                   activeWorkerTurn?.beginExecution();
                   if (!admissionReported) {
@@ -487,7 +487,7 @@ export function createWorkerSessionTurnPlacementProvider(options: WorkerTurnLaun
                 throw error;
               }
               const disconnectedBeforeHandoff =
-                !handedOff &&
+                !handedOffWorkspace &&
                 (error instanceof WorkerTunnelOwnerDisconnectedError ||
                   error instanceof WorkerRunnerUnavailableError);
               if (
@@ -499,7 +499,7 @@ export function createWorkerSessionTurnPlacementProvider(options: WorkerTurnLaun
                   placement.sessionId,
                 );
                 const canRecoverAdmission =
-                  !handedOff &&
+                  !handedOffWorkspace &&
                   options.placements.validateTurnClaim(turnClaim) &&
                   !pendingResults.some((pending) => pending.sessionId === placement.sessionId);
                 if (canRecoverAdmission) {
@@ -613,25 +613,25 @@ export function createWorkerSessionTurnPlacementProvider(options: WorkerTurnLaun
                 }
               }
               await prepareWorkerTurnFailure(
-                options,
+                { ...options, handedOffWorkspace },
                 placement,
                 { ...identity, ...turnClaim },
                 error,
                 assertCurrent,
                 turn.abortSignal,
-                handedOff && !remoteExec ? options.persistAbandonedPartial : undefined,
+                handedOffWorkspace && !remoteExec ? options.persistAbandonedPartial : undefined,
               );
               if (
                 error instanceof WorkerRunnerCapacityError ||
-                (error instanceof WorkerRunnerUnavailableError && !handedOff) ||
+                (error instanceof WorkerRunnerUnavailableError && !handedOffWorkspace) ||
                 // An unconfirmed node cancellation must retain the teardown fence,
                 // not reopen a reusable placement while its process may still run.
                 (!remoteExec &&
-                  handedOff &&
+                  handedOffWorkspace &&
                   turn.abortSignal?.aborted &&
                   (!terminalReceiptRequired || terminalAtMs !== undefined)) ||
                 // Recovery precedes launch; only this admission claim belongs to the attempt.
-                (error instanceof WorkerWorkspaceReconciliationError && !handedOff) ||
+                (error instanceof WorkerWorkspaceReconciliationError && !handedOffWorkspace) ||
                 (error instanceof WorkerTurnExecutionError &&
                   options.placements.validateTurnClaim(turnClaim))
               ) {
@@ -650,7 +650,7 @@ export function createWorkerSessionTurnPlacementProvider(options: WorkerTurnLaun
                 // error may turn its reusable placement into box teardown.
                 throw error;
               }
-              if (handedOff) {
+              if (handedOffWorkspace) {
                 const terminalOwner = activeWorkerTurn;
                 await failHandedOffTurn({
                   environments: options.environments,

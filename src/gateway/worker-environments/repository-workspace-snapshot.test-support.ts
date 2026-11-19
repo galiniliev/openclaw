@@ -186,12 +186,13 @@ export async function openRepositoryCaptureTransport(
       return observation;
     }),
   });
+  const placementGate = createWorkerSessionPlacementGate(placements);
   const environments = createWorkerEnvironmentService({
     scheduler: createTestGatewayScheduler(),
     store: records,
     getConfig: () => ({}),
     resolveProvider: () => provider,
-    placementStore: createWorkerSessionPlacementGate(placements),
+    placementStore: placementGate,
     waitForRetainedNode: async (node, request) => {
       expect(node).toBe(wire.nodeId);
       await preparation.beforeNode();
@@ -308,6 +309,7 @@ export async function openRepositoryCaptureTransport(
       original,
       records,
       environments,
+      placementGate,
       transfer,
       events,
       workspace,
