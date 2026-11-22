@@ -5,7 +5,10 @@ import { afterEach, expect, it, vi } from "vitest";
 import { SessionWorktreeSourceChangedError } from "../../agents/worktrees/errors.js";
 import { getRuntimeConfig, setRuntimeConfigSnapshot } from "../../config/io.js";
 import { loadSessionEntry, patchSessionEntryCore } from "../../config/sessions/session-accessor.js";
+import { executeSqliteQuerySync, getNodeSqliteKysely } from "../../infra/kysely-sync.js";
 import * as processExec from "../../process/exec.js";
+import type { DB } from "../../state/openclaw-state-db.generated.js";
+import { runOpenClawStateWriteTransaction } from "../../state/openclaw-state-db.js";
 import { setUserProfileRole } from "../../state/user-profile-writes.worker.js";
 import { prepareUserProfileCatalogForTest } from "../../test-utils/user-profile-catalog.js";
 import { createDirectChatContext } from "../server-chat.agent-events.test-helpers.js";
@@ -73,9 +76,20 @@ it.each(["worker-turn", "remote-exec"] as const)(
   },
 );
 
-it("inherits fresh disk history and dirty files without sharing or releasing the active parent's disk", async () => {
+it("inherits fresh history and dirty files from an active parent disk without a saved checkpoint", async () => {
   const f = await fixture("worker-turn");
-  const repository = await f.bindDisk();
+  const bound = await f.bindDisk();
+  // Retained dependency recovery can preserve disk authority without a mirrored checkpoint.
+  runOpenClawStateWriteTransaction(({ db }) => {
+    executeSqliteQuerySync(
+      db,
+      getNodeSqliteKysely<DB>(db)
+        .updateTable("session_repository_workspaces")
+        .set({ checkpoint_ref: null, manifest_hash: null })
+        .where("workspace_id", "=", bound.workspaceId),
+    );
+  });
+  const repository = (await f.store.get(bound.workspaceId))!;
   const originalRefs = await refs(f.store.artifactPath(repository.workspaceId));
   const active = await f.beginTurn("parent-spawning");
   await f.write("private.txt", "committed on disk\n");

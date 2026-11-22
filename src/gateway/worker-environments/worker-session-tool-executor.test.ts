@@ -19,12 +19,17 @@ import {
   resetGlobalHookRunner,
 } from "../../plugins/hook-runner-global.js";
 import { createMockPluginRegistry } from "../../plugins/hooks.test-helpers.js";
+import * as repositoryIntegration from "../../plugins/repository-integration-runtime.js";
 import { readAgentRuntimeExecutionLineage } from "../agent-runtime-execution-lineage.js";
+import { assertRepositoryDispatchAdmission } from "../repository-dispatch.js";
+import * as repositoryIdentity from "../repository-integration-identity.js";
 import type { WorkerConnectionIdentity } from "./connection-identity.js";
 import { bindWorkerTurnOwner } from "./placement-turn-claim-events.js";
+import type { WorkerPlacementDispatchRequest } from "./service-contract.js";
 import { registerWorkerDelegationPolicyTests } from "./worker-session-tool-executor.delegation.suite.js";
 import { registerWorkerGatewayToolExecutionTests } from "./worker-session-tool-executor.gateway-tools.suite.js";
 import { registerWorkerSpawnStartupTests } from "./worker-session-tool-executor.startup.suite.js";
+import { requireActivePlacement } from "./worker-turn-admission.js";
 const {
   workerSessionToolTestMocks,
   SOURCE,
@@ -386,6 +391,109 @@ describe("worker session tool topology", () => {
       expect(executeWorkshop).toHaveBeenCalledTimes(revokedAt === "policy" ? 0 : 1);
     },
   );
+
+  it("starts the same child after pre-allocation failure before sending its task", async () => {
+    setEntry(SOURCE.sessionKey, SOURCE.sessionId);
+    const create = gatewayCreate.getMockImplementation()!;
+    gatewayCreate.mockImplementationOnce(async (request) => {
+      const created = await create(request);
+      sessionEntries.get(spawnState.childSessionKey!)!.repositoryWorkspaceId = "child-workspace";
+      return created;
+    });
+    dispatchChild.mockImplementationOnce(async (request: WorkerPlacementDispatchRequest) => {
+      await placements.startDispatch(request);
+      await placements.fail({
+        sessionId: request.sessionId,
+        recoveryError: "Repository worker startup requires current GitHub dispatch admission",
+      });
+      throw new Error("Repository worker startup requires current GitHub dispatch admission");
+    });
+    const failedSpawn = await spawn("pre-allocation-failure");
+    expect(failedSpawn.resultJson).toContain("outcome is unknown");
+    const target = { ...CHILD, sessionKey: spawnState.childSessionKey! };
+    dispatchChild.mockImplementationOnce(async (request: WorkerPlacementDispatchRequest) => {
+      expect(request.sessionId).toBe(CHILD.sessionId);
+      expect(request.sessionKey).toBe(target.sessionKey);
+      assertRepositoryDispatchAdmission(request.readNativeCredential);
+      await activate(target);
+      return placements.get(CHILD.sessionId);
+    });
+    delivered.mockImplementationOnce(async () => {
+      requireActivePlacement((await placements.getAsync(CHILD.sessionId))!);
+    });
+    const recovered = await getFixture().send("recover-existing-child", {
+      sessionKey: target.sessionKey,
+    });
+    expect(JSON.parse(recovered.resultJson)).toMatchObject({ details: { status: "ok" } });
+    const replay = await spawn("pre-allocation-failure");
+    expect(replay.resultJson).toContain("prior operation outcome is unknown");
+    expect(dispatchChild).toHaveBeenCalledTimes(2);
+    expect(delivered).toHaveBeenCalledOnce();
+    expect(gatewayCreate).toHaveBeenCalledOnce();
+    expect(gatewayRequest).not.toHaveBeenCalled();
+    expect(placements.get(CHILD.sessionId)?.state).toBe("active");
+  });
+
+  it("admits a repository child with the active parent operator for the exact child session", async () => {
+    setEntry(SOURCE.sessionKey, SOURCE.sessionId);
+    const integration = vi
+      .spyOn(repositoryIntegration, "getRepositoryIntegration")
+      .mockReturnValue({
+        version: 1,
+        resolveConnectionIdentity: () => undefined,
+        withIdentity: async () => {
+          throw new Error("The test controls the repository issuer boundary");
+        },
+        preparedCapacity: "repository",
+      });
+    const admission = vi
+      .spyOn(repositoryIdentity, "withRepositoryIdentity")
+      .mockImplementation(async (actor, credential, run) => {
+        actor.assertCurrent();
+        credential.assertCurrent();
+        expect(actor).toMatchObject({
+          profileId: "profile-worker-requester",
+          sessionKey: spawnState.childSessionKey,
+          authorization: { kind: "admitted-operation" },
+        });
+        expect(credential.claim).toMatchObject({
+          purpose: "session-dispatch-project",
+          binding: {
+            kind: "session-dispatch",
+            agentId: CHILD.agentId,
+            sessionId: CHILD.sessionId,
+            sessionKey: spawnState.childSessionKey,
+          },
+        });
+        return await run({}, async () => undefined, actor.assertCurrent);
+      });
+    try {
+      const create = gatewayCreate.getMockImplementation()!;
+      gatewayCreate.mockImplementationOnce(async (request) => {
+        const created = await create(request);
+        sessionEntries.get(spawnState.childSessionKey!)!.repositoryWorkspaceId = "child-workspace";
+        return created;
+      });
+      const dispatch = dispatchChild.getMockImplementation()!;
+      let reader: WorkerPlacementDispatchRequest["readNativeCredential"];
+      dispatchChild.mockImplementationOnce(async (request: WorkerPlacementDispatchRequest) => {
+        reader = request.readNativeCredential;
+        assertRepositoryDispatchAdmission(reader);
+        await reader!.admit!();
+        return await dispatch(request);
+      });
+
+      await spawn("repository-child-dispatch", "investigate the existing repository");
+      expect(placements.get(CHILD.sessionId)?.state).toBe("active");
+      expect(admission).toHaveBeenCalledOnce();
+      getFixture().revokeOperatorAuthority();
+      await expect(reader!.admit!()).rejects.toThrow("source operator authority revoked");
+      expect(admission).toHaveBeenCalledOnce();
+    } finally {
+      admission.mockRestore();
+      integration.mockRestore();
+    }
+  });
 
   it.each([
     { name: "default", required: false, permissionMode: undefined },

@@ -156,6 +156,63 @@ describe("runtime-only image allocation", () => {
     expect(provider.provision).not.toHaveBeenCalled();
   });
 
+  it("starts an inherited 8 CPU child after the configured profile changes to 4 CPU", async () => {
+    const { service, provider } = fixture();
+    const inheritedProfile = {
+      providerId: provider.id,
+      profileSnapshot: {
+        install: "bundle" as const,
+        settings: { region: "parent", snapshot: "a".repeat(64) },
+        machineClass: "8cpu-16gib",
+        os: "linux",
+        executionMode: "worker-turn" as const,
+      },
+    };
+    support.testState.config.cloudWorkers!.profiles!.development!.settings = {
+      region: "current",
+      class: "4cpu-8gib",
+      snapshot: "b".repeat(64),
+    };
+    provider.resolvePreparationTarget = (
+      profile,
+      machineClass = "4cpu-8gib",
+      platform = "linux",
+    ) => ({
+      machineClass,
+      platform,
+      profileKey: typeof profile.snapshot === "string" ? profile.snapshot : undefined,
+    });
+    const intent = await service.prepareProjectIntent("development", {
+      ...imageOptions,
+      executionMode: "worker-turn",
+      inherited: inheritedProfile,
+    });
+    const request = {
+      profileId: "development",
+      idempotencyKey: "historical-parent-child",
+      inheritedProfile,
+      admittedIntent: intent,
+      executionMode: "worker-turn" as const,
+    };
+    const ready = await service.createWithRequest(request);
+    expect(ready.state).toBe("ready");
+    expect(ready.profileSnapshot).toMatchObject({
+      ...inheritedProfile.profileSnapshot,
+      runtimePreparation: {
+        source: "image",
+        target: { machineClass: "8cpu-16gib", platform: "linux", profileKey: "a".repeat(64) },
+      },
+    });
+    expect(await service.createWithRequest(request)).toMatchObject({
+      environmentId: ready.environmentId,
+    });
+    expect(provider.provision).toHaveBeenCalledOnce();
+    expect(vi.mocked(provider.provision).mock.calls[0]?.[0]).toEqual({
+      region: "parent",
+      snapshot: "a".repeat(64),
+    });
+  });
+
   it("rejects profile drift during artifact preparation before recording an intent", async () => {
     const { service, prepareNodeArtifacts, provider } = fixture();
     prepareNodeArtifacts.mockImplementationOnce(async () => {

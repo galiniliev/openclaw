@@ -40,7 +40,13 @@ export async function captureRepositoryDiskCheckpoint<T>(
 ): Promise<T> {
   const { repository, identity, checkpointRef, placements, environments } = params;
   const authority = repository.diskAuthority;
-  if (!authority || !repository.baseManifestHash || !repository.manifestHash) {
+  // A child fork captures the retained disk against its pinned baseline.
+  // Recovery can preserve that disk without a saved current checkpoint.
+  if (
+    !authority ||
+    !repository.baseManifestHash ||
+    (params.purpose !== "child-fork" && !repository.manifestHash)
+  ) {
     throw new Error("An initialized exact repository disk is required for capture");
   }
   if (params.purpose === "gateway-move" && !params.quiescence) {
