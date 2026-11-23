@@ -8,7 +8,10 @@ import { runAgentHarnessAfterToolCallHook } from "../../agents/harness/hook-help
 import type { AgentToolResult } from "../../agents/runtime/index.js";
 import type { buildSubagentExecutionSessionSpawnContext } from "../../agents/subagents/spawn/subagent-spawn-execution-identity.js";
 import type { AnyAgentTool } from "../../agents/tools/common.js";
-import { withGatewayToolCallerIdentity } from "../../agents/tools/gateway-caller-context.js";
+import {
+  getGatewayToolCallerIdentity,
+  withGatewayToolCallerIdentity,
+} from "../../agents/tools/gateway-caller-context.js";
 import {
   callAgentToolGatewayRequest,
   type AgentToolGatewayRequestCaller,
@@ -22,9 +25,15 @@ import {
 } from "../../agents/tools/sessions-placement-tool-contract.js";
 import { getRuntimeConfig } from "../../config/config.js";
 import { composeSessionSourceAssertion } from "../../config/sessions/session-source-authority.js";
+import { sha256Hex } from "../../infra/crypto-digest.js";
+import { repositoryDispatchCredentialReader } from "../repository-dispatch.js";
 import type { GatewayContextResolver } from "../server-methods/types.js";
 import type { WorkerSessionPlacementStore, WorkerSessionTurnClaim } from "./placement-store.js";
 import { getWorkerTurnExecutionIdentityCapability } from "./placement-turn-claim-events.js";
+import type {
+  WorkerEnvironmentServiceRecord,
+  WorkerPlacementDispatchRequest,
+} from "./service-contract.js";
 import {
   workerSessionToolErrorResult as errorResult,
   type WorkerSessionToolRequest,
@@ -65,6 +74,38 @@ export type WorkerSessionToolAuthority = {
     sessionSpawnContext?: ReturnType<typeof buildSubagentExecutionSessionSpawnContext>,
   ) => Promise<T>;
 };
+
+export function prepareWorkerSessionChildDispatch(params: {
+  identity: Pick<WorkerPlacementDispatchRequest, "sessionId" | "sessionKey" | "agentId">;
+  sourceEnvironment: Pick<
+    WorkerEnvironmentServiceRecord,
+    "profileId" | "providerId" | "profileSnapshot"
+  >;
+  repositoryBacked: boolean;
+  assertSource: () => void;
+}): WorkerPlacementDispatchRequest {
+  const { identity, sourceEnvironment, repositoryBacked, assertSource } = params;
+  const dispatch: WorkerPlacementDispatchRequest = {
+    ...identity,
+    profileId: sourceEnvironment.profileId,
+    executionMode: "worker-turn",
+    inheritedProfile: {
+      providerId: sourceEnvironment.providerId,
+      profileSnapshot: sourceEnvironment.profileSnapshot,
+    },
+  };
+  const operatorAuthority = getGatewayToolCallerIdentity()?.operatorAuthority;
+  if (repositoryBacked && operatorAuthority) {
+    dispatch.readNativeCredential = repositoryDispatchCredentialReader({
+      ...identity,
+      client: null,
+      operatorAuthority,
+      requestDigest: sha256Hex(JSON.stringify(dispatch)),
+      assertCurrent: assertSource,
+    });
+  }
+  return dispatch;
+}
 
 export function createWorkerSessionToolSourceRunner(params: {
   resolveGatewayContext: GatewayContextResolver;

@@ -54,6 +54,7 @@ import {
 import { executeWorkerSessionSend } from "./worker-session-tool-send.js";
 import {
   createWorkerSessionToolSourceRunner,
+  prepareWorkerSessionChildDispatch,
   prepareWorkerSessionToolRequest,
   type WorkerSessionToolAuthority,
 } from "./worker-session-tool-source.js";
@@ -324,17 +325,16 @@ export function createWorkerSessionToolExecutor(
                   await params.waitForInitialPlacement(childPlacement, operation.signal);
                 } else {
                   await params.dispatchChild(
-                    {
-                      sessionId: childSessionId,
-                      sessionKey: operation.childSessionKey,
-                      agentId: targetAgentId,
-                      profileId: sourceEnvironment.profileId,
-                      executionMode: "worker-turn",
-                      inheritedProfile: {
-                        providerId: sourceEnvironment.providerId,
-                        profileSnapshot: sourceEnvironment.profileSnapshot,
+                    prepareWorkerSessionChildDispatch({
+                      identity: {
+                        sessionId: childSessionId,
+                        sessionKey: operation.childSessionKey,
+                        agentId: targetAgentId,
                       },
-                    },
+                      sourceEnvironment,
+                      repositoryBacked: Boolean(loaded.entry?.repositoryWorkspaceId),
+                      assertSource,
+                    }),
                     undefined,
                     assertSource,
                   );
