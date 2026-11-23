@@ -28,15 +28,25 @@ import { composeSessionSourceAssertion } from "../../config/sessions/session-sou
 import { sha256Hex } from "../../infra/crypto-digest.js";
 import { repositoryDispatchCredentialReader } from "../repository-dispatch.js";
 import type { GatewayContextResolver } from "../server-methods/types.js";
+import type { WorkerConnectionIdentity } from "./connection-identity.js";
 import type { WorkerEnvironmentRecord } from "./environment-record.js";
 import type { WorkerSessionPlacementStore, WorkerSessionTurnClaim } from "./placement-store.js";
 import { getWorkerTurnExecutionIdentityCapability } from "./placement-turn-claim-events.js";
-import type { WorkerPlacementDispatchRequest } from "./service-contract.js";
+import type {
+  WorkerPlacementDispatchRequest,
+  WorkerPlacementDispatchContract,
+} from "./service-contract.js";
+import type { WorkerEnvironmentService } from "./service.js";
 import {
   workerSessionToolErrorResult as errorResult,
   type WorkerSessionToolRequest,
 } from "./worker-session-tool-result.js";
-import type { WorkerSessionToolSource as ExactSource } from "./worker-session-tool-topology.js";
+import {
+  assertWorkerSessionToolChild,
+  readWorkerSessionToolEntry,
+  type WorkerSessionToolSource as ExactSource,
+  type WorkerSessionToolTarget,
+} from "./worker-session-tool-topology.js";
 
 export function prepareWorkerSessionToolRequest(
   binding: Pick<WorkerSessionToolRequest, "identity" | "signal" | "onUpdate">,
@@ -100,6 +110,77 @@ export function prepareWorkerSessionChildDispatch(params: {
     });
   }
   return dispatch;
+}
+
+export type WorkerSessionChildDispatchDependencies = {
+  placements: WorkerSessionPlacementStore;
+  environments: Pick<WorkerEnvironmentService, "get">;
+  dispatchChild: WorkerPlacementDispatchContract["dispatch"];
+};
+
+export async function prepareWorkerSessionChildForSend(
+  params: WorkerSessionChildDispatchDependencies & {
+    source: Pick<ExactSource, "agentId" | "sessionId" | "sessionKey">;
+    target: WorkerSessionToolTarget;
+    identity: WorkerConnectionIdentity;
+    assertSource: () => void;
+    signal?: AbortSignal;
+  },
+): Promise<void> {
+  const { source, target, identity, placements, environments, assertSource } = params;
+  const placement = await placements.getAsync(target.sessionId);
+  assertSource();
+  if (
+    placement?.state !== "failed" ||
+    placement.environmentId !== null ||
+    placement.activeOwnerEpoch !== null
+  ) {
+    return;
+  }
+  const child = await readWorkerSessionToolEntry(target.sessionKey, target.agentId);
+  assertSource();
+  if (
+    !child.entry?.repositoryWorkspaceId ||
+    (child.entry.parentSessionKey ?? child.entry.spawnedBy) !== source.sessionKey
+  ) {
+    return;
+  }
+  const assertChild = () =>
+    assertWorkerSessionToolChild({
+      childSessionKey: target.sessionKey,
+      childSessionId: target.sessionId,
+      sourceSessionKey: source.sessionKey,
+      sourceSessionId: source.sessionId,
+      targetAgentId: target.agentId,
+      storePath: target.storePath,
+    });
+  await assertChild();
+  const parent = environments.get(identity.environmentId);
+  if (
+    parent?.state !== "attached" ||
+    parent.ownerEpoch !== identity.ownerEpoch ||
+    parent.attachedSessionIds.length !== 1 ||
+    parent.attachedSessionIds[0] !== source.sessionId
+  ) {
+    throw new Error("Worker source environment changed before child recovery");
+  }
+  await params.dispatchChild(
+    prepareWorkerSessionChildDispatch({
+      identity: {
+        agentId: target.agentId,
+        sessionKey: target.sessionKey,
+        sessionId: target.sessionId,
+      },
+      sourceEnvironment: parent,
+      repositoryBacked: true,
+      assertSource,
+    }),
+    undefined,
+    assertSource,
+    params.signal,
+  );
+  assertSource();
+  await assertChild();
 }
 
 export function createWorkerSessionToolSourceRunner(params: {

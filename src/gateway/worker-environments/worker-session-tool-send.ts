@@ -4,22 +4,31 @@ import type { PlacedSessionsSendArguments } from "../../agents/tools/sessions-pl
 import { createSessionsSendTool } from "../../agents/tools/sessions-send-tool.js";
 import { getRuntimeConfig } from "../../config/config.js";
 import { sessionDeliveryChannel } from "../../utils/delivery-context.read.js";
+import type { WorkerConnectionIdentity } from "./connection-identity.js";
 import { executeWorkerSessionToolWithReplay } from "./worker-session-tool-result.js";
+import {
+  prepareWorkerSessionChildForSend,
+  type WorkerSessionChildDispatchDependencies,
+} from "./worker-session-tool-source.js";
 import {
   resolveWorkerSessionToolTarget as exactAuthorizedTarget,
   type WorkerSessionToolSource as ExactSource,
   type WorkerSessionToolTarget as ExactTarget,
 } from "./worker-session-tool-topology.js";
 
-export async function executeWorkerSessionSend(operation: {
-  source: ExactSource;
-  target: ExactTarget;
-  request: PlacedSessionsSendArguments & { toolCallId: string };
-  idempotencyKey: string;
-  assertSource: () => void;
-  callGateway: AgentToolGatewayRequestCaller;
-  signal?: AbortSignal;
-}) {
+export async function executeWorkerSessionSend(
+  dependencies: WorkerSessionChildDispatchDependencies,
+  operation: {
+    identity: WorkerConnectionIdentity;
+    source: ExactSource;
+    target: ExactTarget;
+    request: PlacedSessionsSendArguments & { toolCallId: string };
+    idempotencyKey: string;
+    assertSource: () => void;
+    callGateway: AgentToolGatewayRequestCaller;
+    signal?: AbortSignal;
+  },
+) {
   const config = getRuntimeConfig();
   const executeFencedSend = async () => {
     const assertCurrentTarget = async () => {
@@ -39,6 +48,7 @@ export async function executeWorkerSessionSend(operation: {
       operation.assertSource();
     };
     await assertCurrentTarget();
+    await prepareWorkerSessionChildForSend({ ...dependencies, ...operation });
     const tool = createSessionsSendTool({
       agentSessionKey: operation.source.sessionKey,
       agentId: operation.source.agentId,

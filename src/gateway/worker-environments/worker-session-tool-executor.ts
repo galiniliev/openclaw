@@ -538,7 +538,8 @@ export function createWorkerSessionToolExecutor(
               authority,
             );
           }
-          return await executeWorkerSessionSend({
+          return await executeWorkerSessionSend(params, {
+            identity: prepared.identity,
             assertSource: authority.assertSource,
             callGateway: authority.callGateway,
             source,

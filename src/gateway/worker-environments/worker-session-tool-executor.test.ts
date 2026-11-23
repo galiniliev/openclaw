@@ -29,6 +29,7 @@ import type { WorkerPlacementDispatchRequest } from "./service-contract.js";
 import { registerWorkerDelegationPolicyTests } from "./worker-session-tool-executor.delegation.suite.js";
 import { registerWorkerGatewayToolExecutionTests } from "./worker-session-tool-executor.gateway-tools.suite.js";
 import { registerWorkerSpawnStartupTests } from "./worker-session-tool-executor.startup.suite.js";
+import { requireActivePlacement } from "./worker-turn-admission.js";
 const {
   workerSessionToolTestMocks,
   SOURCE,
@@ -390,6 +391,48 @@ describe("worker session tool topology", () => {
       expect(executeWorkshop).toHaveBeenCalledTimes(revokedAt === "policy" ? 0 : 1);
     },
   );
+
+  it("starts the same child after pre-allocation failure before sending its task", async () => {
+    setEntry(SOURCE.sessionKey, SOURCE.sessionId);
+    const create = gatewayCreate.getMockImplementation()!;
+    gatewayCreate.mockImplementationOnce(async (request) => {
+      const created = await create(request);
+      sessionEntries.get(spawnState.childSessionKey!)!.repositoryWorkspaceId = "child-workspace";
+      return created;
+    });
+    dispatchChild.mockImplementationOnce(async (request: WorkerPlacementDispatchRequest) => {
+      await placements.startDispatch(request);
+      await placements.fail({
+        sessionId: request.sessionId,
+        recoveryError: "Repository worker startup requires current GitHub dispatch admission",
+      });
+      throw new Error("Repository worker startup requires current GitHub dispatch admission");
+    });
+    const failedSpawn = await spawn("pre-allocation-failure");
+    expect(failedSpawn.resultJson).toContain("outcome is unknown");
+    const target = { ...CHILD, sessionKey: spawnState.childSessionKey! };
+    dispatchChild.mockImplementationOnce(async (request: WorkerPlacementDispatchRequest) => {
+      expect(request.sessionId).toBe(CHILD.sessionId);
+      expect(request.sessionKey).toBe(target.sessionKey);
+      assertRepositoryDispatchAdmission(request.readNativeCredential);
+      await activate(target);
+      return placements.get(CHILD.sessionId);
+    });
+    delivered.mockImplementationOnce(async () => {
+      requireActivePlacement((await placements.getAsync(CHILD.sessionId))!);
+    });
+    const recovered = await getFixture().send("recover-existing-child", {
+      sessionKey: target.sessionKey,
+    });
+    expect(JSON.parse(recovered.resultJson)).toMatchObject({ details: { status: "ok" } });
+    const replay = await spawn("pre-allocation-failure");
+    expect(replay.resultJson).toContain("prior operation outcome is unknown");
+    expect(dispatchChild).toHaveBeenCalledTimes(2);
+    expect(delivered).toHaveBeenCalledOnce();
+    expect(gatewayCreate).toHaveBeenCalledOnce();
+    expect(gatewayRequest).not.toHaveBeenCalled();
+    expect(placements.get(CHILD.sessionId)?.state).toBe("active");
+  });
 
   it("admits a repository child with the active parent operator for the exact child session", async () => {
     setEntry(SOURCE.sessionKey, SOURCE.sessionId);
