@@ -28,12 +28,10 @@ import { composeSessionSourceAssertion } from "../../config/sessions/session-sou
 import { sha256Hex } from "../../infra/crypto-digest.js";
 import { repositoryDispatchCredentialReader } from "../repository-dispatch.js";
 import type { GatewayContextResolver } from "../server-methods/types.js";
+import type { WorkerEnvironmentRecord } from "./environment-record.js";
 import type { WorkerSessionPlacementStore, WorkerSessionTurnClaim } from "./placement-store.js";
 import { getWorkerTurnExecutionIdentityCapability } from "./placement-turn-claim-events.js";
-import type {
-  WorkerEnvironmentServiceRecord,
-  WorkerPlacementDispatchRequest,
-} from "./service-contract.js";
+import type { WorkerPlacementDispatchRequest } from "./service-contract.js";
 import {
   workerSessionToolErrorResult as errorResult,
   type WorkerSessionToolRequest,
@@ -77,10 +75,7 @@ export type WorkerSessionToolAuthority = {
 
 export function prepareWorkerSessionChildDispatch(params: {
   identity: Pick<WorkerPlacementDispatchRequest, "sessionId" | "sessionKey" | "agentId">;
-  sourceEnvironment: Pick<
-    WorkerEnvironmentServiceRecord,
-    "profileId" | "providerId" | "profileSnapshot"
-  >;
+  sourceEnvironment: Pick<WorkerEnvironmentRecord, "profileId" | "providerId" | "profileSnapshot">;
   repositoryBacked: boolean;
   assertSource: () => void;
 }): WorkerPlacementDispatchRequest {
