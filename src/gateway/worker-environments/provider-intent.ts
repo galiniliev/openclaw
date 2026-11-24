@@ -312,14 +312,18 @@ export function createWorkerProviderIntent(options: WorkerProviderIntentOptions)
           (!setupRecipe || runSetupScript === false || createOptions.setupAuthorized === true)
         ) {
           if (createOptions.imageReserve) {
-            const admittedTarget = structuredClone(target);
-            assertImageCurrent = () => {
-              createOptions.assertCurrent?.();
-              if (!isImageProfileCurrent(profileId, createOptions, resolved, admittedTarget)) {
-                throw serviceError("invalid_profile", "Runtime-only worker preparation changed");
-              }
-            };
-            assertImageCurrent();
+            // Inherited children already admitted the parent's allocation profile.
+            assertImageCurrent = createOptions.assertCurrent;
+            if (!createOptions.inherited) {
+              const admittedTarget = structuredClone(target);
+              assertImageCurrent = () => {
+                createOptions.assertCurrent?.();
+                if (!isImageProfileCurrent(profileId, createOptions, resolved, admittedTarget)) {
+                  throw serviceError("invalid_profile", "Runtime-only worker preparation changed");
+                }
+              };
+            }
+            assertImageCurrent?.();
           }
           const prepared = await options.prepareNodeArtifacts(profileSnapshot, signal);
           signal?.throwIfAborted();
