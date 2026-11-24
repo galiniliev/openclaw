@@ -126,6 +126,10 @@ function prepareGitHubToolEnvironmentForIdentity(
         ? managedGitHubIdentityEnvironment({
             profileDir: resolveSelectedGitHubProfileDir(params, identity),
             gitAuthor: identity.config.gitAuthor,
+            gitConfig: [
+              ["credential.helper", ""],
+              ["credential.helper", "!gh auth git-credential"],
+            ],
           })
         : {},
     ),

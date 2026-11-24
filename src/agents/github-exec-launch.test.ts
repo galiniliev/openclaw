@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { quotePowerShellArg } from "../cli/quote-cli-arg.js";
 import { withMockedWindowsPlatform } from "../test-utils/vitest-spies.js";
 import { buildGitHubExecLaunchArgv } from "./github-exec-launch.js";
+import { prepareGitHubToolEnvironment } from "./github-tool-identity.js";
 import { getShellConfig } from "./shell-utils.js";
 
 const roots: string[] = [];
@@ -141,6 +142,52 @@ describe.skipIf(!hasPowerShell)("GitHub launch PowerShell boundary", () => {
 });
 
 describe.skipIf(process.platform === "win32")("GitHub launch source runtimes", () => {
+  it("gives stock Git the selected Enterprise credential through the local sealed launch", async () => {
+    const root = await tempRoot();
+    const prepared = prepareGitHubToolEnvironment({
+      config: { tools: { github: { profileId: "ghp_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } } },
+      agentId: "main",
+      env: { OPENCLAW_STATE_DIR: root },
+    });
+    const profile = prepared.localIdentityEnv.GH_CONFIG_DIR!;
+    await fs.mkdir(profile, { recursive: true, mode: 0o700 });
+    await fs.writeFile(
+      path.join(profile, "hosts.yml"),
+      "microsoft.ghe.com:\n  oauth_token: synthetic-selected-token\n",
+      { mode: 0o600 },
+    );
+    const bin = path.join(root, "bin");
+    await fs.mkdir(bin);
+    // Fixed external credential helper; real Git must discover it from the prepared overlay.
+    await fs.writeFile(
+      path.join(bin, "gh"),
+      '#!/bin/sh\n[ "$*" = "auth git-credential get" ] && [ "$GH_HOST" = "microsoft.ghe.com" ] && [ -z "$GITHUB_TOKEN$GH_ENTERPRISE_TOKEN$GITHUB_ENTERPRISE_TOKEN" ] || exit 1\nprintf "username=fixture-user\\npassword=%s\\n" "$GH_TOKEN"\n',
+      { mode: 0o755 },
+    );
+    const argv = buildGitHubExecLaunchArgv(
+      [
+        "/bin/sh",
+        "-c",
+        "printf 'protocol=https\\nhost=microsoft.ghe.com\\n\\n' | git credential fill",
+      ],
+      profile,
+      { githubHost: "microsoft.ghe.com" },
+    );
+    const result = await run(argv, root, {
+      env: {
+        ...prepared.credentialScrubEnv,
+        ...prepared.localIdentityEnv,
+        PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: os.devNull,
+        GIT_TERMINAL_PROMPT: "0",
+      },
+    });
+    expect({ code: result.code, stderr: result.stderr }).toEqual({ code: 0, stderr: "" });
+    expect(result.stdout).toContain("host=microsoft.ghe.com\n");
+    expect(result.stdout).toContain("password=synthetic-selected-token\n");
+  });
+
   for (const runtime of [process.execPath, "bun"]) {
     it.skipIf(runtime === "bun" && spawnSync("bun", ["--version"]).status !== 0)(
       `preserves exact argv, private output and lineage with ${path.basename(runtime)}`,
