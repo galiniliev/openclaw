@@ -1,9 +1,18 @@
 import path from "node:path";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { getOrCreatePromise } from "../shared/lazy-promise.js";
+import {
+  gitHubPublicationTreeBody,
+  type GitHubPublicationTreePlan,
+} from "./github-publication-tree-write.js";
+import type { GitHubRepositoryPublicationSnapshot } from "./github-repository-publication-snapshot.js";
 
-type TreeEntry = { path: string; mode: string; sha: string };
-type Tree = { complete: boolean; entries: TreeEntry[] };
+type TreeEntry = {
+  path: string;
+  mode: "040000" | GitHubRepositoryPublicationSnapshot["entries"][number]["mode"];
+  sha: string;
+};
+type Tree = { sha: string; recursive: boolean; complete: boolean; entries: TreeEntry[] };
 
 /** One execution owns its immutable tree metadata; repository and request shape stay distinct. */
 export function createGitHubPublicationTreeMetadata(params: {
@@ -11,13 +20,17 @@ export function createGitHubPublicationTreeMetadata(params: {
   readTree: (repository: string, sha: string, recursive: boolean) => Promise<unknown>;
   readCommit: (repository: string, sha: string) => Promise<unknown>;
 }) {
-  const trees = new Map<string, Promise<Tree | undefined>>();
+  const trees = new Map<string, Map<string, Promise<Tree | undefined>>>();
   const knownBlobs = new Map<string, Set<string>>();
   const scope = (repository: string) => params.host() + "\0" + repository;
   const readTree = (repository: string, sha: string, recursive = false) => {
     const repositoryScope = scope(repository);
-    const key = JSON.stringify([repositoryScope, sha, recursive]);
-    return getOrCreatePromise(trees, key, async (): Promise<Tree | undefined> => {
+    let repositoryTrees = trees.get(repositoryScope);
+    if (!repositoryTrees) {
+      trees.set(repositoryScope, (repositoryTrees = new Map()));
+    }
+    const key = JSON.stringify([sha, recursive]);
+    return getOrCreatePromise(repositoryTrees, key, async (): Promise<Tree | undefined> => {
       const value = await params.readTree(repository, sha, recursive);
       if (
         !isRecord(value) ||
@@ -49,7 +62,8 @@ export function createGitHubPublicationTreeMetadata(params: {
           !(
             (entry.mode === "040000" && entry.type === "tree") ||
             (entry.mode === "160000" && entry.type === "commit") ||
-            (["100644", "100755", "120000"].includes(entry.mode) && entry.type === "blob")
+            ((entry.mode === "100644" || entry.mode === "100755" || entry.mode === "120000") &&
+              entry.type === "blob")
           )
         ) {
           return undefined;
@@ -68,11 +82,75 @@ export function createGitHubPublicationTreeMetadata(params: {
           }
         }
       }
-      return { complete: !value.truncated, entries };
+      return { sha, recursive, complete: !value.truncated, entries };
     });
   };
   return {
     readTree,
+    async planTree(repository: string, snapshot: GitHubRepositoryPublicationSnapshot) {
+      let plan: GitHubPublicationTreePlan = snapshot;
+      const cached = trees.get(scope(repository));
+      if (!cached) {
+        return plan;
+      }
+      const base = await cached
+        .get(JSON.stringify([snapshot.baseTree, true]))
+        ?.catch(() => undefined);
+      // Reuse only complete observations already acquired by this execution. Explicit empty
+      // trees cannot be expressed by the normalized leaf delta and keep the original plan.
+      const usable = (tree: Tree | undefined): tree is Tree =>
+        Boolean(
+          tree?.complete &&
+          tree.recursive &&
+          !tree.entries.some(
+            (entry) =>
+              entry.mode === "040000" && entry.sha === "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+          ),
+        );
+      if (!usable(base)) {
+        return plan;
+      }
+      const desired = new Map(
+        base.entries.filter((entry) => entry.mode !== "040000").map((entry) => [entry.path, entry]),
+      );
+      for (const entry of snapshot.entries) {
+        if (entry.sha === null) {
+          desired.delete(entry.path);
+        } else {
+          desired.set(entry.path, { path: entry.path, mode: entry.mode, sha: entry.sha });
+        }
+      }
+      let bytes = Buffer.byteLength(JSON.stringify(gitHubPublicationTreeBody(plan)));
+      for (const pending of cached.values()) {
+        const candidate = await pending.catch(() => undefined);
+        if (!usable(candidate)) {
+          continue;
+        }
+        const prior = new Map(candidate.entries.map((entry) => [entry.path, entry]));
+        const entries: GitHubPublicationTreePlan["entries"] = [];
+        for (const entry of desired.values()) {
+          const previous = prior.get(entry.path);
+          if (
+            entry.mode !== "040000" &&
+            (previous?.sha !== entry.sha || previous.mode !== entry.mode)
+          ) {
+            entries.push({ path: entry.path, mode: entry.mode, sha: entry.sha });
+          }
+        }
+        for (const entry of candidate.entries) {
+          if (entry.mode !== "040000" && !desired.has(entry.path)) {
+            entries.push({ path: entry.path, mode: entry.mode, sha: null });
+          }
+        }
+        const alternative = { baseTree: candidate.sha, entries };
+        const size = Buffer.byteLength(JSON.stringify(gitHubPublicationTreeBody(alternative)));
+        if (size < bytes) {
+          plan = alternative;
+          bytes = size;
+        }
+      }
+      return plan;
+    },
     async readKnownBlobs(
       repository: string,
       roots: readonly string[],

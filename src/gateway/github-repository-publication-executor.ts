@@ -20,6 +20,7 @@ import {
   recordGitHubPublicationFailure,
   recordGitHubPublicationProgress,
   gitHubPublicationWorkerReadFailure,
+  type GitHubPublicationTreeProgress,
 } from "./github-publication-failure.js";
 import { GitHubPublicationRecoveryPendingError } from "./github-publication-git-index.js";
 import {
@@ -83,8 +84,9 @@ export async function executeRepositoryGitHubPublication(params: {
   let stage = "preflight";
   const startedAt = performance.now();
   let blobs: { total: number; reused: number; completed: number } | undefined;
+  let treeProgress: GitHubPublicationTreeProgress | undefined;
   const reportProgress = () =>
-    recordGitHubPublicationProgress(row, stage, performance.now() - startedAt, blobs);
+    recordGitHubPublicationProgress(row, stage, performance.now() - startedAt, blobs, treeProgress);
   let integration: Awaited<ReturnType<PrepareRepositoryPublicationIntegration>> | undefined;
   try {
     reportProgress();
@@ -528,9 +530,20 @@ export async function executeRepositoryGitHubPublication(params: {
       });
       stage = "tree-and-commit";
       reportProgress();
-      const createTree = (value: GitHubRepositoryPublicationSnapshot) =>
-        createGitHubPublicationTree(value, async (body) =>
-          objectSha(await api(endpoint + "trees", identity, assertAction, body)),
+      const createTree = async (
+        value: GitHubRepositoryPublicationSnapshot,
+        purpose: GitHubPublicationTreeProgress["purpose"],
+      ) =>
+        createGitHubPublicationTree(
+          value,
+          async (body) => objectSha(await api(endpoint + "trees", identity, assertAction, body)),
+          {
+            plan: await treeMetadata.planTree(pushRepository, value),
+            onProgress: (progress) => {
+              treeProgress = { purpose, ...progress };
+              reportProgress();
+            },
+          },
         );
       const author = {
         name: identity.account.login,
@@ -542,14 +555,14 @@ export async function executeRepositoryGitHubPublication(params: {
         managedInput?.pushed_head_commit ??
         verifyCommit(
           await api(endpoint + "commits", identity, assertAction, {
-            tree: await createTree(snapshot),
+            tree: await createTree(snapshot, "source"),
             parents: [row.previous_head_commit ?? snapshot.baseCommit],
             author,
             committer: author,
             message: content.commitMessage,
           }),
         );
-      const tree = await createTree(integration.snapshot);
+      const tree = await createTree(integration.snapshot, "integration");
       const merged = await api(endpoint + "commits", identity, assertAction, {
         tree,
         parents: [accepted, remoteBase],
@@ -688,7 +701,7 @@ export async function executeRepositoryGitHubPublication(params: {
       }
       return projectGitHubPublicationResult(interrupted);
     }
-    const failure = recordGitHubPublicationFailure(error, row, stage, blobs);
+    const failure = recordGitHubPublicationFailure(error, row, stage, blobs, treeProgress);
     return projectGitHubPublicationResult(
       await execution.complete({
         requestId: row.request_id,

@@ -472,6 +472,12 @@ rejected, and recorded or uncertain effects retain their reconciliation rules.
 API failures report bounded exit, signal, timeout, and HTTP status facts without
 command output.
 
+Tree construction reuses complete tree metadata already observed in the publishing
+repository when that describes the same accepted tree with fewer request bytes.
+It adds no metadata requests and preserves the captured input and commit ancestry.
+Tree-write progress identifies the source or integrated snapshot, batch position,
+entry count, and request size without recording paths or file content.
+
 During publication, an accepted PR response still completes its owned receipt if the requesting connection closes or publication permission ends. A successful local branch update likewise finishes its matching index transaction while the execution retains workspace ownership. This settlement does not authorize another push or PR creation; unconfirmed outcomes retain their existing recovery or personal-confirmation requirements.
 
 If an update reached an existing PR before that PR closed, recovery recognizes

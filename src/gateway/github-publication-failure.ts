@@ -13,7 +13,12 @@ import {
   NodeWorkerWorkspaceTransferError,
   NODE_WORKSPACE_PUBLICATION_CONFLICT_CODE,
 } from "../worker/node-workspace-transfer-protocol.js";
+import type { GitHubPublicationTreeWriteProgress } from "./github-publication-tree-write.js";
 import { WORKSPACE_RESULT_LIMIT_ERROR_CODE } from "./worker-environments/workspace-inventory-limits.js";
+
+export type GitHubPublicationTreeProgress = GitHubPublicationTreeWriteProgress & {
+  purpose: "source" | "integration";
+};
 
 type PublicationFailure = Pick<
   Extract<SessionGitHubPublicationResult, { status: "failed" }>,
@@ -333,6 +338,7 @@ export function recordGitHubPublicationFailure(
   row: { request_id: string; session_id: string },
   stage = "execution",
   blobs?: { total: number; reused: number; completed: number },
+  tree?: GitHubPublicationTreeProgress,
 ): PublicationFailure {
   const failure = resolveGitHubPublicationFailure(error);
   if (!(error instanceof GitHubPublicationKnownFailure)) {
@@ -348,6 +354,7 @@ export function recordGitHubPublicationFailure(
         ...(blobs
           ? { blobs: { total: blobs.total, reused: blobs.reused, completed: blobs.completed } }
           : {}),
+        ...(tree ? { tree } : {}),
       });
     } catch {
       // A diagnostic sink cannot change publication settlement.
@@ -362,6 +369,7 @@ export function recordGitHubPublicationProgress(
   stage: string,
   elapsedMs: number,
   blobs?: { total: number; reused: number; completed: number },
+  tree?: GitHubPublicationTreeProgress,
 ): void {
   try {
     createSubsystemLogger("gateway/github-publication").info("Repository publication progress", {
@@ -373,6 +381,7 @@ export function recordGitHubPublicationProgress(
       ...(blobs
         ? { blobs: { total: blobs.total, reused: blobs.reused, completed: blobs.completed } }
         : {}),
+      ...(tree ? { tree } : {}),
     });
   } catch {
     // Optional diagnostics cannot change publication or its settlement.

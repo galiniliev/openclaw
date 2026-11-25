@@ -3,6 +3,7 @@ import os from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { createGitHubPublicationTree } from "./github-publication-tree-write.js";
+import { createGitHubPublicationTreeMetadata } from "./github-publication-trees.js";
 import type { GitHubRepositoryPublicationSnapshot as Snapshot } from "./github-repository-publication-snapshot.js";
 
 const temporary = useAutoCleanupTempDirTracker(afterEach);
@@ -57,8 +58,72 @@ function fixture() {
       return result;
     },
   );
-  return { empty, entry, apply, snapshot, write };
+  return { empty, entry, apply, snapshot, write, git };
 }
+
+it.each(["complete", "incomplete", "foreign"])(
+  "preserves modes and atomic replacements when reusing %s tree metadata",
+  async (kind) => {
+    const f = fixture();
+    const base = f.apply(f.empty, [
+      f.entry("a"),
+      f.entry("directory/old"),
+      f.entry("link", "120000"),
+    ]);
+    const upstream = Array.from({ length: 210 }, (_, i) => f.entry(`${longDirectory}/${i}`));
+    const candidate = f.apply(base, [...upstream, f.entry("main-only")]);
+    const value = f.snapshot(base, [
+      ...upstream,
+      { ...f.entry("a"), sha: null },
+      f.entry("a/child", "100755"),
+      { ...f.entry("directory/old"), sha: null },
+      f.entry("directory", "120000"),
+      f.entry("link", "100644"),
+    ]);
+    const readTree = vi.fn(async (_repository: string, sha: string) => ({
+      sha,
+      truncated: sha === candidate && kind === "incomplete",
+      tree: f
+        .git(["ls-tree", "-r", "-t", "-z", sha])
+        .split("\0")
+        .filter(Boolean)
+        .map((record) => {
+          const [header, path] = record.split("\t");
+          const [mode, type, object] = header!.split(" ");
+          return { path, mode, type, sha: object };
+        }),
+    }));
+    const metadata = createGitHubPublicationTreeMetadata({
+      host: () => "github.com",
+      readTree,
+      readCommit: async () => undefined,
+    });
+    await metadata.readKnownBlobs("owner/repo", [base], () => {});
+    await metadata.readKnownBlobs(
+      kind === "foreign" ? "other/repo" : "owner/repo",
+      [candidate],
+      () => {},
+    );
+    const plan = await metadata.planTree("owner/repo", value);
+    await expect(createGitHubPublicationTree(value, f.write, { plan })).resolves.toBe(
+      value.workspaceTree,
+    );
+    expect(readTree).toHaveBeenCalledTimes(2);
+    if (kind === "complete") {
+      expect(f.write).toHaveBeenCalledOnce();
+      expect(f.write.mock.calls[0]![0].base_tree).toBe(candidate);
+      expect(f.write.mock.calls[0]![0].tree).toHaveLength(6);
+      expect(f.write.mock.calls[0]![0].tree).toContainEqual({
+        ...f.entry("main-only"),
+        sha: null,
+        type: "blob",
+      });
+    } else {
+      expect(plan).toBe(value);
+      expect(f.write.mock.calls.length).toBeGreaterThan(1);
+    }
+  },
+);
 
 it("keeps file/directory and symlink transitions atomic without grouping a- with a", async () => {
   const f = fixture();
