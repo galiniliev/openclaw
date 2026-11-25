@@ -7,6 +7,7 @@ import {
   type CrabboxOfflineRuntimeSetupOptions,
 } from "./crabbox-worker-offline-archives.js";
 import type { CrabboxOperatingSystem } from "./crabbox-worker-profile.js";
+import { CRABBOX_NODE_RUNTIME_CACHE_SOURCE } from "./crabbox-worker-runtime-cache.js";
 import {
   CRABBOX_RUNTIME_VERIFICATION_SOURCE,
   type CrabboxRuntimeInstallationIdentity,
@@ -269,22 +270,6 @@ setPhase("preparation");
     if (result.status !== 0) throw new Error("Cloud worker desktop setup failed" + (result.signal ? " (" + result.signal + ")" : " with exit code " + result.status));
   };
   const directoryOptions = process.platform === "win32" ? {} : { mode: 0o700 };
-  // Forks of a warm image load disk blocks lazily on first read, so a cold node start
-  // spends ~30 s on serial reads. A boot-time parallel read of the current runtime
-  // overlaps that with SSH readiness. Best effort: images without cron keep the cold start.
-  // Only a Crabbox run on this lease edits the crontab; local executions (tests) never do.
-  const installRuntimePrefetch = () => {
-    if (!leaseId || process.platform !== "linux" || process.env.CRABBOX_LEASE_ID !== leaseId) return;
-    try {
-      const script = path.join(runtimeRoot, ".prefetch.sh");
-      const nodeDir = path.dirname(path.dirname(fs.realpathSync(process.execPath)));
-      fs.writeFileSync(path.join(runtimeRoot, ".prefetch"), runtimeDir + "\\n" + nodeDir + "\\n");
-      fs.writeFileSync(script, '#!/bin/sh\\ncd "$(dirname "$0")" || exit 0\\ndate +%s.%N > .prefetch.log\\nwhile IFS= read -r dir; do find "$dir" -type f -print0; done < .prefetch | xargs -0 -n 64 -P 64 cat > /dev/null 2>&1\\ndate +%s.%N >> .prefetch.log\\n', { mode: 0o700 });
-      const current = spawnSync("crontab", ["-l"], { encoding: "utf8", timeout: 10000 });
-      const kept = (current.status === 0 ? current.stdout : "").split("\\n").filter((line) => line && !line.includes(script));
-      spawnSync("crontab", ["-"], { input: [...kept, "@reboot /bin/sh " + script].join("\\n") + "\\n", timeout: 10000 });
-    } catch { /* Prefetch is optional; failed setup keeps the ordinary cold-start path. */ }
-  };
   const launcher = path.join(process.env.ProgramFiles || "C:\\\\Program Files", "Crabbox", "bin", "Start-CrabboxDetachedProcess.ps1");
   if (process.platform === "win32" && mode && !${JSON.stringify(desktopTarget === "windows/normal")} && !fs.existsSync(launcher)) {
     throw new Error("Cloud worker requires " + launcher + "; update the Crabbox Windows bootstrap image and reprovision the worker");
@@ -474,6 +459,7 @@ setPhase("preparation");
   // Lease-private settings are never part of runtime-only preparation or its captured image.
   if (mode) stageWorkerCodex();
   if (desktopTarget === "macos") finishDesktopSetup();
+  ${CRABBOX_NODE_RUNTIME_CACHE_SOURCE}
   const downloadAbort = new AbortController();
   const prepareRuntime = async () => {
   fs.mkdirSync(runtimeRoot, { recursive: true, ...directoryOptions });
@@ -657,6 +643,9 @@ setPhase("preparation");
   }
   activationStarted = performance.now();
   setPhase("activation");
+  let previousRuntimeDir;
+  try { previousRuntimeDir = fs.realpathSync(runtimeLink); }
+  catch { /* Missing predecessors do not authorize cache cleanup. */ }
   try {
     if (!fs.lstatSync(runtimeLink).isSymbolicLink()) throw new Error("Cloud worker runtime pointer is occupied");
     fs.unlinkSync(runtimeLink);
@@ -676,6 +665,7 @@ setPhase("preparation");
   }
   await launchNodeProcess();
   if (desktopTarget !== "macos") finishDesktopSetup();
+  pruneNodeRuntimeCache(previousRuntimeDir);
   setPhase("complete");
 })().catch((error) => { console.error(error.downloadArtifact ? error.message : failureMessage("node bootstrap", error.downloadPhase || phase, error.code) + ": " + error.message); process.exitCode = 1; }).finally(reportTiming);
 `;

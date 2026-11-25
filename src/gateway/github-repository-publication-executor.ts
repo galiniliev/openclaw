@@ -2,7 +2,6 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type { GitHubCredentialReader } from "../agents/github-credential-reader.js";
 import { resolveGitHubHost } from "../agents/github-host-runtime.js";
 import { githubRepositoryUrl } from "../agents/github-host.js";
-import type { PreparedGitHubPublicationIdentity } from "../agents/github-tool-identity.js";
 import type { InternalSessionEntry } from "../config/sessions/types.js";
 import type { RepositoryGitHubPublicationRow } from "../state/github-publication-read.types.js";
 import { runTasksWithConcurrency } from "../utils/run-with-concurrency.js";
@@ -29,6 +28,7 @@ import {
   requirePublicationCommand,
   runPublicationCommand,
 } from "./github-publication-git-transport.js";
+import { requestGitHubPublicationJson as api } from "./github-publication-json-read.js";
 import {
   findGitHubPublicationPullRequest,
   readPublishedGitHubPullRequest,
@@ -51,29 +51,6 @@ import type { PrepareRepositoryPublicationIntegration } from "./repository-publi
 import { SessionMutationAuthorizationChangedError } from "./session-sharing.js";
 import type { RepositoryGitHistory } from "./worker-environments/session-repository-checkpoints.types.js";
 
-async function api(
-  endpoint: string,
-  identity: PreparedGitHubPublicationIdentity,
-  assertCurrent: () => void,
-  body?: unknown,
-): Promise<unknown> {
-  assertCurrent();
-  const raw = await requirePublicationCommand(
-    githubPublicationApiArgs(
-      endpoint,
-      body === undefined ? "GET" : "POST",
-      identity.host ?? resolveGitHubHost(),
-    ),
-    {
-      env: identity.env,
-      beforeRun: assertCurrent,
-      ...(body === undefined ? {} : { input: JSON.stringify(body) }),
-    },
-  );
-  assertCurrent();
-  return JSON.parse(raw);
-}
-
 /** GitHub receives only accepted normalized objects; the Gateway never fetches source history. */
 export async function executeRepositoryGitHubPublication(params: {
   execution: RepositoryGitHubPublicationExecutionAsync;
@@ -90,6 +67,7 @@ export async function executeRepositoryGitHubPublication(params: {
   validateAuthority: () => boolean;
   assertWorkflowChangesAllowed: () => void;
   identity?: GitHubPublicationIdentityOwner;
+  workerIdentity: GitHubPublicationIdentityOwner;
 }) {
   const { execution, snapshot } = params;
   const row = execution.row;
@@ -463,6 +441,7 @@ export async function executeRepositoryGitHubPublication(params: {
         agentId: row.agent_id,
         signal: params.signal,
         assertCurrent: assertAction,
+        identity: params.workerIdentity,
       });
       try {
         // Probe both repositories as the execution account, not the personal publisher.
@@ -495,7 +474,7 @@ export async function executeRepositoryGitHubPublication(params: {
         worker.assertCurrent();
         throw error;
       } finally {
-        worker.release();
+        await worker.release();
       }
       assertAction();
       const blobRoots = new Map<string, string>();

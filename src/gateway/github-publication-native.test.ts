@@ -20,13 +20,17 @@ import {
   preparePersonalPublicationFixtureAction,
 } from "./github-personal-publication.test-support.js";
 import { registerPublicationCredentialFixture } from "./github-publication-credential.test-helpers.js";
-import { prepareGitHubPublicationWorkerIdentity } from "./github-publication-execution-identity.js";
+import {
+  prepareGitHubPublicationWorkerIdentity,
+  createGitHubPublicationExecutionIdentityOwner,
+} from "./github-publication-execution-identity.js";
 import { GitHubPublicationRequesterUnavailableError } from "./github-publication-failure.js";
 import {
   createRequesterPublicationFixture,
   publicationGuestEmail as email,
 } from "./github-publication-requester.test-support.js";
 import { readRepositoryGitHubPublicationFixture as readRepositoryGitHubPublication } from "./github-publication-store.test-support.js";
+import { readRepositoryGitHubPublicationInDatabase } from "./github-repository-publication-store.worker.js";
 import { createRepositoryPublicationFixture } from "./github-repository-publication.test-support.js";
 import type { PrepareRepositoryPublicationIntegration } from "./repository-publication-integration.js";
 import { hashWorkerCredential } from "./worker-environments/credential.js";
@@ -334,6 +338,63 @@ describe("combined native publication proof", () => {
     sandbox: "required",
     realWorktree: true,
   });
+  it("publishes through worker App admission with the original requester and execution binding", async () => {
+    const f = await createRequesterPublicationFixture(checkpoint, "repository");
+    const profileId = "ghp_00000000000000000000000000000001";
+    f.config.tools = {
+      github: {
+        kind: "app-installation",
+        profileId,
+        app: {
+          appId: 10,
+          installationId: 20,
+          accountId: 42,
+          repositories: [{ id: 40, fullName: "owner/repository" }],
+          permissions: { contents: "write", metadata: "read", pull_requests: "write" },
+          privateKey: "synthetic",
+          keyVersion: "synthetic-v1",
+        },
+      },
+    };
+    let executionAdmitted = false;
+    const events: string[] = [];
+    registerPublicationCredentialFixture(f, events, (context) => {
+      expect(context.actor.profileId).toBe(f.guestProfile);
+      expect(context.actor.sessionKey).toBe(f.session.sessionKey);
+      if (context.operation.purpose === "publication-execution") {
+        const binding = context.operation.binding;
+        const row = readRepositoryGitHubPublicationInDatabase(f.database.db, binding.requestId);
+        expect(binding).toMatchObject({
+          kind: "publication",
+          sessionId: f.session.sessionId,
+          sessionKey: f.session.sessionKey,
+          executionKind: "repository",
+          requestDigest: row?.request_digest,
+          ownerId: row?.execution_id,
+        });
+        executionAdmitted = true;
+      }
+    });
+    const revoke = vi.fn(async () => {});
+    mocks.prepareIdentity.mockImplementation(async (params) => {
+      await params.readNativeCredential?.(params.env ?? {});
+      return {
+        source: "system-configured",
+        profileId,
+        account: { accountId: 42, login: "roboclaw-bot", avatarUrl: null },
+        env: { GH_TOKEN: "synthetic-app-token" },
+        revoke,
+      };
+    });
+    const result = await f.coordinator.requestForSessionV2(
+      f.request("worker-app-authority", f.guest),
+    );
+    expect(result).toMatchObject({ status: "published" });
+    expect(executionAdmitted).toBe(true);
+    expect(mocks.prepareRepositoryIntegration).toHaveBeenCalled();
+    expect(revoke).toHaveBeenCalled();
+  });
+
   it.each([
     "allowed",
     "read-throttled",
@@ -745,6 +806,22 @@ describe("personal publisher credential custody", () => {
   });
 });
 
+const workerIdentityOwner = (assertCurrent: () => void) =>
+  createGitHubPublicationExecutionIdentityOwner(() => ({
+    row: {
+      agent_id: "main",
+      session_key: SESSION_KEY,
+      session_id: SESSION_ID,
+      request_id: "credential-lifetime-fixture",
+      request_digest: "credential-lifetime-fixture",
+    },
+    actor: undefined,
+    lifecycleRevision: null,
+    executionKind: "repository",
+    ownerId: "credential-lifetime-fixture",
+    assertCurrent,
+  }));
+
 describe("publication worker credential lifetime", () => {
   installGitHubPublicationTestHarness();
   it.each([
@@ -801,6 +878,7 @@ describe("publication worker credential lifetime", () => {
       const preparing = prepareGitHubPublicationWorkerIdentity({
         agentId: "main",
         assertCurrent,
+        identity: workerIdentityOwner(assertCurrent),
       });
       if (scenario === "acquisition-rate-limited") {
         await expect(preparing).rejects.toMatchObject({
@@ -833,13 +911,13 @@ describe("publication worker credential lifetime", () => {
             kind: "updated",
           });
         } else {
-          owned.release();
+          await owned.release();
         }
         expect(owned.signal.aborted).toBe(true);
         expect(() => owned!.assertCurrent()).toThrow();
       }
     } finally {
-      owned?.release();
+      await owned?.release();
       const checks = abort.mock.calls.length;
       notifyManagedGitHubProfileChanged({
         profileDir: identity.env.GH_CONFIG_DIR,
@@ -889,6 +967,7 @@ describe("publication worker credential lifetime", () => {
       const worker = await prepareGitHubPublicationWorkerIdentity({
         agentId: "main",
         assertCurrent: () => {},
+        identity: workerIdentityOwner(() => {}),
       });
       let profileAtNotification: string | undefined;
       const stop = sessionChanges.subscribe((change) => {
@@ -908,7 +987,7 @@ describe("publication worker credential lifetime", () => {
         }
       } finally {
         stop();
-        worker.release();
+        await worker.release();
         state.clearSecretsRuntimeSnapshotState();
       }
     },

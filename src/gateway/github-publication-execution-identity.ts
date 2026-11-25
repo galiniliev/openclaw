@@ -21,7 +21,7 @@ import type { RepositoryCredentialSource } from "./github-user-identity.types.js
 export class GitHubPublicationAuthorityLostError extends Error {}
 
 export type GitHubPublicationIdentityOwner = {
-  prepare: () => Promise<PreparedGitHubPublicationIdentity>;
+  prepare: (beforeRead?: () => void) => Promise<PreparedGitHubPublicationIdentity>;
   isCurrent: (identity: PreparedGitHubPublicationIdentity) => boolean;
 };
 
@@ -33,6 +33,7 @@ export async function prepareGitHubPublicationWorkerIdentity(params: {
   agentId: string;
   signal?: AbortSignal;
   assertCurrent: () => void;
+  identity: GitHubPublicationIdentityOwner;
 }) {
   const controller = new AbortController();
   const signal = params.signal
@@ -82,6 +83,9 @@ export async function prepareGitHubPublicationWorkerIdentity(params: {
     stops.splice(0).forEach((stop) => stop());
     changedProfiles.clear();
     controller.abort(new Error("Publication worker credential operation closed"));
+    const previous = identity;
+    identity = undefined;
+    return previous?.revoke?.();
   };
   try {
     assertCurrent();
@@ -92,7 +96,7 @@ export async function prepareGitHubPublicationWorkerIdentity(params: {
         }
       }),
     );
-    identity = await prepareCurrentGitHubPublicationIdentity(params.agentId, assertCurrent, () => {
+    identity = await params.identity.prepare(() => {
       stops.push(
         onManagedGitHubProfileChanged(({ profileDir }) => {
           if (!identity) {
@@ -120,7 +124,7 @@ export async function prepareGitHubPublicationWorkerIdentity(params: {
     assertCurrent();
     return { identity, signal, assertCurrent, release };
   } catch (error) {
-    release();
+    await release();
     if (error instanceof GitHubIdentityError) {
       if (error.reason === "rate_limited" || error.reason === "unverified") {
         throw new GitHubPublicationKnownFailure("Worker GitHub verification is unavailable.", {
@@ -226,6 +230,7 @@ export async function prepareGitHubPublicationExecutionIdentity(params: {
   executionKind: "worktree" | "repository";
   ownerId: string;
   assertCurrent: () => void;
+  beforeRead?: () => void;
 }) {
   const { row, actor, assertCurrent } = params;
   const config = currentGitHubPublicationConfig();
@@ -259,6 +264,7 @@ export async function prepareGitHubPublicationExecutionIdentity(params: {
           },
         },
         assertCurrent,
+        beforeRead: params.beforeRead,
       },
     );
   } catch (error) {
@@ -278,7 +284,8 @@ export function createGitHubPublicationExecutionIdentityOwner(
   readParams: () => Parameters<typeof prepareGitHubPublicationExecutionIdentity>[0],
 ): GitHubPublicationIdentityOwner {
   return {
-    prepare: () => prepareGitHubPublicationExecutionIdentity(readParams()),
+    prepare: (beforeRead) =>
+      prepareGitHubPublicationExecutionIdentity({ ...readParams(), beforeRead }),
     isCurrent: (identity) =>
       matchesCurrentGitHubPublicationIdentity({ agentId: readParams().row.agent_id, identity }),
   };

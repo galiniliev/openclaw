@@ -94,6 +94,8 @@ export async function prepareCurrentGitHubPublicationIdentity(
   assertCurrent?.();
   if (typeof credentialOrBeforeRead === "function") {
     credentialOrBeforeRead();
+  } else {
+    credential?.beforeRead?.();
   }
   credential?.assertCurrent();
   return preparePublicationGitHubIdentity(

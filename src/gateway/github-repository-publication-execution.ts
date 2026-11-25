@@ -8,8 +8,7 @@ import {
   preparePersonalGitHubPublicationSelection,
   type PersonalGitHubSessionActionV2,
 } from "./github-personal-publication.js";
-import { matchesCurrentGitHubPublicationIdentity } from "./github-publication-availability.js";
-import { prepareGitHubPublicationExecutionIdentity } from "./github-publication-execution-identity.js";
+import { createGitHubPublicationExecutionIdentityOwner } from "./github-publication-execution-identity.js";
 import { GitHubPublicationRequesterUnavailableError } from "./github-publication-failure.js";
 import { projectGitHubPublicationResult } from "./github-publication-receipt.js";
 import {
@@ -231,8 +230,26 @@ export function createRepositoryGitHubPublicationExecution(params: {
             return projectGitHubPublicationResult(row);
           }
           const actor = action ? undefined : getRequester().snapshot.actor;
+          const workerIdentity = createGitHubPublicationExecutionIdentityOwner(() => {
+            assertExecution();
+            const current = execution?.row;
+            if (!current?.execution_id) {
+              throw new Error("GitHub publication execution identity is unavailable.");
+            }
+            const originalRequester = requester ?? action?.requester;
+            return {
+              row,
+              actor: originalRequester?.snapshot.actor,
+              credentialSource: originalRequester?.repositoryCredentialSource,
+              lifecycleRevision: row.session_lifecycle_revision,
+              executionKind: "repository",
+              ownerId: current.execution_id,
+              assertCurrent: assertExecution,
+            };
+          });
           return await executeRepositoryGitHubPublication({
             execution: await claimExecution(),
+            workerIdentity,
             requesterProfileId:
               action?.owner ?? (actor?.kind === "operator" ? actor.profileId : undefined),
             snapshot: prepared.snapshot,
@@ -272,33 +289,7 @@ export function createRepositoryGitHubPublicationExecution(params: {
                     },
                   },
                 }
-              : {
-                  identity: {
-                    prepare: async () => {
-                      assertExecution();
-                      const current = execution?.row;
-                      if (!current?.execution_id) {
-                        throw new Error("GitHub publication execution identity is unavailable.");
-                      }
-                      return await prepareGitHubPublicationExecutionIdentity({
-                        row,
-                        actor: getRequester().snapshot.actor,
-                        credentialSource: getRequester().repositoryCredentialSource,
-                        lifecycleRevision: row.session_lifecycle_revision,
-                        executionKind: "repository",
-                        ownerId: current.execution_id,
-                        assertCurrent: assertExecution,
-                      });
-                    },
-                    isCurrent: (identity: PreparedGitHubPublicationIdentity) => {
-                      assertExecution();
-                      return matchesCurrentGitHubPublicationIdentity({
-                        agentId: row.agent_id,
-                        identity,
-                      });
-                    },
-                  },
-                }),
+              : { identity: workerIdentity }),
           });
         },
         authority,

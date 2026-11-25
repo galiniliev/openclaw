@@ -1,6 +1,7 @@
 import { setRuntimeConfigSnapshot } from "../config/config.js";
 import { createPluginRecord } from "../plugins/loader-records.js";
 import { createTestPluginRegistry } from "../plugins/registry-runtime.test-helpers.js";
+import type { RepositoryIntegration } from "../plugins/repository-integration.types.js";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
 import type { createRequesterPolicyFixture } from "./github-publication-requester.test-support.js";
 
@@ -8,6 +9,7 @@ import type { createRequesterPolicyFixture } from "./github-publication-requeste
 export function registerPublicationCredentialFixture(
   f: Pick<Awaited<ReturnType<typeof createRequesterPolicyFixture>>, "config">,
   events: string[],
+  inspect?: (context: Parameters<RepositoryIntegration["withIdentity"]>[0]) => void,
 ) {
   const synthetic = "local-synthetic-no-provider-authority";
   f.config.gateway!.repositoryIntegration = "publication-local-sink";
@@ -30,6 +32,7 @@ export function registerPublicationCredentialFixture(
     async withIdentity(context, run) {
       context.assertCurrent();
       context.readCurrentProfile();
+      inspect?.(context);
       events.push("integration-admitted");
       return await run({
         env: context.env,

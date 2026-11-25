@@ -19,6 +19,8 @@ export type RepositoryPublicationActor = RepositoryActor;
 export type RepositoryPublicationCredential = {
   claim: RepositoryOperation;
   assertCurrent: () => void;
+  /** Install credential observers after refresh, before acquiring the fixed snapshot. */
+  beforeRead?: () => void;
 };
 
 export function repositoryPublicationPreflightCredential(params: {
