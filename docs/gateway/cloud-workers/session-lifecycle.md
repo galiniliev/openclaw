@@ -34,6 +34,13 @@ for the fresh export and confirmed exact-resource retirement. Unsupported Stop,
 archive/delete cleanup, and other Move targets refuse before draining the disk.
 Retained compute closes through its finite window owner, not legacy idle reclaim.
 
+For a dedicated, receipt-bound environment, an explicit administrative
+`environments.destroy` request with `force: true` discards its repository-disk
+custody without exporting private disk contents. Accepted Git checkpoints and
+refs remain intact until normal session deletion. The same request can finish
+discarding custody after the environment has already been destroyed. Shared or
+unknown hosts retain their existing stop-confirmation requirements.
+
 Compute windows are finite and never renewed by activity. Maintenance may close
 expired compute, but new compute requires an explicit authorized wake. New execution
 admission rejects expired or unfinished windows; accepted transcript/result

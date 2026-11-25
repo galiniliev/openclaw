@@ -11,6 +11,7 @@ import {
   bindSessionRepositoryWorkspaceDiskInDatabase,
   createSessionRepositoryWorkspaceInDatabase,
   deleteSessionRepositoryWorkspaceInDatabase,
+  discardSessionRepositoryWorkspaceDiskInDatabase,
   findSessionRepositoryWorkspaceInDatabase,
   readSessionRepositoryWorkspaceInDatabase,
   resetSessionRepositoryWorkspaceToBranchInDatabase,
@@ -23,6 +24,7 @@ import type {
   RepositoryWorkspaceCheckpoint,
   RepositoryWorkspaceCreate,
   RepositoryWorkspaceDiskBinding,
+  RepositoryWorkspaceDiskDiscard,
   RepositoryWorkspaceDiskRetirement,
   RepositoryWorkspaceMutationResult,
   RepositoryWorkspaceOwner,
@@ -72,6 +74,10 @@ export const repositoryWorkspaceOperations = {
   "repositoryWorkspaces.retireDisk": (input: RepositoryWorkspaceDiskRetirement, { open }) =>
     mutate(open(), "repositoryWorkspaces.retireDisk", (db) =>
       retireSessionRepositoryWorkspaceDiskInDatabase(db, input, Date.now()),
+    ),
+  "repositoryWorkspaces.discardDisk": (input: RepositoryWorkspaceDiskDiscard, { open }) =>
+    mutate(open(), "repositoryWorkspaces.discardDisk", (db) =>
+      discardSessionRepositoryWorkspaceDiskInDatabase(db, input, Date.now()),
     ),
   "repositoryWorkspaces.delete": (
     input: { workspaceId: string; sessionEntryCurrentSource?: SessionEntryCurrentSource },

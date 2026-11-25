@@ -1,3 +1,4 @@
+import { getSessionRepositoryWorkspaceStore } from "../../state/session-repository-workspaces.js";
 import { DEVICE_FOLDER_MANIFEST_REF } from "../../worker/device-folder.js";
 import {
   FORCED_WORKER_ABANDONMENT_ERROR,
@@ -209,6 +210,27 @@ export async function forceAbandonWorkerEnvironment(
       continue;
     }
     // Carry the original claim or claimlessness through both native transitions.
+    const repositories = getSessionRepositoryWorkspaceStore();
+    const repository = await repositories.find(current);
+    if (repository?.diskAuthority) {
+      const captured = current;
+      await repositories.discardDisk({
+        workspaceId: repository.workspaceId,
+        expectedRevision: repository.revision,
+        sessionId: captured.sessionId,
+        placement: {
+          state: captured.state,
+          generation: captured.generation,
+          environmentId: captured.environmentId,
+          activeOwnerEpoch: captured.activeOwnerEpoch,
+        },
+        assertCurrent: () => {
+          if (!isCapturedPlacementCurrent(captured, placements.get(captured.sessionId))) {
+            throw new Error("Repository disk discard placement changed");
+          }
+        },
+      });
+    }
     const claim =
       current.state === "active" || current.state === "draining"
         ? capturePlacementTurnClaim(current)

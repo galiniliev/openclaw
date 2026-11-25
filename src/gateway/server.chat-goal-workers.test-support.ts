@@ -161,6 +161,7 @@ export function registerWorkerGoalChatCases(
       }));
       expect(getRegisteredAgentHarness("codex")?.harness.cloudPlacement?.mode).toBe("remote-exec");
       const placements = createWorkerSessionPlacementStore();
+      const placementGate = createWorkerSessionPlacementGate(placements);
       context.workerSessionPlacementService = placements;
       const environment = {
         ...createDispatchEnvironmentFixtures().attached,
@@ -204,6 +205,7 @@ export function registerWorkerGoalChatCases(
         environments: {
           get: () => environment,
           ensureRetainedRunning: unexpectedTransport,
+          fenceWorkerTurnForRecovery: placementGate.fenceWorkerTurnForRecovery,
           inspectTurnLease: async ({ assertCurrent }) => assertCurrent(),
           acquireTurnCredential: async () => ({
             ...credential(),
@@ -401,7 +403,7 @@ export function registerWorkerGoalChatCases(
           }),
         );
         const seq = launch.plan.assignment.transcript.nextSeq;
-        await createWorkerSessionPlacementGate(placements).updateAckCursors({
+        await placementGate.updateAckCursors({
           claim: launch.turnClaim,
           transcriptSeq: seq,
           liveSeq: launch.plan.assignment.liveEvents.nextSeq,

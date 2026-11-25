@@ -1,4 +1,5 @@
 import type { WorkerSessionTurnClaim } from "../gateway/worker-environments/placement-record.js";
+import type { WorkerPlacementCancellationTarget } from "../gateway/worker-environments/placement-target.js";
 import type { WorkerResourceReceipt } from "../plugins/capability-provider.types.js";
 
 /** Most recent lossy source replacement; later checkpoints retain this provenance. */
@@ -70,6 +71,12 @@ export type RepositoryWorkspaceCheckpoint = RepositoryWorkspaceMutation & {
 /** The pending result retains the original receipt until exact source cleanup settles. */
 export type RepositoryWorkspaceDiskRetirement = RepositoryWorkspaceCheckpoint & {
   claim: WorkerSessionTurnClaim;
+};
+
+/** Accepted environment discard gives up disk custody without replacing retained Git refs. */
+export type RepositoryWorkspaceDiskDiscard = RepositoryWorkspaceMutation & {
+  sessionId: string;
+  placement: WorkerPlacementCancellationTarget;
 };
 
 export type RepositoryWorkspaceMutationResult = {

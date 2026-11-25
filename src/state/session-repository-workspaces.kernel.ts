@@ -2,8 +2,10 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Selectable, Updateable } from "kysely";
 import { REPOSITORY_BRANCH_PREFIX_PATTERN } from "../config/repository-branch-prefix.js";
+import { hasForcedWorkerEnvironmentAbandonment } from "../gateway/worker-environments/environment-errors.js";
 import { readWorkerPlacementMovesReadOnly } from "../gateway/worker-environments/placement-move-row-codec.js";
 import { getRequired } from "../gateway/worker-environments/placement-row-codec.js";
+import { matchesWorkerPlacementTarget } from "../gateway/worker-environments/placement-target.js";
 import {
   matchesWorkspaceResultClaim,
   pendingResultFromRow,
@@ -16,6 +18,7 @@ import {
   prepareSqliteQueryTakeFirstSync,
 } from "../infra/kysely-sync.js";
 import type { EngineConnection } from "../infra/sql-connection.js";
+import { sameWorkerResourceReceipt } from "../plugins/worker-resource-receipt.js";
 import { ensureSessionRepositoryWorkspaceSchema } from "./openclaw-state-db-schema-additive.js";
 import { tableExists } from "./openclaw-state-db-schema-helpers.js";
 import type { DB, SessionRepositoryWorkspaces } from "./openclaw-state-db.generated.js";
@@ -31,6 +34,7 @@ import type {
   RepositoryWorkspaceCheckpoint,
   RepositoryWorkspaceCreate,
   RepositoryWorkspaceDiskBinding,
+  RepositoryWorkspaceDiskDiscard,
   RepositoryWorkspaceDiskRetirement,
   RepositoryWorkspaceMutation,
   RepositoryWorkspaceMutationResult,
@@ -440,6 +444,39 @@ export function retireSessionRepositoryWorkspaceDiskInDatabase(
       checkpoint_ref: input.checkpointRef,
       manifest_hash: input.manifestHash,
     };
+  });
+}
+
+export function discardSessionRepositoryWorkspaceDiskInDatabase(
+  db: EngineConnection,
+  input: RepositoryWorkspaceDiskDiscard,
+  nowMs: number,
+): RepositoryWorkspaceMutationResult {
+  return mutate(db, input, nowMs, (repository) => {
+    const placement = getRequired(db, input.sessionId);
+    const environment = placement.environmentId
+      ? findWorkerEnvironment(db, placement.environmentId)
+      : undefined;
+    if (
+      !matchesWorkerPlacementTarget(placement, input.placement) ||
+      placement.agentId !== repository.agentId ||
+      placement.sessionKey !== repository.sessionKey ||
+      !repository.diskAuthority ||
+      repository.diskAuthority.environmentId !== placement.environmentId ||
+      !environment ||
+      environment.sharedHost !== false ||
+      !hasForcedWorkerEnvironmentAbandonment(environment) ||
+      !environment.resourceReceipt ||
+      !sameWorkerResourceReceipt(
+        repository.diskAuthority.resourceReceipt,
+        environment.resourceReceipt,
+      )
+    ) {
+      throw new Error("Repository disk discard lost its accepted environment owner");
+    }
+    // The operator accepted loss of the disk, including re-entry after physical teardown.
+    // Checkpoint/base refs stay intact; this does not invent a successful Gateway export.
+    return { disk_authority_json: null };
   });
 }
 

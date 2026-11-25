@@ -37,6 +37,7 @@ import type {
   RepositoryWorkspaceCheckpoint,
   RepositoryWorkspaceCreate,
   RepositoryWorkspaceDiskBinding,
+  RepositoryWorkspaceDiskDiscard,
   RepositoryWorkspaceDiskRetirement,
   RepositoryWorkspaceMutationResult,
   RepositoryWorkspaceOwner,
@@ -337,6 +338,12 @@ export function createSessionRepositoryWorkspaceStore(
       const { assertCurrent, ...request } = input;
       return requireWorkspace(
         await mutate({ type: "repositoryWorkspaces.retireDisk", input: request }, assertCurrent),
+      );
+    },
+    async discardDisk(input: Guarded<RepositoryWorkspaceDiskDiscard>) {
+      const { assertCurrent, ...request } = input;
+      return requireWorkspace(
+        await mutate({ type: "repositoryWorkspaces.discardDisk", input: request }, assertCurrent),
       );
     },
     async resetToBranch(input: Guarded<RepositoryWorkspaceBranchReset>) {
