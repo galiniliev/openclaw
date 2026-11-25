@@ -276,7 +276,8 @@ export function createWorkerRuntimeRefresher(options: WorkerRuntimeRefreshOption
             openclawVersion:
               runtime?.nodeBootstrap.openclawVersion ?? preparation.artifacts.openclawVersion,
             ...(runtime ? { runtime } : {}),
-            ...(retainedCleanupOnly ? { retainedRuntimeOnly: true as const } : {}),
+            // The saved pointer can name a newer runtime than the creation profile.
+            ...(!runtime ? { retainedRuntimeOnly: true as const } : {}),
             platform: preparation.target.platform,
             assertCurrent,
           });

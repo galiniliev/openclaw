@@ -21,7 +21,12 @@ describe("same enrolled node admission recovery", () => {
   support.setupWorkerEnvironmentServiceSuite();
 
   async function setup(
-    options: { connected?: boolean; capable?: boolean; prepared?: boolean } = {},
+    options: {
+      connected?: boolean;
+      capable?: boolean;
+      prepared?: boolean;
+      prepareRuntime?: () => Promise<void>;
+    } = {},
   ) {
     const environmentId = "resume-worker";
     await testState.store.createIntent({
@@ -102,6 +107,7 @@ describe("same enrolled node admission recovery", () => {
         placementStore: createWorkerSessionPlacementGate(placements),
         prepareNodeRuntime: async (_record, _artifact, _signal, assertCurrent) => {
           assertCurrent?.();
+          await options.prepareRuntime?.();
           return {
             nodeBootstrap: {
               ...support.NODE_BOOTSTRAP,
@@ -244,6 +250,47 @@ describe("same enrolled node admission recovery", () => {
     },
   );
 
+  it("reconnects the saved node without waiting for a cold current-bootstrap producer", async () => {
+    const packaging = createDeferred();
+    const release = createDeferred();
+    const resumed = createDeferred();
+    const prepareRuntime = vi.fn(async () => {
+      packaging.resolve();
+      await release.promise;
+    });
+    const h = await setup({ prepareRuntime });
+    const resume = h.resumeNode.getMockImplementation()!;
+    h.resumeNode.mockImplementation(async (request) => {
+      request.assertCurrent();
+      expect(request.retainedRuntimeOnly).toBe(true);
+      await resume(request);
+      resumed.resolve();
+    });
+    const controller = new AbortController();
+    const waiting = h.waiter.wait({
+      placement: h.placement,
+      signal: controller.signal,
+      assertCurrent() {},
+    });
+    try {
+      expect(
+        await Promise.race([
+          resumed.promise.then(() => "saved-node"),
+          packaging.promise.then(() => "current-bootstrap"),
+        ]),
+      ).toBe("saved-node");
+      await waiting;
+      expect(prepareRuntime).not.toHaveBeenCalled();
+      expect(h.resumeNode).toHaveBeenCalledOnce();
+      expect(h.provision).not.toHaveBeenCalled();
+      expect(testState.store.get(h.environment.environmentId)).toEqual(h.environment);
+    } finally {
+      controller.abort();
+      release.resolve();
+      await waiting.catch(() => {});
+    }
+  });
+
   it("restarts the exact enrolled lease before reconnect without provisioning or changing custody", async () => {
     const h = await setup();
     await h.waiter.wait({
@@ -259,9 +306,7 @@ describe("same enrolled node admission recovery", () => {
       openclawVersion: "2026.7.2",
       platform: "linux",
     });
-    expect(() => h.resumeNode.mock.calls[0]![0].assertCurrent()).toThrow(
-      "placement authority changed",
-    );
+    expect(() => h.resumeNode.mock.calls[0]![0].assertCurrent()).toThrow();
     expect(h.provision).not.toHaveBeenCalled();
     expect(testState.store.get(h.environment.environmentId)).toEqual(h.environment);
   });

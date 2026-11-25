@@ -63,12 +63,13 @@ export function createWorkerRuntimeRefreshWaiter(params: {
       environment.sharedHost === false &&
       readWorkerPreparation(environment.profileSnapshot)?.target.platform === "linux";
     const connected = params.hasCurrentRunner(deviceId);
-    const obsolete = managedLinux && version !== undefined && ((comparison ?? 0) < 0 || staleBuild);
-    // Recovery must keep using the current package after an upgrade, rather than
-    // returning to the creation-time archive still recorded in the profile.
-    const upgradeRuntime = managedLinux && (!connected || obsolete);
+    // A cold node reconnects from its saved runtime before current worker-bundle
+    // admission. Packaging a new bootstrap here can exhaust reconnect's budget
+    // without ever starting that node. Known obsolete connected runtimes still upgrade.
+    const upgradeRuntime =
+      managedLinux && version !== undefined && ((comparison ?? 0) < 0 || staleBuild);
     let cleanupOnly = false;
-    if (!connected || obsolete) {
+    if (!connected || upgradeRuntime) {
       const resumed = await params.environments.resumeNode(environment.environmentId, {
         ...(upgradeRuntime ? { upgradeRuntime: true } : {}),
         signal: waitingSignal,

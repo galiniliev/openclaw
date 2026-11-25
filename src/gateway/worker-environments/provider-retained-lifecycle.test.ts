@@ -319,70 +319,84 @@ describe("retained lifecycle through the environment service", () => {
     });
   });
 
-  it("repairs the enrolled node before reconnecting under the retained operation lock", async () => {
-    const request = await seed(true);
-    const f = fixture();
-    const events: string[] = [];
-    const provision = vi.fn(f.provider.provision);
-    f.provider.provision = provision;
-    const resumeNode = vi.fn<NonNullable<typeof f.provider.resumeNode>>(async (lease) => {
-      lease.assertCurrent();
-      expect(lease).toMatchObject({
-        leaseId: receipt.leaseId,
-        resourceReceipt: receipt,
-        retention: policy,
+  it.each(["ready", "attached"] as const)(
+    "repairs the enrolled node before reconnecting under the retained operation lock (%s)",
+    async (state) => {
+      const request = await seed(true);
+      if (state === "attached") {
+        const attached = await support.testState.store.transition({
+          environmentId: request.environmentId,
+          from: "ready",
+          to: "attached",
+          patch: support.attachedPatch(request.environmentId, "retained-session"),
+        });
+        request.expectedOwnerEpoch = attached.ownerEpoch;
+      }
+      const f = fixture();
+      const events: string[] = [];
+      const provision = vi.fn(f.provider.provision);
+      f.provider.provision = provision;
+      const resumeNode = vi.fn<NonNullable<typeof f.provider.resumeNode>>(async (lease) => {
+        lease.assertCurrent();
+        expect(lease).toMatchObject({
+          leaseId: receipt.leaseId,
+          resourceReceipt: receipt,
+          retention: policy,
+        });
+        expect(lease.deviceId).toBe("node-original");
+        expect(lease.retainedRuntimeOnly).toBe(true);
+        expect(lease.runtime).toBeUndefined();
+        expect(support.testState.store.getCredential(request.environmentId)).toEqual(
+          credentialBeforeWake,
+        );
+        expect(support.testState.store.get(request.environmentId)?.retention?.runtimeReady).toBe(
+          false,
+        );
+        expect(f.waitForRetainedNode).not.toHaveBeenCalled();
+        events.push("node-repaired");
       });
-      expect(lease.deviceId).toBe("node-original");
-      expect(support.testState.store.getCredential(request.environmentId)).toEqual(
-        credentialBeforeWake,
+      f.provider.resumeNode = resumeNode;
+      const connected = createDeferredCore();
+      const waiting = createDeferredCore();
+      f.waitForRetainedNode.mockImplementationOnce(async (node, args) => {
+        expect(node).toBe("node-original");
+        expect(resumeNode).toHaveBeenCalledTimes(1);
+        args.assertCurrent();
+        events.push("node-wait");
+        waiting.resolve();
+        await connected.promise;
+        args.assertCurrent();
+      });
+      const service = f.service();
+      await service.suspendRetained(request);
+      const credentialBeforeWake = support.testState.store.getCredential(request.environmentId);
+      const completed = vi.fn();
+      // The real service lock is deliberately held by ensureRetainedRunning: using
+      // the public locking resumer here deadlocks before the node wait is entered.
+      const wake = service.ensureRetainedRunning(request).then(completed);
+      try {
+        await Promise.race([waiting.promise, wake]);
+        expect(events).toEqual(["node-repaired", "node-wait"]);
+        expect(completed).not.toHaveBeenCalled();
+        expect(f.ensureNodeWorkerBundle).not.toHaveBeenCalled();
+      } finally {
+        connected.resolve();
+      }
+      await wake;
+      expect(service.get(request.environmentId)).toMatchObject({
+        leaseId: receipt.leaseId,
+        nodeDeviceId: "node-original",
+        ownerEpoch: request.expectedOwnerEpoch,
+        resourceReceipt: receipt,
+        retention: { runtimeReady: true },
+      });
+      expect(f.ensureNodeWorkerBundle).toHaveBeenCalledWith(
+        expect.objectContaining({ deviceId: "node-original" }),
       );
-      expect(support.testState.store.get(request.environmentId)?.retention?.runtimeReady).toBe(
-        false,
-      );
-      expect(f.waitForRetainedNode).not.toHaveBeenCalled();
-      events.push("node-repaired");
-    });
-    f.provider.resumeNode = resumeNode;
-    const connected = createDeferredCore();
-    const waiting = createDeferredCore();
-    f.waitForRetainedNode.mockImplementationOnce(async (node, args) => {
-      expect(node).toBe("node-original");
-      expect(resumeNode).toHaveBeenCalledTimes(1);
-      args.assertCurrent();
-      events.push("node-wait");
-      waiting.resolve();
-      await connected.promise;
-      args.assertCurrent();
-    });
-    const service = f.service();
-    await service.suspendRetained(request);
-    const credentialBeforeWake = support.testState.store.getCredential(request.environmentId);
-    const completed = vi.fn();
-    // The real service lock is deliberately held by ensureRetainedRunning: using
-    // the public locking resumer here deadlocks before the node wait is entered.
-    const wake = service.ensureRetainedRunning(request).then(completed);
-    try {
-      await Promise.race([waiting.promise, wake]);
-      expect(events).toEqual(["node-repaired", "node-wait"]);
-      expect(completed).not.toHaveBeenCalled();
-      expect(f.ensureNodeWorkerBundle).not.toHaveBeenCalled();
-    } finally {
-      connected.resolve();
-    }
-    await wake;
-    expect(service.get(request.environmentId)).toMatchObject({
-      leaseId: receipt.leaseId,
-      nodeDeviceId: "node-original",
-      ownerEpoch: request.expectedOwnerEpoch,
-      resourceReceipt: receipt,
-      retention: { runtimeReady: true },
-    });
-    expect(f.ensureNodeWorkerBundle).toHaveBeenCalledWith(
-      expect.objectContaining({ deviceId: "node-original" }),
-    );
-    expect(provision).not.toHaveBeenCalled();
-    expect(f.destroy).not.toHaveBeenCalled();
-  });
+      expect(provision).not.toHaveBeenCalled();
+      expect(f.destroy).not.toHaveBeenCalled();
+    },
+  );
 
   it("rejects changed resource identity before launching the retained node", async () => {
     const request = await seed(true);

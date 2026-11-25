@@ -308,8 +308,9 @@ export function createWorkerRetainedLifecycle(
         // Restart must not mistake a partial runtime refresh for usable readiness.
         await setRuntimeAdmission(resumed, request.assertCurrent, signal, false);
         const reconnectSignal = AbortSignal.any([signal, AbortSignal.timeout(120_000)]);
+        // Restore the saved process first; current worker artifacts are installed
+        // through refreshRuntime below after that node reconnects.
         await options.resumeNode(resumed.environmentId, {
-          ...(resumed.state === "attached" ? { upgradeRuntime: true } : {}),
           signal: reconnectSignal,
           assertCurrent: assertRunning,
         });
