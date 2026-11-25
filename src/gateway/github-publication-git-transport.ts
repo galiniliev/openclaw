@@ -19,10 +19,12 @@ import {
   parseGitHubPublicationBaseRef,
 } from "./github-publication-base.js";
 import { publicationCommandEnv } from "./github-publication-command-env.js";
-import { GitHubPublicationApiError } from "./github-publication-failure.js";
+import { createGitHubPublicationCommandError } from "./github-publication-failure.js";
+import type { GitHubPublicationApiContext } from "./github-publication-failure.js";
 import { createGitHubPublicationGitError } from "./github-publication-git-error.js";
 
 type GitCommandOptions = {
+  apiCredentialSource?: GitHubPublicationApiContext["credentialSource"];
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   prepareEnv?: () => NodeJS.ProcessEnv;
@@ -84,13 +86,11 @@ export async function requirePublicationCommand(
 ): Promise<string> {
   const result = await runPublicationCommand(argv, options);
   if (result.code !== 0 || result.error) {
-    if (argv[0] === "gh") {
-      throw new GitHubPublicationApiError(result, options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS);
-    }
-    throw createCommandError(
-      argv[0] ?? "command",
-      { ...result, stdout: Buffer.alloc(0) },
-      { timeoutMs: options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS },
+    throw createGitHubPublicationCommandError(
+      argv,
+      result,
+      options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+      options.apiCredentialSource,
     );
   }
   return result.stdout.toString("utf8").trim();

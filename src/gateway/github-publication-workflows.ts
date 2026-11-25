@@ -11,6 +11,7 @@ import {
   type runPublicationCommand,
 } from "./github-publication-git-transport.js";
 import type { GitHubPublicationRequesterPolicy } from "./github-publication-requester.js";
+import type { GitHubPublicationTreeMetadata } from "./github-publication-trees.js";
 import type { GitHubRepositoryPublicationSnapshot } from "./github-repository-publication-snapshot.js";
 
 const workflowDirectory = ".github/workflows/";
@@ -89,8 +90,6 @@ async function hasUnapprovedGitHubPublicationWorkflowChanges(params: {
   );
 }
 
-type TreeEntry = { path: string; mode: string; sha: string };
-
 function unavailableWorkflowTree() {
   return new GitHubPublicationKnownFailure("GitHub workflow definitions could not be verified.", {
     code: "unavailable",
@@ -109,44 +108,14 @@ export async function hasRepositoryGitHubPublicationWorkflowChanges(params: {
     | { repository: string; ancestorTree: string; sourceAncestorTree: string; targetTree: string }
     | undefined
   >;
-  readTree: (repository: string, sha: string) => Promise<unknown>;
+  readTree: GitHubPublicationTreeMetadata["readTree"];
 }): Promise<boolean> {
-  const trees = new Map<string, Promise<TreeEntry[]>>();
-  const readTree = (repository: string, sha: string): Promise<TreeEntry[]> => {
-    const key = repository + "\0" + sha;
-    return getOrCreatePromise(trees, key, async () => {
-      const value = await params.readTree(repository, sha);
-      if (
-        !isRecord(value) ||
-        value.sha !== sha ||
-        value.truncated !== false ||
-        !Array.isArray(value.tree)
-      ) {
-        throw unavailableWorkflowTree();
-      }
-      const names = new Set<string>();
-      return value.tree.map((entry): TreeEntry => {
-        if (
-          !isRecord(entry) ||
-          typeof entry.path !== "string" ||
-          !entry.path ||
-          entry.path.includes("/") ||
-          names.has(entry.path) ||
-          typeof entry.sha !== "string" ||
-          !/^[a-f0-9]{40}$/u.test(entry.sha) ||
-          typeof entry.mode !== "string" ||
-          !(
-            (entry.mode === "040000" && entry.type === "tree") ||
-            (entry.mode === "160000" && entry.type === "commit") ||
-            (["100644", "100755", "120000"].includes(entry.mode) && entry.type === "blob")
-          )
-        ) {
-          throw unavailableWorkflowTree();
-        }
-        names.add(entry.path);
-        return { path: entry.path, mode: entry.mode, sha: entry.sha };
-      });
-    });
+  const readTree = async (repository: string, sha: string) => {
+    const value = await params.readTree(repository, sha);
+    if (!value?.complete) {
+      throw unavailableWorkflowTree();
+    }
+    return value.entries;
   };
   const workflows = async (repository: string, root: string) => {
     let entries = await readTree(repository, root);

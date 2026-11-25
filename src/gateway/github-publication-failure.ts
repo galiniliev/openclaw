@@ -38,9 +38,72 @@ export class GitHubPublicationKnownFailure extends Error {
   }
 }
 
+export type GitHubPublicationApiContext = {
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD";
+  endpointKind:
+    | "blob"
+    | "tree"
+    | "commit"
+    | "ref"
+    | "compare"
+    | "repository"
+    | "pull-request"
+    | "graphql"
+    | "other";
+  credentialSource?: "system-detected" | "system-configured" | "agent-override" | "personal";
+};
+
+export function describeGitHubPublicationApiContext(
+  argv: readonly string[],
+  credentialSource?: GitHubPublicationApiContext["credentialSource"],
+): GitHubPublicationApiContext {
+  const methodValue = argv[argv.indexOf("--method") + 1];
+  const method = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"].find(
+    (value) => value === methodValue,
+  );
+  const endpoint =
+    argv.find((value) => value === "graphql" || value.startsWith("repos/"))?.split("?")[0] ?? "";
+  const endpointKind =
+    endpoint === "graphql"
+      ? "graphql"
+      : /\/git\/blobs(?:\/[^/]+)?$/u.test(endpoint)
+        ? "blob"
+        : /\/git\/trees(?:\/[^/]+)?$/u.test(endpoint)
+          ? "tree"
+          : /\/git\/commits(?:\/[^/]+)?$/u.test(endpoint)
+            ? "commit"
+            : /\/git\/(?:ref|refs|matching-refs)\//u.test(endpoint)
+              ? "ref"
+              : endpoint.includes("/compare/")
+                ? "compare"
+                : /\/pulls(?:\/[^/]+)?$/u.test(endpoint)
+                  ? "pull-request"
+                  : /^repos\/[^/]+\/[^/]+$/u.test(endpoint)
+                    ? "repository"
+                    : "other";
+  return {
+    ...(method === "GET" ||
+    method === "POST" ||
+    method === "PUT" ||
+    method === "PATCH" ||
+    method === "DELETE" ||
+    method === "HEAD"
+      ? { method }
+      : {}),
+    endpointKind,
+    credentialSource,
+  };
+}
+
 /** Only transport outcome facts cross into a public receipt, never command output. */
 export class GitHubPublicationApiError extends Error {
-  constructor(result: BufferedCommandResult, timeoutMs: number) {
+  readonly code = "GITHUB_PUBLICATION_API_ERROR";
+  readonly transport;
+  constructor(
+    result: BufferedCommandResult,
+    timeoutMs: number,
+    context: GitHubPublicationApiContext = { endpointKind: "other" },
+  ) {
     const reason = createCommandError(
       "GitHub API command",
       {
@@ -53,7 +116,73 @@ export class GitHubPublicationApiError extends Error {
     ).message;
     const status = /\(HTTP ([1-5]\d{2})\)/u.exec(result.stderr.toString("utf8"))?.[1];
     super(`${reason}${status ? `; HTTP ${status}` : ""}.`);
+    const processCode = extractErrorCode(result.error);
+    const networkCode =
+      /\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH)\b/u.exec(
+        result.stderr.toString("utf8"),
+      )?.[0] ??
+      (/^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH)$/u.test(
+        processCode ?? "",
+      )
+        ? processCode
+        : undefined);
+    const httpStatus = status ? Number(status) : undefined;
+    this.transport = {
+      origin: "gateway-managed-publication" as const,
+      ...context,
+      termination: result.termination,
+      exitCode: result.code,
+      signal: result.signal,
+      killed: result.killed,
+      capturedStdoutBytes: result.stdout.length,
+      capturedStderrBytes: result.stderr.length,
+      configuredTimeoutMs: timeoutMs,
+      ...(result.outputLimitStream ? { outputLimitStream: result.outputLimitStream } : {}),
+      ...(httpStatus ? { httpStatus } : {}),
+      ...(networkCode ? { networkCode } : {}),
+      ...(/^(?:ENOENT|EACCES|ENOMEM|EMFILE|ENFILE)$/u.test(processCode ?? "")
+        ? { processCode }
+        : {}),
+      reasonFamily:
+        result.termination === "timeout" || result.termination === "no-output-timeout"
+          ? "timeout"
+          : result.termination === "output-limit"
+            ? "output-limit"
+            : result.termination === "signal"
+              ? "signal"
+              : networkCode
+                ? "network"
+                : httpStatus === 401
+                  ? "authentication"
+                  : httpStatus === 429
+                    ? "rate-limit"
+                    : httpStatus
+                      ? "http"
+                      : processCode
+                        ? "local-process"
+                        : "unknown",
+    };
   }
+}
+
+/** Preserve Git command failures while keeping GitHub transport output out of public errors. */
+export function createGitHubPublicationCommandError(
+  argv: readonly string[],
+  result: BufferedCommandResult,
+  timeoutMs: number,
+  credentialSource?: GitHubPublicationApiContext["credentialSource"],
+): Error {
+  return argv[0] === "gh"
+    ? new GitHubPublicationApiError(
+        result,
+        timeoutMs,
+        describeGitHubPublicationApiContext(argv, credentialSource),
+      )
+    : createCommandError(
+        argv[0] ?? "command",
+        { ...result, stdout: Buffer.alloc(0) },
+        { timeoutMs },
+      );
 }
 
 /** Shared Git reads and personal publication can have different repository permissions. */
@@ -203,6 +332,7 @@ export function recordGitHubPublicationFailure(
   error: unknown,
   row: { request_id: string; session_id: string },
   stage = "execution",
+  blobs?: { total: number; reused: number; completed: number },
 ): PublicationFailure {
   const failure = resolveGitHubPublicationFailure(error);
   if (!(error instanceof GitHubPublicationKnownFailure)) {
@@ -214,12 +344,39 @@ export function recordGitHubPublicationFailure(
         errorCode: extractErrorCode(error),
         stage,
         errorStacks: readErrorStackFrames(error),
+        ...(error instanceof GitHubPublicationApiError ? { transport: error.transport } : {}),
+        ...(blobs
+          ? { blobs: { total: blobs.total, reused: blobs.reused, completed: blobs.completed } }
+          : {}),
       });
     } catch {
       // A diagnostic sink cannot change publication settlement.
     }
   }
   return failure;
+}
+
+/** Phase boundaries are bounded per execution and never include command or source content. */
+export function recordGitHubPublicationProgress(
+  row: { request_id: string; session_id: string; execution_id?: string | null },
+  stage: string,
+  elapsedMs: number,
+  blobs?: { total: number; reused: number; completed: number },
+): void {
+  try {
+    createSubsystemLogger("gateway/github-publication").info("Repository publication progress", {
+      requestId: row.request_id,
+      sessionId: row.session_id,
+      executionId: row.execution_id,
+      stage,
+      elapsedMs,
+      ...(blobs
+        ? { blobs: { total: blobs.total, reused: blobs.reused, completed: blobs.completed } }
+        : {}),
+    });
+  } catch {
+    // Optional diagnostics cannot change publication or its settlement.
+  }
 }
 
 /**

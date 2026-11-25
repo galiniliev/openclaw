@@ -307,8 +307,14 @@ export async function createRepositoryPublicationFixture(
       return jsonResult({ sha });
     }
     if (endpoint.includes("/git/trees/")) {
-      const sha = endpoint.split("/").at(-1)!;
-      const tree = git(["ls-tree", "-z", sha])
+      const url = new URL(endpoint, "https://github.test/");
+      const sha = url.pathname.split("/").at(-1)!;
+      const tree = git([
+        "ls-tree",
+        "-z",
+        ...(url.searchParams.get("recursive") === "1" ? ["-r"] : []),
+        sha,
+      ])
         .split("\0")
         .filter(Boolean)
         .map((record) => {

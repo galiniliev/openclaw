@@ -218,6 +218,8 @@ Commit transfer uses a Git pack limited to 256 MiB in workspace-result upload v2
 
 Codex `remote-exec` sessions and the Control UI **Publish PR** action use the Gateway publication broker; remote-exec agents request publication with `github_publish`. Repository-only publication uses an accepted Git-normalized checkpoint without creating a Gateway checkout. Shared or explicitly selected personal publication can use that checkpoint after Stop; personal credentials remain on the Gateway. See [Publish with your account](/concepts/user-model#publish-with-your-account).
 
+Managed repository publication reuses blob objects verified in the publishing repository. Unavailable object metadata keeps the normal upload path; it does not relax workflow permission or branch checks. Operator logs report publication phases and planned, reused, and completed blob counts. API failures retain safe transport facts such as endpoint kind, exit status, and observed HTTP status without command arguments, credentials, or repository content.
+
 ### Resolve conflicts and queued follow-ups
 
 Stage new Gateway files with `git add` to include them in the next worker reconciliation. Unstaged local-only files remain outside the worker workspace, including files selected by worker changes to ignore rules.

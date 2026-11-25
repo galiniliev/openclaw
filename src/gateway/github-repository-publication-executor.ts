@@ -4,7 +4,7 @@ import { resolveGitHubHost } from "../agents/github-host-runtime.js";
 import { githubRepositoryUrl } from "../agents/github-host.js";
 import type { InternalSessionEntry } from "../config/sessions/types.js";
 import type { RepositoryGitHubPublicationRow } from "../state/github-publication-read.types.js";
-import { runTasksWithConcurrency } from "../utils/run-with-concurrency.js";
+import { uploadGitHubPublicationBlobs } from "./github-publication-blobs.js";
 import { prepareGitHubPublicationContent } from "./github-publication-content.js";
 import {
   createGitHubPublicationExecutionIdentity,
@@ -18,6 +18,7 @@ import {
   GitHubPublicationRequesterUnavailableError,
   GitHubPublicationWorkspaceChangedError,
   recordGitHubPublicationFailure,
+  recordGitHubPublicationProgress,
   gitHubPublicationWorkerReadFailure,
 } from "./github-publication-failure.js";
 import { GitHubPublicationRecoveryPendingError } from "./github-publication-git-index.js";
@@ -27,6 +28,7 @@ import {
   hasGitHubPublicationMessageFooter,
   requirePublicationCommand,
   runPublicationCommand,
+  TREE_LISTING_MAX_OUTPUT_BYTES,
 } from "./github-publication-git-transport.js";
 import { requestGitHubPublicationJson as api } from "./github-publication-json-read.js";
 import {
@@ -37,15 +39,13 @@ import {
 import { projectGitHubPublicationResult } from "./github-publication-receipt.js";
 import { readRepositoryGitHubPublicationInputAsync } from "./github-publication-store-async.js";
 import type { RepositoryGitHubPublicationExecutionAsync } from "./github-publication-store-async.js";
+import { createGitHubPublicationTreeMetadata } from "./github-publication-trees.js";
 import {
   hasRepositoryGitHubPublicationWorkflowChanges,
   hasUniqueGitHubPublicationWorkflowAncestor,
   prepareGitHubPublicationWorkflowGuard,
 } from "./github-publication-workflows.js";
-import {
-  readGitHubRepositoryPublicationBlob,
-  type GitHubRepositoryPublicationSnapshot,
-} from "./github-repository-publication-snapshot.js";
+import type { GitHubRepositoryPublicationSnapshot } from "./github-repository-publication-snapshot.js";
 import { GatewayOperatorAccessUnavailableError } from "./operator-access-policy.js";
 import type { PrepareRepositoryPublicationIntegration } from "./repository-publication-integration.js";
 import { SessionMutationAuthorizationChangedError } from "./session-sharing.js";
@@ -80,8 +80,13 @@ export async function executeRepositoryGitHubPublication(params: {
   const { assertCurrent } = executionIdentity;
   let dispatched = row.last_effect !== null;
   let stage = "preflight";
+  const startedAt = performance.now();
+  let blobs: { total: number; reused: number; completed: number } | undefined;
+  const reportProgress = () =>
+    recordGitHubPublicationProgress(row, stage, performance.now() - startedAt, blobs);
   let integration: Awaited<ReturnType<PrepareRepositoryPublicationIntegration>> | undefined;
   try {
+    reportProgress();
     assertCurrent();
     const { push_repository: pushRepository, repository, base_branch: baseBranch, branch } = row;
     if (
@@ -97,6 +102,23 @@ export async function executeRepositoryGitHubPublication(params: {
       );
     }
     let identity = await executionIdentity.refreshIdentity();
+    const treeMetadata = createGitHubPublicationTreeMetadata({
+      host: () => identity.host ?? resolveGitHubHost(),
+      readCommit: async (owner, sha) =>
+        owner === pushRepository && sha === snapshot.baseCommit
+          ? base
+          : owner === comparisonRepository && sha === comparisonCommit
+            ? comparison
+            : api("repos/" + owner + "/git/commits/" + sha, identity, assertCurrent),
+      readTree: (owner, sha, recursive) =>
+        api(
+          "repos/" + owner + "/git/trees/" + sha + (recursive ? "?recursive=1" : ""),
+          identity,
+          assertCurrent,
+          undefined,
+          TREE_LISTING_MAX_OUTPUT_BYTES,
+        ),
+    });
     const refreshIdentity = async () => (identity = await executionIdentity.refreshIdentity());
     const endpoint = "repos/" + pushRepository + "/git/";
     const sourceRepository = await api("repos/" + pushRepository, identity, assertCurrent);
@@ -394,8 +416,7 @@ export async function executeRepositoryGitHubPublication(params: {
                   : await readTreeSha(mergeBase);
             return { repository, ancestorTree, sourceAncestorTree, targetTree };
           },
-          readTree: (owner, sha) =>
-            api("repos/" + owner + "/git/trees/" + sha, identity, assertCurrent),
+          readTree: treeMetadata.readTree,
         }),
     );
     const assertPublicationAction = () => {
@@ -437,6 +458,7 @@ export async function executeRepositoryGitHubPublication(params: {
         throw new Error("GitHub publication integration identity is unavailable.");
       }
       stage = "integration-and-commit";
+      reportProgress();
       const worker = await prepareGitHubPublicationWorkerIdentity({
         agentId: row.agent_id,
         signal: params.signal,
@@ -477,38 +499,34 @@ export async function executeRepositoryGitHubPublication(params: {
         await worker.release();
       }
       assertAction();
-      const blobRoots = new Map<string, string>();
-      for (const selected of [
-        { snapshot, root: params.snapshotRoot },
-        { snapshot: integration.snapshot, root: integration.snapshotRoot },
-      ]) {
-        for (const entry of selected.snapshot.entries) {
-          if (entry.sha !== null && entry.mode !== "160000") {
-            blobRoots.set(entry.sha, selected.root);
-          }
-        }
-      }
-      const shas = [...blobRoots.keys()];
       identity = await refreshIdentity();
-      const uploaded = await runTasksWithConcurrency({
-        limit: 4,
-        errorMode: "stop",
-        tasks: shas.map((sha) => async () => {
-          assertCurrent();
-          const bytes = await readGitHubRepositoryPublicationBlob(blobRoots.get(sha)!, sha);
-          assertCurrent();
-          const blob = await api(endpoint + "blobs", identity, assertAction, {
-            content: bytes.toString("base64"),
-            encoding: "base64",
-          });
-          if (objectSha(blob) !== sha) {
-            throw new Error("GitHub publication blob content changed.");
-          }
-        }),
+      stage = "blob-planning";
+      reportProgress();
+      const uploadProgress = (blobs = { total: 0, reused: 0, completed: 0 });
+      await uploadGitHubPublicationBlobs({
+        snapshots: [
+          { snapshot, root: params.snapshotRoot },
+          { snapshot: integration.snapshot, root: integration.snapshotRoot },
+        ],
+        metadata: treeMetadata,
+        repository: pushRepository,
+        roots: [
+          snapshot.baseTree,
+          ...(comparisonRepository === pushRepository ? [objectSha(comparison.tree)] : []),
+        ],
+        targetCommit: repository === pushRepository ? remoteBase : undefined,
+        identity,
+        endpoint,
+        assertCurrent,
+        assertAction,
+        progress: uploadProgress,
+        onProgress: () => {
+          stage = "blob-upload";
+          reportProgress();
+        },
       });
-      if (uploaded.hasError) {
-        throw uploaded.firstError;
-      }
+      stage = "tree-and-commit";
+      reportProgress();
       const createTree = async (value: GitHubRepositoryPublicationSnapshot) => {
         const tree =
           value.entries.length === 0
@@ -569,6 +587,7 @@ export async function executeRepositoryGitHubPublication(params: {
     }
     if (remoteHead !== headCommit) {
       stage = "push";
+      reportProgress();
       identity = await refreshIdentity();
       assertAction();
       await execution.recordEffect("push");
@@ -617,6 +636,7 @@ export async function executeRepositoryGitHubPublication(params: {
       }
     }
     stage = "pull-request";
+    reportProgress();
     let url = await findPullRequest();
     if (!url) {
       identity = await refreshIdentity();
@@ -683,7 +703,7 @@ export async function executeRepositoryGitHubPublication(params: {
       }
       return projectGitHubPublicationResult(interrupted);
     }
-    const failure = recordGitHubPublicationFailure(error, row, stage);
+    const failure = recordGitHubPublicationFailure(error, row, stage, blobs);
     return projectGitHubPublicationResult(
       await execution.complete({
         requestId: row.request_id,

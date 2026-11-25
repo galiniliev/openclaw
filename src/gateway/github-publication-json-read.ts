@@ -64,6 +64,7 @@ export async function requestGitHubPublicationJson(
   identity: PreparedGitHubPublicationIdentity,
   assertCurrent: () => void,
   body?: unknown,
+  maxOutputBytes?: number,
 ): Promise<unknown> {
   assertCurrent();
   const raw = await requirePublicationCommand(
@@ -74,6 +75,8 @@ export async function requestGitHubPublicationJson(
     ),
     {
       env: identity.env,
+      apiCredentialSource: identity.source,
+      ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
       beforeRun: assertCurrent,
       ...(body === undefined ? {} : { input: JSON.stringify(body) }),
     },

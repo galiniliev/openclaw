@@ -69,7 +69,7 @@ const rejected = {
 const writes = () => mocks.runCommand.mock.calls.filter(([args]) => args.includes("POST"));
 const treeReads = () =>
   mocks.runCommand.mock.calls.flatMap(([args]) =>
-    args.filter((arg: string) => arg.includes("/git/trees/")),
+    args.filter((arg: string) => arg.includes("/git/trees/") && !arg.includes("?recursive=1")),
   );
 const json = (value: unknown) => commandResult(JSON.stringify(value));
 const checkpointRef = async (f: { repository: { workspace: { workspaceId: string } } }) =>
@@ -430,7 +430,9 @@ describe("repository checkpoint workflow authority", () => {
       const f = await createFixture();
       const transport = mocks.runCommand.getMockImplementation()!;
       mocks.runCommand.mockImplementation(async (args, options) => {
-        if (args.some((arg: string) => arg.includes("/git/trees/"))) {
+        if (
+          args.some((arg: string) => arg.includes("/git/trees/") && !arg.includes("?recursive=1"))
+        ) {
           return json({
             sha: failure === "different-tree" ? "a".repeat(40) : f.repository.baseTree,
             tree: [],
