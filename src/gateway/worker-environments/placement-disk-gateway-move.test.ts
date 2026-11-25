@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { expect, it, vi } from "vitest";
 import { managedWorktrees } from "../../agents/worktrees/service.js";
-import { getRuntimeConfig } from "../../config/config.js";
+import { getRuntimeConfig, setRuntimeConfigSnapshot } from "../../config/config.js";
 import * as sessionEntries from "../../config/sessions/session-accessor.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../../infra/kysely-sync.js";
 import type { WorkerRetentionObservation } from "../../plugins/worker-retention.types.js";
@@ -40,13 +40,25 @@ import { requireWorkspaceResultGit } from "./workspace-result-git.js";
 import { useRepositoryWorkspaceResultFixture } from "./workspace-result-repository.test-support.js";
 
 // mock-isolation: Git and node transfer use a local origin, never a live GitHub identity.
-vi.mock("./repository-github-identity.js", () => ({
-  prepareRepositoryGitHubIdentity: async (_agentId: string, assertCurrent: () => void) => ({
-    token: undefined,
-    assertSelected: assertCurrent,
-    start: async (start: () => Promise<unknown>) => await start(),
-  }),
-}));
+const github = vi.hoisted(() => ({ real: false, calls: 0 }));
+vi.mock("./repository-github-identity.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./repository-github-identity.js")>();
+  return {
+    ...actual,
+    prepareRepositoryGitHubIdentity: async (
+      ...args: Parameters<typeof actual.prepareRepositoryGitHubIdentity>
+    ) => {
+      github.calls++;
+      return github.real
+        ? actual.prepareRepositoryGitHubIdentity(...args)
+        : {
+            token: undefined,
+            assertSelected: args[1],
+            start: async (start: () => Promise<unknown>) => await start(),
+          };
+    },
+  };
+});
 const { fixture } = useRepositoryWorkspaceResultFixture();
 const url = "https://github.com/synthetic/disk-move-fixture.git";
 
@@ -54,6 +66,10 @@ it.each([
   "complete",
   "uncaptured",
   "uncaptured-recovery",
+  "local-app",
+  "local-app-recovery",
+  "local-app-missing-base",
+  "local-app-missing-object",
   "paused",
   "paused-refresh",
   "paused-recovery",
@@ -74,15 +90,28 @@ it.each([
   const incognito = scenario.startsWith("incognito");
   const paused = scenario.startsWith("paused");
   const uncaptured = scenario.startsWith("uncaptured");
+  const localApp = scenario.startsWith("local-app");
+  const missingLocal =
+    scenario === "local-app-missing-base" || scenario === "local-app-missing-object";
   const boundary =
-    scenario.startsWith("paused-recovery") || scenario === "uncaptured-recovery"
-      ? "before-export"
-      : scenario === "incognito" || paused || uncaptured
-        ? "complete"
-        : scenario === "incognito-revoked"
-          ? "revoked"
-          : scenario;
-  const f = await fixture("remote-exec", false, incognito, url);
+    scenario === "local-app-recovery"
+      ? "captured"
+      : missingLocal
+        ? "missing-local"
+        : scenario.startsWith("paused-recovery") || scenario === "uncaptured-recovery"
+          ? "before-export"
+          : scenario === "incognito" || paused || uncaptured || localApp
+            ? "complete"
+            : scenario === "incognito-revoked"
+              ? "revoked"
+              : scenario;
+  github.real = false;
+  const f = await fixture(
+    localApp ? "worker-turn" : "remote-exec",
+    scenario === "local-app-missing-object",
+    incognito,
+    url,
+  );
   let repository = await f.bindDisk();
   if (uncaptured) {
     // Same retained-recovery shape as worker-turn-repository-disk.test.ts: the
@@ -103,7 +132,11 @@ it.each([
   }
   assert(repository.diskAuthority);
   await registerClonedProjectRegistry({ path: f.origin, name: "Fixture", originUrl: url });
-  vi.spyOn(cloneRuntime, "readProjectCheckoutRemoteHead").mockResolvedValue(undefined);
+  const remoteHead = vi
+    .spyOn(cloneRuntime, "readProjectCheckoutRemoteHead")
+    .mockResolvedValue(undefined);
+  const fetch = vi.spyOn(cloneRuntime, "ensureProjectCheckoutCommit");
+  const clone = vi.spyOn(cloneRuntime, "cloneProjectCheckout");
   await f.write("committed.txt", "private disk history\n");
   await requireWorkspaceResultGit(f.remote, ["add", "committed.txt"]);
   await requireWorkspaceResultGit(f.remote, [
@@ -117,6 +150,52 @@ it.each([
   ]);
   const head = await requireWorkspaceResultGit(f.remote, ["rev-parse", "HEAD"]);
   await f.write("only-on-disk.txt", "fresh disk result\n");
+  let missingObject: { path: string; bytes: Buffer } | undefined;
+  if (missingLocal) {
+    const object =
+      scenario === "local-app-missing-base"
+        ? repository.baseCommit!
+        : await requireWorkspaceResultGit(f.origin, [
+            "rev-parse",
+            `${repository.baseCommit}:.openclaw/worktree-setup.sh`,
+          ]);
+    const objectPath = path.join(f.origin, ".git", "objects", object.slice(0, 2), object.slice(2));
+    missingObject = { path: objectPath, bytes: await fs.readFile(objectPath) };
+    await fs.rm(objectPath);
+  }
+  if (localApp) {
+    setRuntimeConfigSnapshot({
+      ...getRuntimeConfig(),
+      tools: {
+        github: {
+          kind: "app-installation",
+          profileId: "ghp_00000000000000000000000000000001",
+          app: {
+            appId: 10,
+            installationId: 20,
+            accountId: 42,
+            repositories: [{ id: 40, fullName: "synthetic/disk-move-fixture" }],
+            permissions: { contents: "write", metadata: "read", pull_requests: "write" },
+            privateKey: "synthetic",
+            keyVersion: "synthetic-v1",
+          },
+        },
+      },
+    });
+    github.real = true;
+    github.calls = 0;
+  }
+  let ownClaimWaits = 0;
+  const wait = f.placements.waitForTurnClaimRelease.bind(f.placements);
+  if (localApp) {
+    vi.spyOn(f.placements, "waitForTurnClaimRelease").mockImplementation(async (...args) => {
+      if (f.placements.get(SESSION_ID)?.turnClaim?.claimId.startsWith("reclaim-")) {
+        ownClaimWaits++;
+        throw new Error("Attempted to wait for the recovery owner's own reclaim claim");
+      }
+      return wait(...args);
+    });
+  }
   const records = await createWorkerEnvironmentStore({ database: openOpenClawStateDatabase() });
   const original = records.get(repository.diskAuthority.environmentId)!;
   let observation: WorkerRetentionObservation = {
@@ -351,7 +430,24 @@ it.each([
     );
     // Optional RPC metadata is not part of the success/result/error contract.
     const responses = respond.mock.calls.map((call) => call.slice(0, 3));
-    if (boundary === "complete") {
+    if (missingLocal) {
+      expect(responses).toMatchObject([[false, undefined, { code: "UNAVAILABLE" }]]);
+      expect(github.calls).toBe(0);
+      const pending = (await f.placements.listPendingWorkspaceResultsAsync())[0]!;
+      expect(pending.stagedResultRef).toBeTruthy();
+      expect(pending.workspaceAcceptedAtMs).toBeNull();
+      await h.service.reconcileActive(repository.diskAuthority.environmentId);
+      expect(ownClaimWaits).toBe(0);
+      expect((await f.placements.listPendingWorkspaceResultsAsync())[0]).toMatchObject({
+        claimId: pending.claimId,
+        runId: pending.runId,
+        workspaceAcceptedAtMs: null,
+      });
+      expect(destroy).not.toHaveBeenCalled();
+      assert(missingObject);
+      await fs.writeFile(missingObject.path, missingObject.bytes);
+      await h.service.reconcileActive(repository.diskAuthority.environmentId);
+    } else if (boundary === "complete") {
       expect(responses).toEqual([
         [
           true,
@@ -394,33 +490,38 @@ it.each([
         });
       }
       const previousCaptures = quiesce.mock.calls.length;
-      const restartedStore = createWorkerSessionPlacementStore({
-        database: openOpenClawStateDatabase(),
-      });
-      await restartedStore.clearLocalTurnClaimsAfterRestartAsync();
-      const restarted = await createHarness(
-        openOpenClawStateDatabase(),
-        restartedStore,
-        makeOptions(restartedStore),
-      );
-      await restarted.service.reconcileActive(repository.diskAuthority.environmentId);
-      if (scenario === "paused-recovery-revoked") {
-        expect(records.get(original.environmentId)?.bootstrapReceipt?.bundleHash).toBe(
-          admittedBuild.bundleHash,
+      if (localApp) {
+        await h.service.reconcileActive(repository.diskAuthority.environmentId);
+        expect(ownClaimWaits).toBe(0);
+      } else {
+        const restartedStore = createWorkerSessionPlacementStore({
+          database: openOpenClawStateDatabase(),
+        });
+        await restartedStore.clearLocalTurnClaimsAfterRestartAsync();
+        const restarted = await createHarness(
+          openOpenClawStateDatabase(),
+          restartedStore,
+          makeOptions(restartedStore),
         );
-        expect(records.get(original.environmentId)?.retention?.runtimeReady).toBe(false);
-        expect(destroy).not.toHaveBeenCalled();
-        expect(quiesce).toHaveBeenCalledTimes(previousCaptures);
-        expect((await f.store.get(repository.workspaceId))?.diskAuthority).toEqual(
-          repository.diskAuthority,
-        );
-        expect(await restartedStore.getAsync(SESSION_ID)).toMatchObject({ state: "draining" });
-        return;
-      }
-      if (
-        ["bound", "before-cleanup", "after-cleanup", "released", "reconciling"].includes(boundary)
-      ) {
-        expect(quiesce).toHaveBeenCalledTimes(previousCaptures);
+        await restarted.service.reconcileActive(repository.diskAuthority.environmentId);
+        if (scenario === "paused-recovery-revoked") {
+          expect(records.get(original.environmentId)?.bootstrapReceipt?.bundleHash).toBe(
+            admittedBuild.bundleHash,
+          );
+          expect(records.get(original.environmentId)?.retention?.runtimeReady).toBe(false);
+          expect(destroy).not.toHaveBeenCalled();
+          expect(quiesce).toHaveBeenCalledTimes(previousCaptures);
+          expect((await f.store.get(repository.workspaceId))?.diskAuthority).toEqual(
+            repository.diskAuthority,
+          );
+          expect(await restartedStore.getAsync(SESSION_ID)).toMatchObject({ state: "draining" });
+          return;
+        }
+        if (
+          ["bound", "before-cleanup", "after-cleanup", "released", "reconciling"].includes(boundary)
+        ) {
+          expect(quiesce).toHaveBeenCalledTimes(previousCaptures);
+        }
       }
     }
     expect(
@@ -448,6 +549,14 @@ it.each([
       );
     }
     expect(records.get(original.environmentId)?.state).toBe("destroyed");
+    if (localApp) {
+      expect(github.calls).toBe(0);
+      expect(remoteHead).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+      expect(clone).not.toHaveBeenCalled();
+      expect(ownClaimWaits).toBe(0);
+      expect(local.sessionId).toBe(SESSION_ID);
+    }
   } finally {
     await environments.stop();
     await records.close();

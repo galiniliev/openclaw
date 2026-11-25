@@ -338,26 +338,32 @@ async function materializeCapturedRepositoryWorkspace(
     manifestHash: repository.manifestHash,
   };
   assertCurrent();
-  const github = await prepareRepositoryGitHubIdentity(params.agentId, assertCurrent);
+  // The exact Move's fresh disk capture already requires complete retained Git
+  // history. An unpublished private export can restore from its local pinned base;
+  // no current remote tip or App credential is needed to preserve that history.
+  const localOnly = Boolean(params.diskMove && diskExport && !published);
+  const github = localOnly
+    ? undefined
+    : await prepareRepositoryGitHubIdentity(params.agentId, assertCurrent);
   assertCurrent();
   const cloneOptions = {
     signal: params.signal,
-    token: github.token,
-    assertCurrent: github.assertSelected,
+    token: github?.token,
+    assertCurrent: github?.assertSelected ?? assertCurrent,
   };
   const requiredCommit = published?.pushed_head_commit ?? repository.baseCommit;
-  const project = await github
-    .start(() =>
-      materializeProjectClone(
-        {
-          cfg: params.cfg,
-          gitUrl: repository.url,
-          requiredCommit,
-        },
-        cloneOptions,
-      ),
-    )
-    .catch((error: unknown) => {
+  const prepareProject = () =>
+    materializeProjectClone(
+      {
+        cfg: params.cfg,
+        gitUrl: repository.url,
+        requiredCommit,
+        ...(localOnly ? { localOnly: true as const } : {}),
+      },
+      cloneOptions,
+    );
+  const project = await (github ? github.start(prepareProject) : prepareProject()).catch(
+    (error: unknown) => {
       if (error instanceof ProjectCloneError && error.failure === "auth_required") {
         throw new ProjectCloneError(
           error.failure,
@@ -365,7 +371,8 @@ async function materializeCapturedRepositoryWorkspace(
         );
       }
       throw error;
-    });
+    },
+  );
   assertCurrent();
   const {
     step,
@@ -373,23 +380,26 @@ async function materializeCapturedRepositoryWorkspace(
     run,
   } = createGitHubPublicationCommandRunner(assertCurrent, "session.materialize");
   const source = { url: repository.url, target: project.repoRoot };
-  const remoteHead = await step(() =>
-    readProjectCheckoutRemoteHead({ ...source, branch: repository.branch }, cloneOptions),
-  );
-  if (remoteHead !== (published?.pushed_head_commit ?? undefined)) {
-    throw new Error(
-      "Repository publication branch differs from its recorded push; review the remote branch before retrying the Gateway move",
+  if (!localOnly) {
+    const remoteHead = await step(() =>
+      readProjectCheckoutRemoteHead({ ...source, branch: repository.branch }, cloneOptions),
     );
+    if (remoteHead !== (published?.pushed_head_commit ?? undefined)) {
+      throw new Error(
+        "Repository publication branch differs from its recorded push; review the remote branch before retrying the Gateway move",
+      );
+    }
   }
   const requestedBase = parseGitHubPublicationBaseBranch(repository.requestedRef ?? "HEAD", "HEAD");
-  const baseRef =
-    published?.base_branch ??
-    (requestedBase !== "HEAD" &&
-    (await step(() =>
-      readProjectCheckoutRemoteHead({ ...source, branch: requestedBase }, cloneOptions),
-    ))
-      ? requestedBase
-      : "HEAD");
+  const baseRef = localOnly
+    ? requestedBase
+    : (published?.base_branch ??
+      (requestedBase !== "HEAD" &&
+      (await step(() =>
+        readProjectCheckoutRemoteHead({ ...source, branch: requestedBase }, cloneOptions),
+      ))
+        ? requestedBase
+        : "HEAD"));
   if (published?.pushed_head_commit) {
     const head = published.pushed_head_commit;
     const contents = await command(["git", "show", "-s", "--format=%T%n%P%n%B", head], {

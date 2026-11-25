@@ -6,6 +6,7 @@ import {
 } from "@openclaw/normalization-core/error-coercion";
 import { resolveConfiguredGitHubHost } from "../agents/github-host.js";
 import { slugifyWorktreeTitle } from "../agents/worktrees/name.js";
+import { missingCommitObjects } from "../agents/worktrees/object-hydration.js";
 import { cloneEnvWithPlatformSemantics } from "../config/config-env-vars.js";
 import { resolveStateDir } from "../config/paths.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -37,6 +38,8 @@ import type { ProjectRegistryIdentity, ProjectRegistryRecord } from "./project-r
 
 const PROJECT_CLONE_LEASE_MS = 30_000;
 const PROJECT_CLONE_WAIT_MS = 30_000;
+const LOCAL_SOURCE_UNAVAILABLE =
+  "Complete local repository source is required; prepare or repair the registered project before retrying. The original disk is preserved.";
 
 type ProjectCloneOperationOptions = Pick<OpenClawStateDatabaseOptions, "path" | "env"> & {
   signal?: AbortSignal;
@@ -79,7 +82,10 @@ async function existingCanonicalProject(
 
 /** Materializes and registers a project from an accepted GitHub remote. */
 export async function materializeProjectClone(
-  input: { cfg: OpenClawConfig; gitUrl: string; name?: string; requiredCommit?: string },
+  input: { cfg: OpenClawConfig; gitUrl: string; name?: string } & (
+    | { localOnly: true; requiredCommit: string }
+    | { localOnly?: false; requiredCommit?: string }
+  ),
   options: Pick<OpenClawStateDatabaseOptions, "path" | "env"> & {
     signal?: AbortSignal;
     timeoutMs?: number;
@@ -149,7 +155,27 @@ export async function materializeProjectClone(
                 },
               });
             }
-            if (requiredCommit) {
+            if (input.localOnly) {
+              // An accepted disk export may use a complete local base without
+              // GitHub credentials. Missing objects never authorize a fetch.
+              const missing = await missingCommitObjects(current.repoRoot, input.requiredCommit, {
+                env: { ...env, GIT_NO_REPLACE_OBJECTS: "1" },
+                signal: checkoutLease.signal,
+                timeoutMs,
+                beforeRun: () => {
+                  assertCloneCurrent();
+                  checkoutLease.assertCurrent();
+                },
+              }).catch(() => {
+                assertCloneCurrent();
+                checkoutLease.assertCurrent();
+                throw new ProjectCloneError("clone_failed", LOCAL_SOURCE_UNAVAILABLE);
+              });
+              if (missing.length) {
+                throw new ProjectCloneError("clone_failed", LOCAL_SOURCE_UNAVAILABLE);
+              }
+              await checkoutLease.assertOwned();
+            } else if (requiredCommit) {
               await ensureProjectCheckoutCommit(
                 { url: parsed.url, target: current.repoRoot, commit: requiredCommit },
                 {
@@ -172,6 +198,9 @@ export async function materializeProjectClone(
         if (existing) {
           return existing;
         }
+      }
+      if (input.localOnly) {
+        throw new ProjectCloneError("clone_failed", LOCAL_SOURCE_UNAVAILABLE);
       }
       const displayName = name?.trim() || parsed.name;
       const directoryName = slugifyWorktreeTitle(displayName) ?? "project";

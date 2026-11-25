@@ -21,6 +21,7 @@ import {
   type WorkerSessionPlacementIdentity,
 } from "./placement-record.js";
 import { isFailedWorkerPlacementEnvironmentGone } from "./placement-target.js";
+import { isRepositoryDiskGatewayMoveResult } from "./placement-workspace-result-owner.js";
 import type {
   WorkerPlacementDispatchRequest,
   WorkerPlacementAuthorization,
@@ -395,6 +396,17 @@ export function createWorkerPlacementMoveService(options: {
         state === "reconciling"
       ) {
         protectedSessions.add(intent.sessionId);
+      }
+      // The exact disk result owns continuation, including after a failed export
+      // or import. Generic reclaim would wait for that same reclaim claim to end.
+      if (
+        isRepositoryDiskGatewayMoveResult(
+          placement,
+          projection.pendingResults.get(intent.sessionId),
+          intent,
+        )
+      ) {
+        continue;
       }
       await recover(intent, placement).catch(() => undefined);
     }
