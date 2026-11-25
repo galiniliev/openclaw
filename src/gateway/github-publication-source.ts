@@ -18,7 +18,6 @@ import {
   createSqliteWorkerOperationAdmission,
   type SqliteWorkerAdmissionFactory,
 } from "../infra/sqlite-worker-operation-admission.js";
-import { sessionChanges } from "../sessions/session-row-changes.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { githubPublicationReceipts } from "../state/github-publication-receipts.js";
 import { projectGitHubPublicationSessionFacts } from "../state/github-publication-session-facts.js";
@@ -36,7 +35,6 @@ import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worke
 import type { OpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.types.js";
 import { runOpenClawStateWorkerOperation } from "../state/openclaw-state-worker-store.js";
 import { observeUserGitHubConnectionAuthority } from "../state/user-github-connection-events.js";
-import { onUserProfilesChanged } from "../state/user-profile-events.js";
 
 type SourceBinding = {
   context: OpenClawStateWorkerContext;
@@ -172,7 +170,14 @@ async function prepareMemoryPublicationSource(
         released ||
         !isDeepStrictEqual(readMemorySourceFacts(captured, params.selector.sessionKey), memory)
       ) {
-        throw new Error("GitHub publication source authority changed.");
+        throw Object.assign(
+          new Error("GitHub publication source authority changed. (memory source)"),
+          {
+            code: released
+              ? "GITHUB_PUBLICATION_SOURCE_RELEASED"
+              : "GITHUB_PUBLICATION_MEMORY_SOURCE_CHANGED",
+          },
+        );
       }
     },
     retain(operation) {
@@ -215,7 +220,7 @@ export async function prepareGitHubPublicationSource(params: {
   let binding: SourceBinding | undefined;
   const revoke = (reason: string) =>
     closed.abort(
-      Object.assign(new Error("GitHub publication source authority changed."), {
+      Object.assign(new Error(`GitHub publication source authority changed. (${reason})`), {
         code: `GITHUB_PUBLICATION_REVOKED_${reason}`,
       }),
     );
@@ -257,7 +262,6 @@ export async function prepareGitHubPublicationSource(params: {
         revoke("STATE_LIFECYCLE");
       }
     }),
-    onUserProfilesChanged(() => revoke("PROFILE_FACTS")),
     observeUserGitHubConnectionAuthority(({ databasePath, changedOwners }) => {
       if (
         databasePath === context.admission.databasePath &&
@@ -282,12 +286,10 @@ export async function prepareGitHubPublicationSource(params: {
         revoke("PUBLICATION_FACTS");
       }
     }),
-    sessionChanges.subscribeFacts((change) => {
-      if ("all" in change || change.sessionKey === params.selector.sessionKey) {
-        revoke("SESSION_FACTS");
-      }
-    }),
   );
+  // Session/profile notifications also carry unrelated runtime and display progress.
+  // Live requester policy and the transaction-held native predicate recheck the actual
+  // authority facts; only resource/capability lifetimes revoke this captured handle.
   try {
     let incarnation = destinationIncarnations.get(context.admission);
     if (!incarnation) {

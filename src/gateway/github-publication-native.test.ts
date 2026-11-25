@@ -11,6 +11,7 @@ import { setRuntimeConfigSnapshot } from "../config/config.js";
 import { runNodeWorkerWorkspaceTransfer } from "../node-host/node-worker-transfer-client.js";
 import type { runCommandBuffered } from "../process/exec.js";
 import { sessionChanges } from "../sessions/session-row-changes.js";
+import { holdNextReply } from "../state/github-publication.worker.test-support.js";
 import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import { NODE_WORKSPACE_EMPTY_MANIFEST_REF } from "../worker/node-workspace-transfer-protocol.js";
 import {
@@ -386,9 +387,23 @@ describe("combined native publication proof", () => {
         revoke,
       };
     });
-    const result = await f.coordinator.requestForSessionV2(
+    const sourceRead = holdNextReply("githubPublication.sourceFacts");
+    onTestFinished(() => sourceRead.release());
+    const publishing = f.coordinator.requestForSessionV2(
       f.request("worker-app-authority", f.guest),
     );
+    try {
+      await Promise.race([
+        sourceRead.ready,
+        publishing.then(() => {
+          throw new Error("Publication settled before native source preparation");
+        }),
+      ]);
+      sessionChanges.emit({ all: true, scope: "runtime" });
+    } finally {
+      sourceRead.release();
+    }
+    const result = await publishing;
     expect(result).toMatchObject({ status: "published" });
     expect(executionAdmitted).toBe(true);
     expect(mocks.prepareRepositoryIntegration).toHaveBeenCalled();

@@ -186,8 +186,30 @@ export function assertGitHubPublicationSourceFacts(
   selector: GitHubPublicationSourceSelector,
   expected: GitHubPublicationSourceFacts,
 ): void {
-  if (!isDeepStrictEqual(readGitHubPublicationSourceFacts(sourceDb, stateDb, selector), expected)) {
-    throw new Error("GitHub publication source authority changed.");
+  const actual = readGitHubPublicationSourceFacts(sourceDb, stateDb, selector);
+  if (!isDeepStrictEqual(actual, expected)) {
+    const fields = [
+      "entry",
+      "members",
+      "profile",
+      "worktree",
+      "ownerWorktree",
+      "repositoryWorkspace",
+      "placement",
+      "connection",
+    ] satisfies (keyof GitHubPublicationSourceFacts)[];
+    const changedAuthorityFields = fields.filter(
+      (field) => !isDeepStrictEqual(actual[field], expected[field]),
+    );
+    throw Object.assign(
+      new Error(
+        `GitHub publication source authority changed. Fields: ${changedAuthorityFields.join(", ")}.`,
+      ),
+      {
+        code: "GITHUB_PUBLICATION_SOURCE_FACTS_CHANGED",
+        changedAuthorityFields,
+      },
+    );
   }
 }
 

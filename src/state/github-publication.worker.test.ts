@@ -511,7 +511,7 @@ it("runs policy writes before source reservation and refuses the changed source"
       { path: context.admission.databasePath },
     );
   await expect(insertRepositoryGitHubPublicationAsync(row, source)).rejects.toThrow(
-    "source authority changed",
+    "Fields: repositoryWorkspace",
   );
   expectRows(row, []);
 });

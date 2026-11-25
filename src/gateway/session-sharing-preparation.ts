@@ -69,6 +69,9 @@ import { findCanonicalStoreMatch } from "./session-utils-store-selection.js";
 export { SessionMutationFactsUnavailableError, captureSessionMutationRouting };
 export type { PreparedSessionSourceFacts, SessionFactsRead };
 
+/** Runtime policy must be prepared again; this does not certify unchanged access. */
+export class SessionMutationRuntimeFactsChangedError extends SessionMutationFactsUnavailableError {}
+
 /** Negative reads retain the same keyed publication and source guards as existing rows. */
 export function prepareSessionMutationFacts(
   params: SessionFactsRequest & { allowMissing: true },
@@ -106,7 +109,7 @@ export async function prepareSessionMutationFacts(
   let active = true;
   let beforeDiscovery = params.storageReady !== undefined;
   let waitingForStorage = false;
-  let invalidated = false;
+  let invalidated: "runtime" | "source" | undefined;
   let pendingTopologyChanges: SessionRowChange[] | undefined;
   let facts: PreparedSessionSourceFacts | undefined;
   let assertRegistryPublication: (() => void) | undefined;
@@ -126,11 +129,13 @@ export async function prepareSessionMutationFacts(
   };
   const assertActive = () => {
     if (!active || invalidated) {
-      throw new SessionMutationFactsUnavailableError();
+      throw active && invalidated === "runtime"
+        ? new SessionMutationRuntimeFactsChangedError()
+        : new SessionMutationFactsUnavailableError();
     }
   };
-  const invalidate = () => {
-    invalidated = true;
+  const invalidate = (runtimeOnly = false) => {
+    invalidated = runtimeOnly && invalidated !== "source" ? "runtime" : "source";
   };
   const acquisition = createSessionSharingFactAcquisition({
     followLifecycle: params.followLifecycle,
@@ -204,7 +209,7 @@ export async function prepareSessionMutationFacts(
         // The next assertion still checks the retained physical source and current facts.
         return;
       }
-      invalidate();
+      invalidate(change.scope === "runtime" || change.scope === "automation");
       return;
     }
     if (
