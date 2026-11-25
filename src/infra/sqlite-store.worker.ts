@@ -5,6 +5,7 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { scheduleOpenClawCompileCacheFlush } from "../../node-compile-cache.mjs";
 import { routeLogsToStderr } from "../logging/console.js";
 import { flushLogger } from "../logging/logger.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import { drainProcessOutput } from "../process/output-drain.js";
 import {
   encodeOpenClawStateWorkerError,
@@ -14,6 +15,7 @@ import {
   getDatabaseEngineSelection,
   installDatabaseEngineSelection,
 } from "./database-engine/context.js";
+import { readErrorStackFrames } from "./error-graph-internal.js";
 import { captureSqliteNativeRuntimeAdmission } from "./node-sqlite.js";
 import { bindPostgresPool, postgresPoolWorkerFailure } from "./postgres-sync/pool-state.js";
 import {
@@ -198,6 +200,7 @@ async function receive(request: SqliteWorkerRequest): Promise<void> {
   let inputNext = false;
   let openNotEntered = false;
   let commandAdmissionRefused = false;
+  let commandType: string | undefined;
   try {
     if (request.postgresPool) {
       bindPostgresPool(request.postgresPool);
@@ -252,6 +255,7 @@ async function receive(request: SqliteWorkerRequest): Promise<void> {
       const { backend } = actor;
       // SAFETY: The broker serialized a command from this actor's typed store contract.
       const typedCommand = command as SqliteWorkerCommand<SqliteWorkerOperations>;
+      commandType = typedCommand.type;
       return withSqliteReaderOwner(
         { operation: typedCommand.type, ownerKind: "worker", actorId: request.actor },
         async () => {
@@ -627,6 +631,23 @@ async function receive(request: SqliteWorkerRequest): Promise<void> {
     const failure =
       originalError instanceof Error ? originalError : new Error(String(originalError));
     const code = executed ? "outcome-unknown" : "code" in failure ? failure.code : undefined;
+    if (
+      commandType?.startsWith("githubPublication") ||
+      failure.message.startsWith("SQLite source fence")
+    ) {
+      try {
+        // The existing reply omits native stacks; log locations before serialization, never messages.
+        createSubsystemLogger("infra/source-fence").warn("Native publication operation failed", {
+          nativeRequestId: request.id,
+          actorId: request.actor,
+          commandType,
+          errorCode: code,
+          errorStacks: readErrorStackFrames(failure),
+        });
+      } catch {
+        // Diagnostic failure cannot replace the original native outcome.
+      }
+    }
     const errorContext =
       request.stateContext ??
       (request.type === "execute-frame" ? stateContexts.get(request.actor) : undefined);

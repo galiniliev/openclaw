@@ -2,6 +2,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { isMainThread } from "node:worker_threads";
 import { isPromiseLike } from "@openclaw/normalization-core/promise-like";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { getPostgresPhysicalFacts } from "./database-engine/physical-facts.js";
 import { tryReservePostgresTransactionSync } from "./postgres-sync/transaction.js";
@@ -200,7 +201,18 @@ export async function runSqliteSourceFence<T>(
       Atomics.load(decision, 0) !== SOURCE_FENCE_READY ||
       process.hrtime.bigint() >= grant.deadlineNs
     ) {
-      throw new SqliteWorkerError("SQLite source fence authority expired", "closed");
+      const error = new SqliteWorkerError("SQLite source fence authority expired", "closed");
+      try {
+        createSubsystemLogger("infra/source-fence").warn("Native source fence authority refused", {
+          destinationIncarnation: grant.destination.incarnation,
+          sourceIncarnations: grant.sources.map((source) => source.incarnation),
+          decision: Atomics.load(decision, 0),
+          deadlineExpired: process.hrtime.bigint() >= grant.deadlineNs,
+        });
+      } catch {
+        // Preserve the original refusal if diagnostics are unavailable.
+      }
+      throw error;
     }
     for (const { database } of captured) {
       assertTransactionUsable(database);

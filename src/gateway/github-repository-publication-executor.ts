@@ -101,6 +101,7 @@ export async function executeRepositoryGitHubPublication(params: {
   });
   const { assertCurrent } = executionIdentity;
   let dispatched = row.last_effect !== null;
+  let stage = "preflight";
   let integration: Awaited<ReturnType<PrepareRepositoryPublicationIntegration>> | undefined;
   try {
     assertCurrent();
@@ -457,6 +458,7 @@ export async function executeRepositoryGitHubPublication(params: {
       if (!row.checkpoint_digest) {
         throw new Error("GitHub publication integration identity is unavailable.");
       }
+      stage = "integration-and-commit";
       const worker = await prepareGitHubPublicationWorkerIdentity({
         agentId: row.agent_id,
         signal: params.signal,
@@ -587,6 +589,7 @@ export async function executeRepositoryGitHubPublication(params: {
       await execution.updateHead(headCommit);
     }
     if (remoteHead !== headCommit) {
+      stage = "push";
       identity = await refreshIdentity();
       assertAction();
       await execution.recordEffect("push");
@@ -634,6 +637,7 @@ export async function executeRepositoryGitHubPublication(params: {
         throw new Error("GitHub push verification failed.");
       }
     }
+    stage = "pull-request";
     let url = await findPullRequest();
     if (!url) {
       identity = await refreshIdentity();
@@ -700,7 +704,7 @@ export async function executeRepositoryGitHubPublication(params: {
       }
       return projectGitHubPublicationResult(interrupted);
     }
-    const failure = recordGitHubPublicationFailure(error, row);
+    const failure = recordGitHubPublicationFailure(error, row, stage);
     return projectGitHubPublicationResult(
       await execution.complete({
         requestId: row.request_id,

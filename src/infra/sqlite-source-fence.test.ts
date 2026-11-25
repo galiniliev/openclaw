@@ -4,9 +4,10 @@ import { existsSync, symlinkSync } from "node:fs";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { getEnvironmentData, setEnvironmentData } from "node:worker_threads";
-import { afterAll, afterEach, beforeAll, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { awaitGateBeforeSettlement, withinTest } from "../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+import * as subsystem from "../logging/subsystem.js";
 import { openNodeSqliteDatabase } from "./node-sqlite.js";
 import {
   createSqliteSourceFenceAdmission,
@@ -304,12 +305,28 @@ it.for(["caller", "source", "destination"] as const)(
   async (kind, { signal }) => {
     const id = `revoked-${kind}`;
     const operation = await pausedPersist(id, signal, "validate");
+    const warn = vi.fn();
+    const logger = subsystem.createSubsystemLogger("infra/source-fence");
+    const spy = vi.spyOn(subsystem, "createSubsystemLogger").mockReturnValue({ ...logger, warn });
+    cleanups.push(() => {
+      spy.mockRestore();
+    });
     const controller = kind === "caller" ? operation.controller : operation[kind].controller;
     controller.abort(new Error("Fixture owner closed"));
     operation.release();
     await expect(operation.result).rejects.toThrow();
     assertRows(second, id);
     expect(operation.receipts).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(
+      "Source fence admission revoked",
+      expect.objectContaining({
+        decision: 3,
+        deadlineExpired: false,
+        callerAborted: kind === "caller",
+        destinationAborted: kind === "destination",
+        sourceAborted: [kind === "source"],
+      }),
+    );
   },
 );
 
@@ -336,6 +353,14 @@ it.each([
   ["host-admission", { fault: "host-admission" }, {}],
   ["native-source-close", { fault: "source-close" }, {}],
 ] as const)("refuses %s without partial destination rows", async (id, command, options) => {
+  const warn = vi.fn();
+  if (id === "expired") {
+    const logger = subsystem.createSubsystemLogger("infra/source-fence");
+    const spy = vi.spyOn(subsystem, "createSubsystemLogger").mockReturnValue({ ...logger, warn });
+    cleanups.push(() => {
+      spy.mockRestore();
+    });
+  }
   const fixture = id === "native-source-close" ? await openFixture() : forward;
   const operation = persist(fixture, { id, ...command }, options);
   await expect(operation.result).rejects.toThrow(
@@ -343,6 +368,18 @@ it.each([
   );
   assertRows(second, id);
   expect(operation.receipts).toEqual([]);
+  if (id === "expired") {
+    expect(warn).toHaveBeenCalledWith(
+      "Source fence admission deadline",
+      expect.objectContaining({
+        decision: 0,
+        deadlineExpired: true,
+        callerAborted: false,
+        destinationAborted: false,
+        sourceAborted: [false],
+      }),
+    );
+  }
   if (fixture !== forward) {
     await fixture.broker.close();
   }

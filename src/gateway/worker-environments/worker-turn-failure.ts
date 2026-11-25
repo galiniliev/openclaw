@@ -1,4 +1,6 @@
+import { readErrorStackFrames } from "../../infra/error-graph-internal.js";
 import { logWarn } from "../../logger.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { assertRepositoryWorkspaceDiskIdentity } from "../../state/session-repository-workspaces.authority.js";
 import { WORKER_ADMISSION_DEADLINE_MS } from "../../worker/worker-connection-contract.js";
@@ -94,7 +96,35 @@ export async function prepareWorkerTurnFailure(
         !isCurrentPlacementTurnClaim(current, claim) ||
         !isExactAttachedEnvironment(environment, current)
       ) {
-        throw new Error("Failed retained worker lost its exact workspace recovery owner");
+        const failure = new Error(
+          "Failed retained worker lost its exact workspace recovery owner",
+          {
+            cause: error,
+          },
+        );
+        try {
+          createSubsystemLogger("gateway/worker-turn").warn("Workspace recovery owner changed", {
+            sessionId: claim.sessionId,
+            runId: claim.runId,
+            claimId: claim.claimId,
+            expectedGeneration: placement.generation,
+            currentGeneration: current?.generation,
+            currentState: current?.state,
+            expectedEnvironmentId: placement.environmentId,
+            currentEnvironmentId: current?.environmentId,
+            expectedOwnerEpoch: placement.activeOwnerEpoch,
+            currentOwnerEpoch: current?.activeOwnerEpoch,
+            currentClaimId: current?.turnClaim?.claimId,
+            environmentState: environment?.state,
+            environmentOwnerEpoch: environment?.ownerEpoch,
+            attachedSessionIds: environment?.attachedSessionIds,
+            destroyRequestedAtMs: environment?.destroyRequestedAtMs,
+            errorStacks: readErrorStackFrames(failure),
+          });
+        } catch {
+          // Diagnostics must preserve the recovery refusal and its original cause.
+        }
+        throw failure;
       }
       assertRepositoryWorkspaceDiskIdentity(diskAuthority, environment);
     };

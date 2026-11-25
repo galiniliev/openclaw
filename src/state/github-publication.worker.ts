@@ -86,7 +86,9 @@ function assertMutationSource(
       row.session_key !== selector.sessionKey ||
       row.agent_id !== selector.agentId
     ) {
-      throw new Error("GitHub publication transition source session changed.");
+      throw Object.assign(new Error("GitHub publication transition source session changed."), {
+        code: "GITHUB_PUBLICATION_TRANSITION_SESSION",
+      });
     }
   }
   if (result.kind === "repository") {

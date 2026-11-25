@@ -43,22 +43,33 @@ function worktreeFacts(row: ManagedWorktreeRecord | undefined) {
   );
 }
 
-function isGitHubPublicationSourceCurrent(
+function describeGitHubPublicationSourceChange(
   selector: GitHubPublicationSourceSelector,
   { entry, repositoryWorkspace }: GitHubPublicationSourceFacts,
-): boolean {
-  return (
-    entry?.sessionId === selector.sessionId &&
-    (entry.lifecycleRevision ?? null) === selector.lifecycleRevision &&
-    entry.archivedAt === undefined &&
-    (selector.repositoryWorkspaceId === undefined ||
-      (entry.repositoryWorkspaceId === selector.repositoryWorkspaceId &&
-        repositoryWorkspace?.workspaceId === selector.repositoryWorkspaceId &&
-        repositoryWorkspace.agentId === selector.agentId &&
-        repositoryWorkspace.sessionKey === selector.sessionKey &&
-        (selector.repositoryBranch === undefined ||
-          repositoryWorkspace.branch === selector.repositoryBranch)))
-  );
+): string | undefined {
+  if (entry?.sessionId !== selector.sessionId) {
+    return "SESSION_ID";
+  }
+  if ((entry.lifecycleRevision ?? null) !== selector.lifecycleRevision) {
+    return "LIFECYCLE_REVISION";
+  }
+  if (entry.archivedAt !== undefined) {
+    return "ARCHIVED";
+  }
+  if (
+    selector.repositoryWorkspaceId !== undefined &&
+    !(
+      entry.repositoryWorkspaceId === selector.repositoryWorkspaceId &&
+      repositoryWorkspace?.workspaceId === selector.repositoryWorkspaceId &&
+      repositoryWorkspace.agentId === selector.agentId &&
+      repositoryWorkspace.sessionKey === selector.sessionKey &&
+      (selector.repositoryBranch === undefined ||
+        repositoryWorkspace.branch === selector.repositoryBranch)
+    )
+  ) {
+    return "REPOSITORY_BINDING";
+  }
+  return undefined;
 }
 
 function readSessionFacts(
@@ -101,8 +112,11 @@ export function readGitHubPublicationSourceFacts(
       selector.repositoryWorkspaceId,
     );
   }
-  if (!isGitHubPublicationSourceCurrent(selector, facts)) {
-    throw new Error("GitHub publication session changed.");
+  const changed = describeGitHubPublicationSourceChange(selector, facts);
+  if (changed) {
+    throw Object.assign(new Error("GitHub publication session changed."), {
+      code: `GITHUB_PUBLICATION_SOURCE_${changed}`,
+    });
   }
   if (selector.profileId) {
     const identity = selectUserProfileIdentityInDatabase(stateDb, selector.profileId);

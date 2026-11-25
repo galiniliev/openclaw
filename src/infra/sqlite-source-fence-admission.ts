@@ -1,3 +1,5 @@
+import { createSubsystemLogger } from "../logging/subsystem.js";
+import { extractErrorCode } from "./errors.js";
 import {
   SOURCE_FENCE_ACCEPTED,
   SOURCE_FENCE_READY,
@@ -47,6 +49,29 @@ export function createSqliteSourceFenceAdmission(options: {
   return (operation) => {
     const decision = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
     const signals = new Set([options.signal, ...owners.map((owner) => owner.signal)]);
+    const report = (reason: "revoked" | "deadline") => {
+      try {
+        createSubsystemLogger("infra/source-fence").warn(`Source fence admission ${reason}`, {
+          destinationIncarnation: destination.incarnation,
+          sourceIncarnations: identities.slice(1).map((identity) => identity.incarnation),
+          decision: Atomics.load(decision, 0),
+          deadlineExpired: process.hrtime.bigint() >= options.deadlineNs,
+          callerAborted: options.signal.aborted,
+          destinationAborted: options.destination.signal.aborted,
+          sourceAborted: options.sources.map((owner) => owner.signal.aborted),
+          abortCodes: [...signals]
+            .filter((signal) => signal.aborted)
+            .map((signal) => {
+              const code = extractErrorCode(signal.reason);
+              return typeof code === "string" && code.startsWith("GITHUB_PUBLICATION_")
+                ? code
+                : "unclassified";
+            }),
+        });
+      } catch {
+        // Diagnostics never change admission, cancellation or native settlement.
+      }
+    };
     const revoke = () => {
       for (;;) {
         const current = Atomics.load(decision, 0);
@@ -54,6 +79,9 @@ export function createSqliteSourceFenceAdmission(options: {
           return;
         }
         if (Atomics.compareExchange(decision, 0, current, SOURCE_FENCE_REVOKED) === current) {
+          if ([...signals].some((signal) => signal.aborted)) {
+            report("revoked");
+          }
           return;
         }
       }
@@ -66,6 +94,7 @@ export function createSqliteSourceFenceAdmission(options: {
         Atomics.load(decision, 0) === SOURCE_FENCE_REVOKED ||
         process.hrtime.bigint() >= options.deadlineNs
       ) {
+        report(Atomics.load(decision, 0) === SOURCE_FENCE_REVOKED ? "revoked" : "deadline");
         throw new SqliteWorkerError("SQLite source fence authority expired", "closed");
       }
       for (const owner of owners) {
@@ -112,6 +141,7 @@ export function createSqliteSourceFenceAdmission(options: {
               Atomics.compareExchange(decision, 0, SOURCE_FENCE_WAITING, SOURCE_FENCE_READY) !==
               SOURCE_FENCE_WAITING
             ) {
+              report("revoked");
               throw new SqliteWorkerError("SQLite source fence authority expired", "closed");
             }
           })
