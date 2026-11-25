@@ -54,6 +54,7 @@ import {
 import { executeWorkerSessionSend } from "./worker-session-tool-send.js";
 import {
   createWorkerSessionToolSourceRunner,
+  withWorkerCaller,
   prepareWorkerSessionChildDispatch,
   prepareWorkerSessionToolRequest,
   type WorkerSessionToolAuthority,
@@ -684,10 +685,9 @@ export async function createWorkerGatewayTools(
   const adapterNames = new Set(adapters.map((tool) => tool.name));
   const runWithSource = createWorkerSessionToolSourceRunner(params);
   const retainWorkshopCall = createWorkerWorkshopCallRetention();
-  const tools = [...adapters, presence, ...(params.skillLibrary ? [params.skillLibrary] : [])];
-  const preparedTools = await (params.prepareTools?.(tools) ?? tools);
-  capability.receiptAuthority();
-  return preparedTools.map((tool) => {
+  let tools = [...adapters, presence, ...(params.skillLibrary ? [params.skillLibrary] : [])];
+  tools = await withWorkerCaller(capability, params, () => params.prepareTools?.(tools) ?? tools);
+  return tools.map((tool) => {
     if (getAgentToolExecutionLocation(tool).kind === "placement" || adapterNames.has(tool.name)) {
       return tool;
     }

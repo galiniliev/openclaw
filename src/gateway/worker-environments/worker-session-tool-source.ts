@@ -31,7 +31,11 @@ import type { GatewayContextResolver } from "../server-methods/types.js";
 import type { WorkerConnectionIdentity } from "./connection-identity.js";
 import type { WorkerEnvironmentRecord } from "./environment-record.js";
 import type { WorkerSessionPlacementStore, WorkerSessionTurnClaim } from "./placement-store.js";
-import { getWorkerTurnExecutionIdentityCapability } from "./placement-turn-claim-events.js";
+import {
+  getWorkerTurnExecutionIdentityCapability,
+  type WorkerTurnExecutionIdentity,
+  type WorkerTurnExecutionIdentityCapability,
+} from "./placement-turn-claim-events.js";
 import type {
   WorkerPlacementDispatchRequest,
   WorkerPlacementDispatchContract,
@@ -183,6 +187,33 @@ export async function prepareWorkerSessionChildForSend(
   await assertChild();
 }
 
+/** Construction and invocation share the same admitted worker caller. */
+export function withWorkerCaller<T>(
+  capability: WorkerTurnExecutionIdentityCapability,
+  params: {
+    resolveGatewayContext: GatewayContextResolver;
+    assertCurrent?: () => void;
+    signal?: AbortSignal;
+  },
+  run: (owner: WorkerTurnExecutionIdentity) => T | Promise<T>,
+): Promise<T> {
+  // The owner rechecks its receiptAuthority before and after the awaited callback.
+  return capability.run((owner) =>
+    withGatewayToolCallerIdentity(
+      {
+        ...owner,
+        gatewayContextResolver: params.resolveGatewayContext,
+        approvalAuthority: owner.delegatedAuthority,
+        receiptAuthority: params.assertCurrent ?? owner.receiptAuthority,
+        workerTurnClaim: owner.turnClaim,
+        workerTurnExecutionIdentityCapability: capability,
+        ...(params.signal ? { approvalSignals: [params.signal] } : {}),
+      },
+      () => run(owner),
+    ),
+  );
+}
+
 export function createWorkerSessionToolSourceRunner(params: {
   resolveGatewayContext: GatewayContextResolver;
   placements: WorkerSessionPlacementStore;
@@ -232,117 +263,112 @@ export function createWorkerSessionToolSourceRunner(params: {
       targetSessionKey: operation.source.sessionKey,
       ...(operation.request.signal ? { signal: operation.request.signal } : {}),
       run: () =>
-        capability.run((owner) =>
-          withGatewayToolCallerIdentity(
-            {
-              ...owner,
-              gatewayContextResolver: params.resolveGatewayContext,
-              approvalAuthority: owner.delegatedAuthority,
-              receiptAuthority: assertToolCurrent,
-              workerTurnClaim: owner.turnClaim,
-              workerTurnExecutionIdentityCapability: capability,
-              ...(operation.request.signal ? { approvalSignals: [operation.request.signal] } : {}),
-            },
-            async () => {
-              const assertSource = composeSessionSourceAssertion(
-                [assertToolCurrent],
-                (assertCurrent) => {
-                  assertCurrent();
-                  const source = operation.source;
-                  if (source.agentId !== owner.agentId || source.sessionKey !== owner.sessionKey) {
-                    throw new Error("Worker source turn owner changed");
+        withWorkerCaller(
+          capability,
+          {
+            resolveGatewayContext: params.resolveGatewayContext,
+            assertCurrent: assertToolCurrent,
+            signal: operation.request.signal,
+          },
+          async (owner) => {
+            const assertSource = composeSessionSourceAssertion(
+              [assertToolCurrent],
+              (assertCurrent) => {
+                assertCurrent();
+                const source = operation.source;
+                if (source.agentId !== owner.agentId || source.sessionKey !== owner.sessionKey) {
+                  throw new Error("Worker source turn owner changed");
+                }
+              },
+            );
+            const callGateway = async <R = Record<string, unknown>>(
+              request: Parameters<AgentToolGatewayRequestCaller>[0],
+              sessionSpawnContext?: ReturnType<typeof buildSubagentExecutionSessionSpawnContext>,
+            ): Promise<R> => {
+              assertSource();
+              return await capability.run(() =>
+                callAgentToolGatewayRequest<R>(
+                  withAgentToolGatewayRuntimeIdentity(
+                    {
+                      ...request,
+                      ...(operation.request.signal ? { signal: operation.request.signal } : {}),
+                    },
+                    {
+                      kind: "agentRuntime",
+                      agentId: owner.agentId,
+                      sessionKey: owner.sessionKey,
+                      operationalRunInstance: owner.operationalRunInstance,
+                      delegatedAuthority: {
+                        kind: "worker",
+                        ...owner.delegatedAuthority,
+                        turnClaim: owner.turnClaim,
+                      },
+                      executionIdentity: owner.executionIdentityToken,
+                      sessionSpawnContext,
+                    },
+                  ),
+                ),
+              );
+            };
+            assertSource();
+            const startedAt = Date.now();
+            const request = operation.request;
+            let result: AgentToolResult<unknown> | undefined;
+            let errorMessage: string | undefined;
+            try {
+              const sourceTool =
+                typeof request.tool === "function"
+                  ? request.tool({
+                      assertSource,
+                      callGateway,
+                      collectExecutionIdentity: owner.executionIdentityToken !== undefined,
+                    })
+                  : request.tool;
+              const tool = rewrapToolWithBeforeToolCallHook(
+                bindAgentToolSourceExecutionGuard(sourceTool, assertSource),
+                getBeforeToolCallHookContext(sourceTool) ?? {
+                  ...operation.source,
+                  config: getRuntimeConfig(),
+                  runId: request.identity.runId ?? undefined,
+                },
+                request.approvalMode ? { approvalMode: request.approvalMode } : {},
+              );
+              result = await runWithToolExecutionValidation(
+                request.request.toolCallId,
+                (args) => {
+                  // Bound adapters validate and narrow rewrites at their protocol owner.
+                  if (typeof request.tool !== "function" && !Value.Check(tool.parameters, args)) {
+                    throw new Error(`Invalid ${request.toolName} arguments`);
                   }
                 },
-              );
-              const callGateway = async <R = Record<string, unknown>>(
-                request: Parameters<AgentToolGatewayRequestCaller>[0],
-                sessionSpawnContext?: ReturnType<typeof buildSubagentExecutionSessionSpawnContext>,
-              ): Promise<R> => {
-                assertSource();
-                return await capability.run(() =>
-                  callAgentToolGatewayRequest<R>(
-                    withAgentToolGatewayRuntimeIdentity(
-                      {
-                        ...request,
-                        ...(operation.request.signal ? { signal: operation.request.signal } : {}),
-                      },
-                      {
-                        kind: "agentRuntime",
-                        agentId: owner.agentId,
-                        sessionKey: owner.sessionKey,
-                        operationalRunInstance: owner.operationalRunInstance,
-                        delegatedAuthority: {
-                          kind: "worker",
-                          ...owner.delegatedAuthority,
-                          turnClaim: owner.turnClaim,
-                        },
-                        executionIdentity: owner.executionIdentityToken,
-                        sessionSpawnContext,
-                      },
-                    ),
+                () =>
+                  tool.execute(
+                    request.request.toolCallId,
+                    request.request.arguments,
+                    request.signal,
+                    request.onUpdate,
                   ),
-                );
-              };
+              );
               assertSource();
-              const startedAt = Date.now();
-              const request = operation.request;
-              let result: AgentToolResult<unknown> | undefined;
-              let errorMessage: string | undefined;
-              try {
-                const sourceTool =
-                  typeof request.tool === "function"
-                    ? request.tool({
-                        assertSource,
-                        callGateway,
-                        collectExecutionIdentity: owner.executionIdentityToken !== undefined,
-                      })
-                    : request.tool;
-                const tool = rewrapToolWithBeforeToolCallHook(
-                  bindAgentToolSourceExecutionGuard(sourceTool, assertSource),
-                  getBeforeToolCallHookContext(sourceTool) ?? {
-                    ...operation.source,
-                    config: getRuntimeConfig(),
-                    runId: request.identity.runId ?? undefined,
-                  },
-                  request.approvalMode ? { approvalMode: request.approvalMode } : {},
-                );
-                result = await runWithToolExecutionValidation(
-                  request.request.toolCallId,
-                  (args) => {
-                    // Bound adapters validate and narrow rewrites at their protocol owner.
-                    if (typeof request.tool !== "function" && !Value.Check(tool.parameters, args)) {
-                      throw new Error(`Invalid ${request.toolName} arguments`);
-                    }
-                  },
-                  () =>
-                    tool.execute(
-                      request.request.toolCallId,
-                      request.request.arguments,
-                      request.signal,
-                      request.onUpdate,
-                    ),
-                );
-                assertSource();
-                return result;
-              } catch (error) {
-                errorMessage = errorResult(error).details.error;
-                throw error;
-              } finally {
-                void runAgentHarnessAfterToolCallHook({
-                  toolName: request.toolName,
-                  toolCallId: request.request.toolCallId,
-                  runId: request.identity.runId ?? undefined,
-                  agentId: owner.agentId,
-                  sessionKey: owner.sessionKey,
-                  sessionId: operation.source.sessionId,
-                  startArgs,
-                  result,
-                  error: errorMessage,
-                  startedAt,
-                });
-              }
-            },
-          ),
+              return result;
+            } catch (error) {
+              errorMessage = errorResult(error).details.error;
+              throw error;
+            } finally {
+              void runAgentHarnessAfterToolCallHook({
+                toolName: request.toolName,
+                toolCallId: request.request.toolCallId,
+                runId: request.identity.runId ?? undefined,
+                agentId: owner.agentId,
+                sessionKey: owner.sessionKey,
+                sessionId: operation.source.sessionId,
+                startArgs,
+                result,
+                error: errorMessage,
+                startedAt,
+              });
+            }
+          },
         ),
     });
   };
