@@ -1,6 +1,8 @@
 import { resolveGitHubHost } from "../agents/github-host-runtime.js";
 import type { PreparedGitHubPublicationIdentity } from "../agents/github-tool-identity.js";
+import { retryAsync } from "../infra/retry.js";
 import { createGitHubPublicationReadEnvironment } from "./github-publication-command-env.js";
+import { GitHubPublicationApiError } from "./github-publication-failure.js";
 import {
   githubPublicationApiArgs,
   runPublicationCommand,
@@ -67,20 +69,32 @@ export async function requestGitHubPublicationJson(
   maxOutputBytes?: number,
 ): Promise<unknown> {
   assertCurrent();
-  const raw = await requirePublicationCommand(
-    githubPublicationApiArgs(
-      endpoint,
-      body === undefined ? "GET" : "POST",
-      identity.host ?? resolveGitHubHost(),
-    ),
-    {
-      env: identity.env,
-      apiCredentialSource: identity.source,
-      ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
-      beforeRun: assertCurrent,
-      ...(body === undefined ? {} : { input: JSON.stringify(body) }),
-    },
+  // Object creation is content-addressed. Keep the original target and exact body
+  // bytes across the one permitted retry; ref/PR/commit operations are not replayed.
+  const args = githubPublicationApiArgs(
+    endpoint,
+    body === undefined ? "GET" : "POST",
+    identity.host ?? resolveGitHubHost(),
   );
+  const options = {
+    env: identity.env,
+    apiCredentialSource: identity.source,
+    ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
+    beforeRun: assertCurrent,
+    ...(body === undefined ? {} : { input: JSON.stringify(body) }),
+  };
+  const raw = await retryAsync(() => requirePublicationCommand(args, options), {
+    attempts: 2,
+    minDelayMs: 0,
+    shouldRetry: (error) =>
+      error instanceof GitHubPublicationApiError &&
+      error.transport.httpStatus === 502 &&
+      error.transport.method === "POST" &&
+      (error.transport.endpointKind === "blob" || error.transport.endpointKind === "tree") &&
+      error.transport.termination === "exit" &&
+      !error.transport.killed &&
+      error.transport.signal === null,
+  });
   assertCurrent();
   return JSON.parse(raw);
 }
