@@ -39,6 +39,7 @@ import {
 import { projectGitHubPublicationResult } from "./github-publication-receipt.js";
 import { readRepositoryGitHubPublicationInputAsync } from "./github-publication-store-async.js";
 import type { RepositoryGitHubPublicationExecutionAsync } from "./github-publication-store-async.js";
+import { createGitHubPublicationTree } from "./github-publication-tree-write.js";
 import { createGitHubPublicationTreeMetadata } from "./github-publication-trees.js";
 import {
   hasRepositoryGitHubPublicationWorkflowChanges,
@@ -527,26 +528,10 @@ export async function executeRepositoryGitHubPublication(params: {
       });
       stage = "tree-and-commit";
       reportProgress();
-      const createTree = async (value: GitHubRepositoryPublicationSnapshot) => {
-        const tree =
-          value.entries.length === 0
-            ? value.baseTree
-            : objectSha(
-                await api(endpoint + "trees", identity, assertAction, {
-                  base_tree: value.baseTree,
-                  tree: value.entries.map((entry) => ({
-                    ...entry,
-                    type: entry.mode === "160000" ? "commit" : "blob",
-                  })),
-                }),
-              );
-        if (tree !== value.workspaceTree) {
-          throw new GitHubPublicationWorkspaceChangedError(
-            "GitHub publication normalized tree changed.",
-          );
-        }
-        return tree;
-      };
+      const createTree = (value: GitHubRepositoryPublicationSnapshot) =>
+        createGitHubPublicationTree(value, async (body) =>
+          objectSha(await api(endpoint + "trees", identity, assertAction, body)),
+        );
       const author = {
         name: identity.account.login,
         email:
