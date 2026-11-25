@@ -5,10 +5,15 @@ import { expect, it, vi } from "vitest";
 import { managedWorktrees } from "../../agents/worktrees/service.js";
 import { getRuntimeConfig } from "../../config/config.js";
 import * as sessionEntries from "../../config/sessions/session-accessor.js";
+import { executeSqliteQuerySync, getNodeSqliteKysely } from "../../infra/kysely-sync.js";
 import type { WorkerRetentionObservation } from "../../plugins/worker-retention.types.js";
 import * as cloneRuntime from "../../projects/project-clone-runtime.js";
 import { registerClonedProjectRegistry } from "../../projects/project-registry.test-support.js";
-import { openOpenClawStateDatabase } from "../../state/openclaw-state-db.js";
+import type { DB } from "../../state/openclaw-state-db.generated.js";
+import {
+  openOpenClawStateDatabase,
+  runOpenClawStateWriteTransaction,
+} from "../../state/openclaw-state-db.js";
 import { createTestGatewayScheduler } from "../../test-utils/gateway-scheduler-clock.js";
 import { sendAuthorizationRequest } from "../server-methods.authorization.test-support.js";
 import { createGatewayWorkerPlacementMoveBarrier } from "../server-worker-placement-move-barrier.js";
@@ -47,6 +52,8 @@ const url = "https://github.com/synthetic/disk-move-fixture.git";
 
 it.each([
   "complete",
+  "uncaptured",
+  "uncaptured-recovery",
   "paused",
   "paused-refresh",
   "paused-recovery",
@@ -66,15 +73,34 @@ it.each([
 ] as const)("sessions.move preserves disk custody through %s", async (scenario) => {
   const incognito = scenario.startsWith("incognito");
   const paused = scenario.startsWith("paused");
-  const boundary = scenario.startsWith("paused-recovery")
-    ? "before-export"
-    : scenario === "incognito" || paused
-      ? "complete"
-      : scenario === "incognito-revoked"
-        ? "revoked"
-        : scenario;
+  const uncaptured = scenario.startsWith("uncaptured");
+  const boundary =
+    scenario.startsWith("paused-recovery") || scenario === "uncaptured-recovery"
+      ? "before-export"
+      : scenario === "incognito" || paused || uncaptured
+        ? "complete"
+        : scenario === "incognito-revoked"
+          ? "revoked"
+          : scenario;
   const f = await fixture("remote-exec", false, incognito, url);
-  const repository = await f.bindDisk();
+  let repository = await f.bindDisk();
+  if (uncaptured) {
+    // Same retained-recovery shape as worker-turn-repository-disk.test.ts: the
+    // pinned baseline and original disk survive without a current mirror.
+    runOpenClawStateWriteTransaction(({ db }) => {
+      executeSqliteQuerySync(
+        db,
+        getNodeSqliteKysely<DB>(db)
+          .updateTable("session_repository_workspaces")
+          .set({ checkpoint_ref: null, manifest_hash: null })
+          .where("workspace_id", "=", repository.workspaceId),
+      );
+    });
+    repository = (await f.store.get(repository.workspaceId))!;
+    expect(repository).toMatchObject({ checkpointRef: null, manifestHash: null });
+    expect(repository.baseCommit).toBeTruthy();
+    expect(repository.baseManifestHash).toBeTruthy();
+  }
   assert(repository.diskAuthority);
   await registerClonedProjectRegistry({ path: f.origin, name: "Fixture", originUrl: url });
   vi.spyOn(cloneRuntime, "readProjectCheckoutRemoteHead").mockResolvedValue(undefined);
@@ -323,8 +349,10 @@ it.each([
         },
       },
     );
+    // Optional RPC metadata is not part of the success/result/error contract.
+    const responses = respond.mock.calls.map((call) => call.slice(0, 3));
     if (boundary === "complete") {
-      expect(respond.mock.calls).toEqual([
+      expect(responses).toEqual([
         [
           true,
           expect.objectContaining({ placement: expect.objectContaining({ state: "local" }) }),
@@ -332,7 +360,7 @@ it.each([
         ],
       ]);
     } else {
-      expect(respond.mock.calls).toEqual([
+      expect(responses).toEqual([
         [
           false,
           undefined,
