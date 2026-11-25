@@ -6,8 +6,10 @@ import {
 import type { EngineConnection } from "../../infra/sql-connection.js";
 import { assertRepositoryWorkspaceDiskIdentity } from "../../state/session-repository-workspaces.authority.js";
 import { normalizeWorkerDesktopEndpoint } from "./desktop-endpoint.js";
+import { hasForcedWorkerEnvironmentAbandonment } from "./environment-errors.js";
 import type { WorkerEnvironmentRecord } from "./environment-record.js";
 import { workerPlacementMoveFromRow } from "./placement-move-row-codec.js";
+import { FORCED_WORKER_ABANDONMENT_ERROR } from "./placement-record.js";
 import {
   isCurrentWorkerWorkspacePendingResultOwner,
   isRepositoryDiskGatewayMoveResult,
@@ -170,6 +172,39 @@ export function createWorkerEnvironmentTransitionOps(db: EngineConnection, now: 
         current.ownerEpoch !== input.expectedOwnerEpoch
       ) {
         throw new Error(`Worker environment ${environmentId} owner epoch changed`);
+      }
+      if (input.forceDiscardOnly) {
+        if (from !== "attached" || to !== "draining") {
+          throw new Error("Forced cleanup custody transfer requires an attached owner");
+        }
+        const owners = executeSqliteQuerySync(
+          db,
+          queryWorkerEnvironmentStore(db)
+            .selectFrom("worker_session_placements")
+            .select([
+              "session_id",
+              "state",
+              "active_owner_epoch",
+              "turn_claim_id",
+              "recovery_error",
+            ])
+            .where("environment_id", "=", environmentId),
+        ).rows;
+        const owner = owners.length === 1 ? owners[0] : undefined;
+        if (
+          current.sharedHost !== false ||
+          !current.nodeDeviceId ||
+          !current.resourceReceipt ||
+          !hasForcedWorkerEnvironmentAbandonment(current) ||
+          !owner ||
+          owner.session_id !== current.attachedSessionIds[0] ||
+          owner.active_owner_epoch !== current.ownerEpoch ||
+          owner.state !== "failed" ||
+          owner.turn_claim_id !== null ||
+          owner.recovery_error !== FORCED_WORKER_ABANDONMENT_ERROR
+        ) {
+          return current;
+        }
       }
       if (to === "attached") {
         if (current.destroyRequestedAtMs !== null) {

@@ -3,7 +3,10 @@ import { parseCronRunScopeSuffix } from "../../sessions/session-key-utils.js";
 import { DEVICE_WORKER_PROVIDER_ID } from "./device-provider-identity.js";
 import type { WorkerEnvironmentRecord } from "./environment-record.js";
 import type { WorkerEnvironmentPlacementFacts } from "./placement-read-projection.types.js";
-import type { WorkerSessionPlacementRecord } from "./placement-record.js";
+import {
+  isForceAbandonedWorkerPlacement,
+  type WorkerSessionPlacementRecord,
+} from "./placement-record.js";
 import type {
   WorkerSessionPlacementRetirement,
   WorkerSessionPlacementStore,
@@ -106,6 +109,40 @@ function isWorkerPlacementSafeForMutation(
     });
   }
   return placement.state === "local" || placement.state === "reclaimed";
+}
+
+/** Forced discard can retire a conversation while its dedicated lease stays owned for cleanup. */
+function isWorkerPlacementSafeForDeletion(
+  context: SessionWorkerPlacementContext,
+  placement: Placement,
+): placement is RetirablePlacement {
+  if (placement.state !== "failed") {
+    return isWorkerPlacementSafeForMutation(context, placement);
+  }
+  if (
+    isFailedWorkerPlacementEnvironmentGone({
+      environmentService: context.workerEnvironmentService,
+      placement,
+    })
+  ) {
+    return true;
+  }
+  if (
+    !isForceAbandonedWorkerPlacement(placement) ||
+    placement.turnClaim ||
+    !placement.environmentId
+  ) {
+    return false;
+  }
+  const environment = context.workerEnvironmentService?.get(placement.environmentId);
+  return Boolean(
+    environment?.state === "destroying" &&
+    environment.sharedHost === false &&
+    environment.nodeDeviceId &&
+    environment.resourceReceipt &&
+    environment.attachedSessionIds.length === 0 &&
+    environment.destroyRequestedAtMs !== null,
+  );
 }
 
 export function resolveWorkerPlacementArchiveRestoreError(params: {
@@ -245,13 +282,16 @@ function samePlacementOwner(
 function createSessionWorkerPlacementMutationCheck(
   params: Pick<SessionWorkerPlacementMutationParams, "context" | "sessionId">,
   expected: Placement | undefined,
-  operation: "mutation" | "retirement" = "mutation",
+  operation: "mutation" | "deletion" | "retirement" = "mutation",
 ) {
   const assertPlacement = (current: Placement | undefined) => {
     if (
       !samePlacementOwner(expected, current) ||
       current?.turnClaim ||
-      (current && !isWorkerPlacementSafeForMutation(params.context, current))
+      (current &&
+        !(operation !== "mutation"
+          ? isWorkerPlacementSafeForDeletion(params.context, current)
+          : isWorkerPlacementSafeForMutation(params.context, current)))
     ) {
       throw new Error(`Worker session placement ${params.sessionId} changed before ${operation}`);
     }
@@ -279,6 +319,16 @@ export async function prepareSessionWorkerPlacementMutationCheckAsync(
   return createSessionWorkerPlacementMutationCheck(
     params,
     await readSessionWorkerPlacementAsync(params),
+  );
+}
+
+export async function prepareSessionWorkerPlacementDeletionCheckAsync(
+  params: Pick<SessionWorkerPlacementMutationParams, "context" | "sessionId">,
+) {
+  return createSessionWorkerPlacementMutationCheck(
+    params,
+    await readSessionWorkerPlacementAsync(params),
+    "deletion",
   );
 }
 
@@ -337,7 +387,7 @@ export async function prepareSessionWorkerPlacementRetirement(
         return;
       }
       assertCurrent();
-      if (expected && retire && isWorkerPlacementSafeForMutation(params.context, expected)) {
+      if (expected && retire && isWorkerPlacementSafeForDeletion(params.context, expected)) {
         await retire({
           sessionId: expected.sessionId,
           expectedState: expected.state,
@@ -398,6 +448,7 @@ export async function prepareSessionWorkerPlacementStop(params: {
       !expected ||
       (params.action === "archive" && expected.state === "failed") ||
       isWorkerPlacementSafeForMutation(context, expected) ||
+      (params.action === "delete" && isWorkerPlacementSafeForDeletion(context, expected)) ||
       !sessionId
     ) {
       return;

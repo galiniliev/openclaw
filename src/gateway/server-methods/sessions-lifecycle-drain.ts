@@ -34,6 +34,7 @@ import type { WorkerWorkspacePendingResult } from "../worker-environments/placem
 import {
   prepareSessionWorkerPlacementArchiveCheckAsync,
   prepareSessionWorkerPlacementMutationCheckAsync,
+  prepareSessionWorkerPlacementDeletionCheckAsync,
   prepareSessionWorkerPlacementStop,
   readSessionWorkerPlacementAsync,
 } from "../worker-environments/session-placement-lifecycle.js";
@@ -345,7 +346,9 @@ export async function prepareSessionLifecycleDrain(
     const assertPlacementCurrent =
       params.action === "archive"
         ? (await prepareSessionWorkerPlacementArchiveCheckAsync(placementTarget)).assertCurrent
-        : await prepareSessionWorkerPlacementMutationCheckAsync(placementTarget);
+        : params.action === "delete"
+          ? await prepareSessionWorkerPlacementDeletionCheckAsync(placementTarget)
+          : await prepareSessionWorkerPlacementMutationCheckAsync(placementTarget);
     return {
       // Only the caller's active mutation may replace this mutex-free ingress lease.
       handoffToMutation: () => releaseAdmissions(),

@@ -32,6 +32,8 @@ export type CredentialRevocationInput = {
   expectedOwnerEpoch?: number;
 };
 export type TransitionInput = {
+  /** Transfer only eligible explicit discard; an ineligible owner retains its current state. */
+  forceDiscardOnly?: true;
   assertCurrent?: () => void;
   environmentId: string;
   from: WorkerEnvironmentState;

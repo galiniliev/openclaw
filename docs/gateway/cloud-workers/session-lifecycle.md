@@ -38,7 +38,11 @@ For a dedicated, receipt-bound environment, an explicit administrative
 `environments.destroy` request with `force: true` discards its repository-disk
 custody without exporting private disk contents. Accepted Git checkpoints and
 refs remain intact until normal session deletion. The same request can finish
-discarding custody after the environment has already been destroyed. Shared or
+discarding custody after the environment has already been destroyed. Once forced
+discard ends a dedicated, single-session environment's execution ownership, the session can be
+deleted even if provider cleanup fails. The environment remains in `destroying`
+with its exact lease, resource receipt, destroy intent, and cleanup error until
+the existing cleanup owner confirms physical deletion. Shared or
 unknown hosts retain their existing stop-confirmation requirements.
 
 Compute windows are finite and never renewed by activity. Maintenance may close
@@ -271,7 +275,7 @@ Archiving hides the session immediately in the Control UI while the Gateway reco
 
 Undo can restore visibility while failed-worker cleanup remains pending when the retained checkout needs no reconstruction. This does not restart the worker or discard its cleanup state. Actual checkout restoration and session deletion keep their stronger cleanup requirements. After an archive is recorded, a worktree-cleanup failure is deferred and logged; it does not turn the saved archive into a failed request. Garbage collection preserves worktrees with unresolved worker ownership and retries eligible cleanup later.
 
-Deleting a non-main cloud-worker session still stops and reclaims its worker before removing session or recovery state. Active workers receive final workspace reconciliation, and pending provisioning or failed-worker cleanup must settle before deletion succeeds. Restoring a reclaimed session retains placement metadata so the next turn can dispatch a fresh worker with the same workspace profile.
+Ordinary deletion of a non-main cloud-worker session stops and reclaims its worker before removing session or recovery state. Active workers receive final workspace reconciliation, and pending provisioning or failed-worker cleanup must settle before deletion succeeds. An explicit administrative forced discard can instead transfer a dedicated, receipt-bound single-session environment to cleanup custody before deleting the session; it does not confirm that the resource was destroyed. Restoring a reclaimed session retains placement metadata so the next turn can dispatch a fresh worker with the same workspace profile.
 
 When a single-session Delete or Archive is blocked by unsynced work on an offline device, the Control UI offers a separate loss confirmation. Reconnect the device to preserve its changes, or explicitly discard the unsynced device files and in-flight work. After confirmed recovery to the Gateway, the UI retries the requested removal once. Cancel keeps the pending result intact. Batch actions never confirm loss for the whole selection; recover each affected session separately before retrying the selection.
 

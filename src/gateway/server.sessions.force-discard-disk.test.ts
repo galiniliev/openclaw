@@ -25,9 +25,9 @@ import { createWorkerEnvironmentStore } from "./worker-environments/store.js";
 
 const { createSessionStoreDir } = setupGatewaySessionsHandlerTestHarness();
 
-test.each([false, true])(
-  "force discards repository disk custody and deletes the completed child (already destroyed: %s)",
-  async (alreadyDestroyed) => {
+test.each(["attached", "already-destroyed", "provider-failure", "multiple-owners"] as const)(
+  "handles forced repository-child cleanup (%s)",
+  async (mode) => {
     const { dir, storePath } = await createSessionStoreDir();
     vi.stubEnv("OPENCLAW_STATE_DIR", dir);
     const database = openOpenClawStateDatabase({ env: { OPENCLAW_STATE_DIR: dir } });
@@ -87,9 +87,15 @@ test.each([false, true])(
           repositoryWorkspaceId: repository.workspaceId,
         }),
         "agent:main:protected-parent": sessionStoreEntry("protected-parent"),
+        "agent:main:other-associated": sessionStoreEntry("other-associated"),
       },
     });
-    const destroy = vi.fn(async () => {});
+    const cleanupError = "Crabbox inspect failed: strict claim identifier mismatch";
+    const destroy = vi.fn(async () => {
+      if (mode === "provider-failure" || mode === "multiple-owners") {
+        throw new Error(cleanupError);
+      }
+    });
     const provider = createProvider({ supportsResourceReceipts: true, destroy });
     const unexpected = async (): Promise<never> => {
       throw new Error("force deletion must not provision or run inference");
@@ -137,7 +143,7 @@ test.each([false, true])(
         ok: false,
         error: { message: expect.stringContaining("Move to Gateway before retirement") },
       });
-      if (alreadyDestroyed) {
+      if (mode === "already-destroyed") {
         await environments.destroy(environmentId);
         expect(environments.get(environmentId)?.state).toBe("destroyed");
         expect(placements.get(REQUEST.sessionId)).toMatchObject({
@@ -145,17 +151,47 @@ test.each([false, true])(
           activeOwnerEpoch: active.activeOwnerEpoch,
         });
       }
+      if (mode === "multiple-owners") {
+        const other = await placements.startDispatch({
+          sessionId: "other-associated",
+          sessionKey: "agent:main:other-associated",
+          agentId: "main",
+        });
+        await placements.transition({
+          sessionId: other.sessionId,
+          from: "requested",
+          to: "provisioning",
+          expectedGeneration: other.generation,
+          patch: { environmentId },
+        });
+      }
       const forced = await directSessionReq(
         "environments.destroy",
         { environmentId, force: true },
         { context },
       );
+      if (mode === "multiple-owners") {
+        expect(forced.ok).toBe(false);
+        expect(forceFailure).toMatchObject({ message: cleanupError });
+        expect(placements.get(REQUEST.sessionId)?.state).toBe("failed");
+        expect(placements.get("other-associated")?.state).toBe("failed");
+        expect(environments.get(environmentId)).toMatchObject({
+          state: "attached",
+          attachedSessionIds: [REQUEST.sessionId],
+          resourceReceipt: receipt,
+        });
+        expect(destroy).toHaveBeenCalled();
+        expect(
+          loadSessionEntry({ storePath, sessionKey: "agent:main:protected-parent" })?.sessionId,
+        ).toBe("protected-parent");
+        return;
+      }
       expect(
         forced.ok,
         forceFailure instanceof Error ? forceFailure.message : JSON.stringify(forced.error),
       ).toBe(true);
       expect(environments.get(environmentId)).toMatchObject({
-        state: "destroyed",
+        state: mode === "provider-failure" ? "destroying" : "destroyed",
         attachedSessionIds: [],
       });
       expect(placements.get(REQUEST.sessionId)).toMatchObject({ state: "failed", turnClaim: null });
@@ -183,7 +219,26 @@ test.each([false, true])(
       expect(
         loadSessionEntry({ storePath, sessionKey: "agent:main:protected-parent" })?.sessionId,
       ).toBe("protected-parent");
-      expect(destroy).toHaveBeenCalledOnce();
+      if (mode === "provider-failure") {
+        expect(environments.get(environmentId)).toMatchObject({
+          state: "destroying",
+          attachedSessionIds: [],
+          leaseId: receipt.leaseId,
+          resourceReceipt: receipt,
+          lastError: expect.stringContaining(cleanupError),
+          destroyRequestedAtMs: expect.any(Number),
+        });
+        expect(store.getCredential(environmentId)).toBeUndefined();
+        const attempts = destroy.mock.calls.length;
+        await environments.reconcileOnce(environmentId);
+        expect(destroy).toHaveBeenCalledTimes(attempts + 1);
+        expect(environments.get(environmentId)?.state).toBe("destroying");
+        destroy.mockResolvedValueOnce(undefined);
+        await environments.reconcileOnce(environmentId);
+        expect(environments.get(environmentId)?.state).toBe("destroyed");
+      } else {
+        expect(destroy).toHaveBeenCalledOnce();
+      }
     } finally {
       await environments.stop();
       vi.unstubAllEnvs();

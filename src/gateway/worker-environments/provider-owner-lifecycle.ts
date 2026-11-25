@@ -255,7 +255,9 @@ export function createWorkerProviderOwnerLifecycle(
 
   const beginDrain = async (record: WorkerEnvironmentRecord) => {
     const failurePatch =
-      record.teardownTerminalState === "failed" ? { lastError: record.lastError } : undefined;
+      record.teardownTerminalState === "failed" || hasForcedWorkerEnvironmentAbandonment(record)
+        ? { lastError: record.lastError }
+        : undefined;
     return ["bootstrapping", "ready", "attached", "idle"].includes(record.state)
       ? move(record, "draining", failurePatch)
       : record;
@@ -263,7 +265,9 @@ export function createWorkerProviderOwnerLifecycle(
 
   const beginDestroy = async (record: WorkerEnvironmentRecord) => {
     const failurePatch =
-      record.teardownTerminalState === "failed" ? { lastError: record.lastError } : undefined;
+      record.teardownTerminalState === "failed" || hasForcedWorkerEnvironmentAbandonment(record)
+        ? { lastError: record.lastError }
+        : undefined;
     const draining = await beginDrain(record);
     if (draining.state === "draining") {
       return move(draining, "destroying", failurePatch);
@@ -444,7 +448,31 @@ export function createWorkerProviderOwnerLifecycle(
     const providerOwnsMachine = r.nodeDeviceId !== null && r.sharedHost === false;
     // Early reclaim requires the session's stop acknowledgement before detaching it.
     // The destroying record retains the lease for confirmation and restart recovery.
-    const destroying = providerOwnsMachine && !acceptCleanup ? r : await beginDestroy(r);
+    // Explicit discard releases logical session ownership, not the tracked provider lease.
+    // The native transition verifies its failed placement before retiring the attachment.
+    let forcedCleanup = false;
+    if (
+      providerOwnsMachine &&
+      r.resourceReceipt &&
+      hasForcedWorkerEnvironmentAbandonment(r) &&
+      r.state === "attached"
+    ) {
+      const captured = r;
+      r = await store.transition({
+        environmentId: captured.environmentId,
+        from: "attached",
+        to: "draining",
+        expectedOwnerEpoch: captured.ownerEpoch,
+        forceDiscardOnly: true,
+        patch: { lastError: captured.lastError },
+        assertCurrent: () => {
+          requireCurrentOwner(captured);
+        },
+      });
+      forcedCleanup = r.state === "draining";
+    }
+    const destroying =
+      providerOwnsMachine && !acceptCleanup && !forcedCleanup ? r : await beginDestroy(r);
     try {
       await destroyLease(destroying, owningProvider, {
         ...lifecycleLease(destroying, leaseId),
